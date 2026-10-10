@@ -227,14 +227,6 @@ export const getTmuxServerPid = async (): Promise<number | null> => {
 };
 
 /**
- * Kill a tab's tmux session. With a `tabId`, the tab's processes — every pane
- * descendant and every process carrying `PMUX_TAB_ID=<tabId>` — are reaped
- * first, while the environ scan still sees them; the result is returned and
- * every kill is audited. The marker outlives the session, so a tab whose
- * session already ended (its shell exited: the UI closes it itself) is still
- * reaped by the marker scan.
- */
-/**
  * Close a remote tab's session with one reap script run on its host (ADR-0022
  * §9). An ssh failure throws: dropping the tab would leave its session running
  * where nobody sees it.
@@ -272,6 +264,14 @@ const killRemoteSession = async (host: string, name: string, opts: IKillSessionO
   return reap;
 };
 
+/**
+ * Kill a tab's tmux session. With a `tabId`, the tab's processes — every pane
+ * descendant and every process carrying `PMUX_TAB_ID=<tabId>` — are reaped
+ * first, while the environ scan still sees them; the result is returned and
+ * every kill is audited. The marker outlives the session, so a tab whose
+ * session already ended (its shell exited: the UI closes it itself) is still
+ * reaped by the marker scan.
+ */
 export const killSession = async (name: string, opts: IKillSessionOptions = {}): Promise<IReapResult | null> => {
   const host = await sessionHostOf(name);
   if (host) return killRemoteSession(host, name, opts);

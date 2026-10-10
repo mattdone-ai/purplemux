@@ -61,7 +61,7 @@ export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boole
   ];
 };
 
-/** ssh itself failed (no connection, refused key): nothing ran on the remote host. */
+/** ssh's own failure status. Not proof that nothing ran: a connection lost after the command started also ends in 255. */
 export const SSH_FAILURE_EXIT = 255;
 
 export interface IRemoteExecError extends Error {
