@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import { listSessions, killSession } from '@/lib/tmux';
 import { createLogger } from '@/lib/logger';
 import { emitTabClosing } from '@/lib/tab-lifecycle';
+import { RemoteHostError } from '@/lib/remote-host';
 import { broadcastSync } from '@/lib/sync-server';
 import {
   readLayoutFile,
@@ -15,6 +16,7 @@ import {
   crossCheckLayout,
   collectAllTabs,
   createDefaultLayout,
+  closeRemoteTabsFirst,
 } from '@/lib/layout-store';
 import type { ICreateLayoutOptions } from '@/lib/layout-store';
 import { listProviders } from '@/lib/providers/registry';
@@ -467,7 +469,20 @@ export const createWorkspace = async (
   });
 
 export const deleteWorkspace = async (workspaceId: string): Promise<boolean> =>
-  withOrchestrationMappingWrite(workspaceId, () => withLock(async () => {
+  withOrchestrationMappingWrite(workspaceId, async () => {
+    // Remote tabs first, outside the store lock (ADR-0022, review r1 B3): a host that does not
+    // answer refuses the delete before any tab is reaped or any file changes.
+    const before = await readLayoutFile(resolveLayoutFile(workspaceId));
+    const remoteTabs = before ? collectAllTabs(before.root).filter((t) => t.host) : [];
+    for (const tab of remoteTabs) emitTabClosing({ workspaceId, tabId: tab.id, sessionName: tab.sessionName, phase: 'closing' });
+    let remoteClosed = new Set<string>();
+    try {
+      if (remoteTabs.length > 0) remoteClosed = new Set((await closeRemoteTabsFirst(remoteTabs)).keys());
+    } catch (err) {
+      for (const tab of remoteTabs) emitTabClosing({ workspaceId, tabId: tab.id, sessionName: tab.sessionName, phase: 'aborted' });
+      throw err;
+    }
+    return withLock(async () => {
     const data = (await readWorkspacesFile()) ?? emptyState();
     const idx = data.workspaces.findIndex((w) => w.id === workspaceId);
     if (idx === -1) return false;
@@ -476,13 +491,16 @@ export const deleteWorkspace = async (workspaceId: string): Promise<boolean> =>
 
     const layout = await readLayoutFile(resolveLayoutFile(workspaceId));
     if (layout) {
-      const tabs = collectAllTabs(layout.root);
+      const tabs = collectAllTabs(layout.root).filter((tab) => !remoteClosed.has(tab.sessionName));
       for (const tab of tabs) {
         // Deliberate: the watchdog must not read this reap as a death (L38).
         emitTabClosing({ workspaceId, tabId: tab.id, sessionName: tab.sessionName, phase: 'closing' });
         try {
           await killSession(tab.sessionName, { tabId: tab.id });
-        } catch {}
+        } catch (err) {
+          // A remote tab added since the first pass: its host's refusal stops the delete here too.
+          if (err instanceof RemoteHostError) throw err;
+        }
       }
     }
 
@@ -499,7 +517,8 @@ export const deleteWorkspace = async (workspaceId: string): Promise<boolean> =>
     await revokeWorkspaceTabTokens(workspaceId);
     log.info(`Deleted: ${workspaceId} (${ws.name})`);
     return true;
-  }));
+    });
+  });
 
 export const renameWorkspace = async (workspaceId: string, name: string): Promise<IWorkspace | null> =>
   withLock(async () => {

@@ -7,6 +7,7 @@ import { createLogger } from '@/lib/logger';
 import { findTab } from '@/lib/cli-utils';
 import { RemoteHostError } from '@/lib/remote-host';
 import type { ITab } from '@/types/terminal';
+import { remoteHostUnreachableBody } from '@/lib/cli-error';
 
 const log = createLogger('layout');
 
@@ -25,7 +26,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     try {
       found = await removeTabFromPane(wsId, paneId, tabId);
     } catch (err) {
-      if (err instanceof RemoteHostError) return res.status(503).json({ error: err.message, code: 'remote-host-unreachable', host: err.host });
+      if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
       throw err;
     }
     if (!found) {
@@ -44,6 +45,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       }
       return res.status(200).json({ ok: true });
     } catch (err) {
+      if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
       log.error(`tab restart failed: ${err instanceof Error ? err.message : err}`);
       return res.status(500).json({ error: 'Failed to restart session' });
     }

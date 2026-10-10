@@ -45,6 +45,32 @@ export const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 export const remoteTmuxCommand = (args: readonly string[]): string =>
   ['tmux', '-L', remoteSocketName(), ...args].map(shQuote).join(' ');
 
+/** The remote script exits with this when the session name is already taken: never touch that session. */
+export const REMOTE_SESSION_EXISTS_EXIT = 17;
+
+/**
+ * Guards of a remote create (ADR-0022 §8). A name that already exists is never
+ * replaced; the created session carries this call's nonce, and a failed create
+ * kills a session only when it carries that nonce, so a failure can never end
+ * a live session of the same name (review r1, B2).
+ */
+export const remoteSessionExistsGuard = (session: string): string =>
+  `if ${remoteTmuxCommand(['has-session', '-t', `=${session}`])} 2>/dev/null; then echo ${shQuote(`pmux: session ${session} already exists`)} >&2; exit ${REMOTE_SESSION_EXISTS_EXIT}; fi`;
+
+export const remoteTagSession = (session: string, nonce: string): string =>
+  remoteTmuxCommand(['set-option', '-t', `=${session}:`, '@pmux-create', nonce]);
+
+export const remoteKillIfTagged = (session: string, nonce: string): string =>
+  `[ "$(${remoteTmuxCommand(['show-options', '-qv', '-t', `=${session}:`, '@pmux-create'])} 2>/dev/null)" = ${shQuote(nonce)} ] && ${remoteTmuxCommand(['kill-session', '-t', `=${session}`])}; true`;
+
+/** tmux's own word that a session or server does not exist (exit 1), as opposed to ssh or a timeout failing. */
+export const isTmuxAbsence = (err: unknown): boolean => {
+  const e = err as IRemoteExecError | null;
+  if (!e || e.code !== 1 || e.killed || e.signal) return false;
+  const stderr = e.stderr?.trim() ?? '';
+  return /^(can't find (session|window)|no such session|no server running on |error connecting to .*\(No such file or directory\))/.test(stderr);
+};
+
 export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boolean } = {}): string[] => {
   if (!isValidRemoteHostName(host)) throw new Error(`invalid remote host name: ${JSON.stringify(host)}`);
   return [
@@ -134,14 +160,14 @@ srv=$(tmux -L "$sock" display-message -p '#{pid}' 2>/dev/null)
 pane=$(tmux -L "$sock" display-message -p -t "=$session:" '#{pane_pid}' 2>/dev/null)
 marker=unknown
 if [ -n "$pane" ] && [ -n "$tab" ] && [ -r "/proc/$pane/environ" ]; then
-  if grep -qzx "PMUX_TAB_ID=$tab" "/proc/$pane/environ" 2>/dev/null; then marker=present; else marker=absent; fi
+  if grep -qzxF "PMUX_TAB_ID=$tab" "/proc/$pane/environ" 2>/dev/null; then marker=present; else marker=absent; fi
 fi
 descendants() {
   for c in $(cat /proc/"$1"/task/*/children 2>/dev/null); do echo "$c"; descendants "$c"; done
 }
 marked() {
   [ -n "$tab" ] || return 0
-  grep -lzx "PMUX_TAB_ID=$tab" /proc/[0-9]*/environ 2>/dev/null | sed 's#^/proc/##; s#/environ$##'
+  grep -lzxF "PMUX_TAB_ID=$tab" /proc/[0-9]*/environ 2>/dev/null | sed 's#^/proc/##; s#/environ$##'
 }
 eligible() {
   case "$1" in ''|0|1|"$$"|"$srv"|"$pane") return 1 ;; esac

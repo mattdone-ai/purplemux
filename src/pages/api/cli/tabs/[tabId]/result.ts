@@ -1,8 +1,9 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authorizeWorkspace, findTab } from '@/lib/cli-utils';
-import { capturePaneContentAnsi, hasSession } from '@/lib/tmux';
+import { capturePaneContentAnsi, hasSessionOrUnreachable } from '@/lib/tmux';
 import { renderPaneResult, type TResultMode } from '@/lib/pane-suggestions';
-import { TAB_NOT_FOUND_BODY } from '@/lib/cli-error';
+import { TAB_NOT_FOUND_BODY, remoteHostUnreachableBody } from '@/lib/cli-error';
+import { RemoteHostError } from '@/lib/remote-host';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
@@ -20,7 +21,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const found = await findTab(workspaceId, tabId);
   if (!found) return res.status(404).json(TAB_NOT_FOUND_BODY);
 
-  const alive = await hasSession(found.tab.sessionName);
+  let alive: boolean;
+  try {
+    alive = await hasSessionOrUnreachable(found.tab.sessionName);
+  } catch (err) {
+    if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
+    throw err;
+  }
   if (!alive) return res.status(409).json({ error: 'Tab session is not running', code: 'session-not-running' });
 
   // Dim composer text is a suggestion the agent shows, not text anyone typed (L7).

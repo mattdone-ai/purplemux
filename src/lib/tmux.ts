@@ -18,9 +18,14 @@ import { PASTE_END, PASTE_START, TYPED_CHUNK_GAP_MS, planTypedInput } from '@/li
 import { defaultReaperDeps, reapTabForClose, type IReapResult } from '@/lib/tab-reaper';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
 import {
+  REMOTE_SESSION_EXISTS_EXIT,
   RemoteHostError,
   describeRemoteFailure,
   isSshFailure,
+  isTmuxAbsence,
+  remoteKillIfTagged,
+  remoteSessionExistsGuard,
+  remoteTagSession,
   parseRemoteReap,
   reapCommand,
   readRemoteHosts,
@@ -31,7 +36,7 @@ import {
   runSsh,
   shQuote,
 } from '@/lib/remote-host';
-import { knownRemoteHosts, sessionHostOf } from '@/lib/session-host';
+import { knownRemoteHosts, remoteHostsInUse, sessionHostOf } from '@/lib/session-host';
 
 const log = createLogger('terminal');
 
@@ -145,28 +150,34 @@ const createRemoteSession = async (
   const marker: Record<string, string> = identity
     ? { PMUX_TAB_ID: identity.tabId, PMUX_WORKSPACE_ID: identity.workspaceId }
     : {};
+  const nonce = nanoid(16);
   const sock = shQuote(remoteSocketName());
-  const newSession = [
-    shQuote('tmux'), shQuote('-u'), shQuote('-L'), sock, shQuote('-f'), '"$d/tmux.conf"',
-    ...['new-session', '-d', '-s', name, '-x', String(cols), '-y', String(rows), ...(cwd ? ['-c', cwd] : [])].map(shQuote),
-    shQuote(buildRemoteShellLaunchCommand(marker)),
-  ].join(' ');
+  const config = await fs.readFile(TMUX_CONFIG_PATH, 'utf-8');
   const script = [
+    'set -e',
     `d=${remoteBaseDir()}`,
     'umask 077',
     'mkdir -p "$d"',
-    'cat > "$d/tmux.conf.tmp"',
-    'mv -f "$d/tmux.conf.tmp" "$d/tmux.conf"',
-    newSession,
+    `printf '%s' ${shQuote(Buffer.from(config).toString('base64'))} | base64 -d > "$d/tmux.conf.tmp.$$"`,
+    'mv -f "$d/tmux.conf.tmp.$$" "$d/tmux.conf"',
+    remoteSessionExistsGuard(name),
+    [
+      shQuote('tmux'), shQuote('-u'), shQuote('-L'), sock, shQuote('-f'), '"$d/tmux.conf"',
+      ...['new-session', '-d', '-s', name, '-x', String(cols), '-y', String(rows), ...(cwd ? ['-c', cwd] : [])].map(shQuote),
+      shQuote(buildRemoteShellLaunchCommand(marker)),
+    ].join(' '),
+    remoteTagSession(name, nonce),
     `${shQuote('tmux')} ${shQuote('-L')} ${sock} ${shQuote('source-file')} "$d/tmux.conf"`,
-  ].join(' && ');
-  const config = await fs.readFile(TMUX_CONFIG_PATH, 'utf-8');
+  ].join('\n');
   try {
-    await runSsh(host, script, { timeoutMs: CMD_TIMEOUT * 2, input: config });
+    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: `${script}\n` });
   } catch (err) {
-    // The session may exist although the call failed (a later step, a lost answer): never leave it
-    // running where no layout names it.
-    await runSsh(host, remoteTmuxCommand(['kill-session', '-t', `=${name}`]), { timeoutMs: CMD_TIMEOUT }).catch(() => {});
+    if ((err as { code?: unknown }).code === REMOTE_SESSION_EXISTS_EXIT) {
+      throw new Error(`remote session ${name} already exists on ${host}; it was left as it is`);
+    }
+    // The session may exist although the call failed (a later step, a lost answer). Only a session
+    // that carries this call's nonce is killed: never a live one of the same name (review r1, B2).
+    await runSsh(host, remoteKillIfTagged(name, nonce), { timeoutMs: CMD_TIMEOUT }).catch(() => {});
     if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)})`);
     throw new Error(`remote session ${name} on ${host} was not created (${describeRemoteFailure(err)})`);
   }
@@ -377,6 +388,62 @@ export const hasSession = async (name: string): Promise<boolean> => {
   }
 };
 
+export type TSessionPresence = 'present' | 'absent' | 'unknown';
+
+/**
+ * Whether a session exists, with a third answer for a remote host that did not
+ * say (ADR-0022, review r1 B1/B2): only tmux's own "no such session" or "no
+ * server" is absence; ssh failing or timing out is `unknown`. A local session
+ * keeps `hasSession`'s answer.
+ */
+export const sessionPresence = async (name: string): Promise<TSessionPresence> => {
+  const host = await sessionHostOf(name);
+  if (!host) return (await hasSession(name)) ? 'present' : 'absent';
+  try {
+    await runSsh(host, remoteTmuxCommand(['has-session', '-t', `=${name}`]), { timeoutMs: CMD_TIMEOUT });
+    return 'present';
+  } catch (err) {
+    return isTmuxAbsence(err) ? 'absent' : 'unknown';
+  }
+};
+
+/**
+ * `hasSession` for a decision that must not read an unanswered remote host as a
+ * dead tab (send, status, result, restart): `unknown` throws `RemoteHostError`.
+ */
+export const hasSessionOrUnreachable = async (name: string): Promise<boolean> => {
+  const presence = await sessionPresence(name);
+  if (presence === 'unknown') {
+    const host = (await sessionHostOf(name)) ?? 'unknown';
+    throw new RemoteHostError(host, `remote host ${host} did not answer over ssh; ${name} may still run there`);
+  }
+  return presence === 'present';
+};
+
+/**
+ * Every remote host of these sessions answers, checked before a close of
+ * several tabs touches any of them (review r1, B3): a host that does not answer
+ * refuses the whole close. A host taken out of remote.hosts is skipped; its
+ * tabs then close without a reap (§9).
+ */
+export const assertRemoteHostsAnswer = async (sessionNames: readonly string[]): Promise<void> => {
+  const hosts = new Set<string>();
+  for (const name of sessionNames) {
+    const host = await sessionHostOf(name);
+    if (host) hosts.add(host);
+  }
+  if (hosts.size === 0) return;
+  const registered = await readRemoteHosts().catch(() => null);
+  for (const host of hosts) {
+    if (registered && !registered.includes(host)) continue;
+    try {
+      await runSsh(host, 'true', { timeoutMs: CMD_TIMEOUT });
+    } catch (err) {
+      throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)}); nothing was closed`);
+    }
+  }
+};
+
 // tmux auto-cleans dead sessions when remain-on-exit is not set, no extra handling needed
 export const cleanDeadSessions = async (): Promise<void> => {};
 
@@ -521,28 +588,36 @@ const localPanes = async (): Promise<Map<string, IPaneInfo>> => {
   }
 };
 
+/** After a host fails to answer a pane scan, the scans skip it this long (review r1 nit 2). */
+const REMOTE_SCAN_BACKOFF_MS = 30_000;
+
+const gScan = globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number> };
+if (!gScan.__ptRemoteScanBackoff) gScan.__ptRemoteScanBackoff = new Map();
+const scanBackoff = gScan.__ptRemoteScanBackoff;
+
 /** A host that does not answer contributes nothing: its tabs read as not running, never as local. */
 const remotePanes = async (host: string): Promise<Map<string, IPaneInfo>> => {
+  if ((scanBackoff.get(host) ?? 0) > Date.now()) return new Map();
   try {
     const { stdout } = await runSsh(host, remoteTmuxCommand(['list-panes', '-a', '-F', ALL_PANES_FORMAT]), { timeoutMs: CMD_TIMEOUT });
+    scanBackoff.delete(host);
     return parsePanes(stdout, host);
-  } catch {
+  } catch (err) {
+    if (isTmuxAbsence(err)) {
+      scanBackoff.delete(host);
+    } else {
+      scanBackoff.set(host, Date.now() + REMOTE_SCAN_BACKOFF_MS);
+      log.warn({ host, failure: describeRemoteFailure(err) }, 'remote pane scan failed; host skipped for 30 s');
+    }
     return new Map();
   }
 };
 
-const remoteHostsToScan = async (): Promise<string[]> => {
-  const registered = await readRemoteHosts().catch((err) => {
-    log.warn(`remote hosts unreadable, scanning only the hosts of known sessions: ${err instanceof Error ? err.message : err}`);
-    return [] as string[];
-  });
-  return [...new Set([...registered, ...knownRemoteHosts()])];
-};
-
 export const getAllPanesInfo = async (): Promise<Map<string, IPaneInfo>> => {
+  // Only hosts that own a tab are asked: a registered host with none costs nothing.
   const [local, ...remote] = await Promise.all([
     localPanes(),
-    ...(await remoteHostsToScan()).map(remotePanes),
+    ...(await remoteHostsInUse().catch(() => knownRemoteHosts())).map(remotePanes),
   ]);
   for (const panes of remote) {
     for (const [session, info] of panes) if (!local.has(session)) local.set(session, info);

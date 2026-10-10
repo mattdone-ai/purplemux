@@ -43,6 +43,7 @@ vi.mock('os', async (importOriginal) => {
 vi.mock('@/lib/session-host', () => ({
   sessionHostOf: async (name: string) => hostOf.map.get(name) ?? null,
   knownRemoteHosts: () => [...new Set(hostOf.map.values())],
+  remoteHostsInUse: async () => [...new Set(hostOf.map.values())],
   registerSessionHost: (name: string, host: string | null) => { if (host) hostOf.map.set(name, host); },
   forgetSessionHost: (name: string) => { hostOf.map.delete(name); },
 }));
@@ -53,6 +54,8 @@ vi.mock('@/lib/fleet-config-store', () => ({
 }));
 const audit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('@/lib/coordination-audit', () => ({ appendCoordinationAudit: audit }));
+
+const scanBackoff = () => (globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number> }).__ptRemoteScanBackoff;
 
 const REMOTE = 'pt-ws-r-pane-p-tab-remote1';
 const LOCAL = 'pt-ws-l-pane-p-tab-local1';
@@ -71,6 +74,46 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     replies.fn = () => ({ stdout: '' });
     audit.mockClear();
     fleet.hosts = 'ai-server';
+    scanBackoff()?.clear();
+  });
+
+  it('session presence: tmux\'s own "no such session" is absent; ssh failing or timing out is unknown, never absent', async () => {
+    const { sessionPresence, hasSessionOrUnreachable } = await import('@/lib/tmux');
+    replies.fn = () => ({ stdout: '' });
+    expect(await sessionPresence(REMOTE)).toBe('present');
+    for (const stderr of [`can't find session: ${REMOTE}`, 'no server running on /tmp/tmux-1000/pmux-mdserver1', 'error connecting to /tmp/tmux-1000/pmux-mdserver1 (No such file or directory)']) {
+      replies.fn = () => ({ code: 1, stderr });
+      expect(await sessionPresence(REMOTE)).toBe('absent');
+    }
+    replies.fn = () => ({ code: 255, stderr: 'ssh: connect to host ai-server port 22: No route to host' });
+    expect(await sessionPresence(REMOTE)).toBe('unknown');
+    await expect(hasSessionOrUnreachable(REMOTE)).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+    expect(remoteCommand(calls.list[0])).toBe(`'tmux' '-L' 'pmux-mdserver1' 'has-session' '-t' '=${REMOTE}'`);
+  });
+
+  it('a multi-tab close asks every remote host first; one that does not answer refuses, an unregistered one is skipped', async () => {
+    const { assertRemoteHostsAnswer } = await import('@/lib/tmux');
+    await assertRemoteHostsAnswer([LOCAL, REMOTE]);
+    expect(calls.list.map(remoteCommand)).toEqual(['true']);
+    replies.fn = () => ({ code: 255, stderr: 'Connection timed out' });
+    await expect(assertRemoteHostsAnswer([REMOTE])).rejects.toThrow(/did not answer over ssh .*nothing was closed/);
+    fleet.hosts = 'gpu2';
+    calls.list = [];
+    await assertRemoteHostsAnswer([REMOTE]);
+    expect(calls.list).toEqual([]);
+  });
+
+  it('pane scans skip a host for 30 s after it fails, and ask no host that owns no tab (review r1 nit 2)', async () => {
+    const { getAllPanesInfo } = await import('@/lib/tmux');
+    replies.fn = (cmd) => (cmd === 'tmux' ? { stdout: '' } : { code: 255, stderr: 'timed out' });
+    await getAllPanesInfo();
+    await getAllPanesInfo();
+    expect(calls.list.filter((c) => c.cmd === 'ssh')).toHaveLength(1);
+    hostOf.map = new Map();
+    calls.list = [];
+    scanBackoff()?.clear();
+    await getAllPanesInfo();
+    expect(calls.list.filter((c) => c.cmd === 'ssh')).toEqual([]);
   });
 
   it('a local session keeps the exact local argv', async () => {
@@ -189,25 +232,42 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({ event: 'tab-reap-skipped', host: 'ai-server' }));
   });
 
-  it('a create that fails after reaching the host removes the session it may have made and names the failure, not the script', async () => {
-    replies.fn = (_cmd, args) => (args.at(-1)?.includes('new-session') ? { code: 1, stderr: 'duplicate session' } : { stdout: '' });
+  it('a create that fails after reaching the host kills only the session carrying its nonce, and names the failure, not the script', async () => {
+    replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 1, stderr: 'source-file: bad line' } : { stdout: '' });
     const { createSession } = await import('@/lib/tmux');
     const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
-    await expect(creating).rejects.toThrow(`remote session ${REMOTE} on ai-server was not created (exit 1: duplicate session)`);
+    await expect(creating).rejects.toThrow(`remote session ${REMOTE} on ai-server was not created (exit 1: source-file: bad line)`);
     await expect(creating).rejects.not.toThrow(/new-session/);
-    expect(remoteCommand(calls.list[1])).toBe(`'tmux' '-L' 'pmux-mdserver1' 'kill-session' '-t' '=${REMOTE}'`);
+    const nonce = calls.list[0].input?.match(/'@pmux-create' '([A-Za-z0-9_-]{16})'/)?.[1];
+    expect(nonce).toBeDefined();
+    expect(remoteCommand(calls.list[1])).toBe(`[ "$('tmux' '-L' 'pmux-mdserver1' 'show-options' '-qv' '-t' '=${REMOTE}:' '@pmux-create' 2>/dev/null)" = '${nonce}' ] && 'tmux' '-L' 'pmux-mdserver1' 'kill-session' '-t' '=${REMOTE}'; true`);
   });
 
-  it('creates the remote session with the pushed config, the remote socket and the marker, never a token or a local path', async () => {
+  it('a name that already exists on the host is refused and that session is never touched (review r1 B2)', async () => {
+    replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 17, stderr: `pmux: session ${REMOTE} already exists` } : { stdout: '' });
+    const { createSession } = await import('@/lib/tmux');
+    await expect(createSession(REMOTE, 80, 24)).rejects.toThrow(`remote session ${REMOTE} already exists on ai-server; it was left as it is`);
+    expect(calls.list).toHaveLength(1);
+    expect(calls.list[0].input).toContain(`if 'tmux' '-L' 'pmux-mdserver1' 'has-session' '-t' '=${REMOTE}' 2>/dev/null; then`);
+  });
+
+  it('creates the remote session in one sh -s run: config, guard, session, nonce tag, re-read config', async () => {
     const { createSession } = await import('@/lib/tmux');
     await createSession(REMOTE, 120, 40, '/home/mdone/code/nomupay', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
     expect(calls.list).toHaveLength(1);
-    const command = remoteCommand(calls.list[0]);
-    expect(command).toContain(`'tmux' '-u' '-L' 'pmux-mdserver1' '-f' "$d/tmux.conf" 'new-session' '-d' '-s' '${REMOTE}' '-x' '120' '-y' '40' '-c' '/home/mdone/code/nomupay'`);
-    expect(command).toContain('PMUX_TAB_ID=');
-    expect(command).toContain('tab-remote1');
-    expect(command).not.toMatch(/PMUX_TOKEN|PMUX_TAB_TOKEN|CLAUDE_CONFIG_DIR|GROK_HOME/);
-    expect(command).not.toContain('/.purplemux/workspaces');
-    expect(calls.list[0].input).toContain('set -g status off');
+    expect(remoteCommand(calls.list[0])).toBe('sh -s');
+    const script = calls.list[0].input ?? '';
+    const lines = script.trim().split('\n');
+    expect(lines[0]).toBe('set -e');
+    const b64 = script.match(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d/)?.[1];
+    expect(Buffer.from(b64 ?? '', 'base64').toString('utf-8')).toContain('set -g status off');
+    const order = ['has-session', 'new-session', '@pmux-create', 'source-file'].map((word) => lines.findIndex((l) => l.includes(word)));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(script).toContain(`'tmux' '-u' '-L' 'pmux-mdserver1' '-f' "$d/tmux.conf" 'new-session' '-d' '-s' '${REMOTE}' '-x' '120' '-y' '40' '-c' '/home/mdone/code/nomupay'`);
+    expect(script).toContain('PMUX_TAB_ID=');
+    expect(script).toContain('tab-remote1');
+    expect(script).not.toMatch(/PMUX_TOKEN|PMUX_TAB_TOKEN|CLAUDE_CONFIG_DIR|GROK_HOME/);
+    expect(script).not.toContain('/.purplemux/workspaces');
   });
+
 });

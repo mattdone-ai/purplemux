@@ -7,10 +7,11 @@ import {
   resolveSendWaitMs,
   resolveTabCliState,
 } from '@/lib/tab-send';
-import { hasSession, isContentPendingInComposer } from '@/lib/tmux';
+import { hasSessionOrUnreachable, isContentPendingInComposer } from '@/lib/tmux';
 import { deliverPrompt } from '@/lib/agent-prompt-delivery';
 import { withAgentDispatchLock } from '@/lib/agent-dispatch-policy';
-import { TAB_NOT_FOUND_BODY, targetChangedBody } from '@/lib/cli-error';
+import { TAB_NOT_FOUND_BODY, remoteHostUnreachableBody, targetChangedBody } from '@/lib/cli-error';
+import { RemoteHostError } from '@/lib/remote-host';
 
 /**
  * Deliver a prompt to a tab.
@@ -26,7 +27,17 @@ import { TAB_NOT_FOUND_BODY, targetChangedBody } from '@/lib/cli-error';
  * On timeout nothing is pasted at all — half a brief sitting in a composer for
  * a stray Enter to submit is worse than no brief.
  */
+/** A remote tab's host that did not answer is retryable, never "the session is dead" (ADR-0022). */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
+  try {
+    return await send(req, res);
+  } catch (err) {
+    if (err instanceof RemoteHostError && !res.headersSent) return res.status(503).json(remoteHostUnreachableBody(err));
+    throw err;
+  }
+};
+
+const send = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     return res.status(405).json({ error: 'Method not allowed' });
@@ -63,7 +74,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
           waitingAtPrompt: getStatusManager().isWaitingAtPrompt(id),
         };
       },
-      hasSession,
+      hasSession: hasSessionOrUnreachable,
     },
     // `composer-ready`, not `live-session`: this is the unattended dispatch
     // path, where a paste that beats the TUI's boot is silently swallowed. The
@@ -93,7 +104,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       res.status(409).json(targetChangedBody(tabId));
       return false;
     }
-    if (!await hasSession(latest.tab.sessionName)) {
+    if (!await hasSessionOrUnreachable(latest.tab.sessionName)) {
       res.status(409).json({ error: 'agent-not-ready', code: 'session-not-running', tabId, detail: 'session-not-running' });
       return false;
     }

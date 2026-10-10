@@ -14,7 +14,7 @@ const liveness = vi.hoisted(() => ({ statusForTab: vi.fn() }));
 const statusManager = vi.hoisted(() => ({ getAllForClient: vi.fn() }));
 
 vi.mock('@/lib/cli-utils', () => cliUtils);
-vi.mock('@/lib/tmux', () => tmux);
+vi.mock('@/lib/tmux', () => Object.assign(tmux, { hasSessionOrUnreachable: tmux.hasSession }));
 vi.mock('@/lib/providers/codex/model-observation', () => modelObservation);
 vi.mock('@/lib/providers', () => ({
   getProviderByPanelType: () => ({

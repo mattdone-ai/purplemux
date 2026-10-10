@@ -256,6 +256,9 @@ A tab with `host` set runs its tmux session on that host. The server stays the o
 | Pane pid | real | never returned: `getSessionPanePid` → null, `getAllPanesInfo` → `pid: 0` + `host` |
 | `getSessionCwd` | the pane's directory | null: the path names the remote tree, not this one |
 | Close | local reaper (ADR-0016) | `REMOTE_REAP_SCRIPT` over `ssh … sh -s`, `reaper: 'remote'`; an ssh failure throws `RemoteHostError` |
+| Close of a pane or workspace | tabs in order | every remote host asked first; remote tabs closed first, outside the layout and store locks; a silent host refuses the whole close |
+| Session presence | `hasSession` | `sessionPresence`: only tmux's own answer is `absent`; ssh failing is `unknown` (503 on send, status, result, restart) |
+| Attach ends | close 1000 | 1000 only when tmux says the session is gone, else 4001 (the client retries) |
 
 ssh runs with `BatchMode=yes`, `ConnectTimeout=5` and no ControlMaster (one connection per call, about 90 ms from Node). The registry is fleet config `remote.hosts` (comma-separated ssh aliases).
 

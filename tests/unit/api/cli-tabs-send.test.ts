@@ -33,7 +33,7 @@ vi.mock('@/lib/agent-dispatch-policy', () => ({
   ) => work((options) => dispatchPolicy(workspaceId, target, options)),
 }));
 
-vi.mock('@/lib/tmux', () => tmux);
+vi.mock('@/lib/tmux', () => Object.assign(tmux, { hasSessionOrUnreachable: tmux.hasSession }));
 vi.mock('@/lib/agent-prompt-delivery', () => delivery);
 vi.mock('@/lib/cli-utils', () => cliUtils);
 vi.mock('@/lib/status-manager', () => ({
@@ -134,6 +134,15 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
       expect.objectContaining({ id: TAB_ID }),
       { consumeBootstrapForTarget: true },
     );
+  });
+
+  it('a remote host that does not answer is retryable 503 remote-host-unreachable, never session-not-running (ADR-0022)', async () => {
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    tmux.hasSession.mockRejectedValue(new RemoteHostError('ai-server', 'remote host ai-server did not answer over ssh'));
+    const response = await call({ content: 'run the tests' });
+    expect(response.statusCode).toBe(503);
+    expect(response.body).toMatchObject({ code: 'remote-host-unreachable', host: 'ai-server' });
+    expect(delivery.deliverPrompt).not.toHaveBeenCalled();
   });
 
   it('never pastes an automated prompt after a model mismatch', async () => {

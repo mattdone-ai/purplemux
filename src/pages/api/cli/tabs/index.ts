@@ -25,6 +25,7 @@ import {
 import type { TPanelType } from '@/types/terminal';
 import type { TCliState } from '@/types/timeline';
 import type { ILastEvent } from '@/types/status';
+import { remoteHostUnreachableBody } from '@/lib/cli-error';
 
 const log = createLogger('api:cli:tabs');
 
@@ -276,7 +277,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       });
     } catch (err) {
       if (err instanceof RemoteHostError) {
-        return res.status(503).json({ error: err.message, code: 'remote-host-unreachable', host: err.host });
+        return res.status(503).json(remoteHostUnreachableBody(err));
       }
       const msg = err instanceof Error ? err.message : 'unknown error';
       log.error(`create tab failed: ${msg}`);

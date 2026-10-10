@@ -16,7 +16,7 @@ vi.mock('os', async (original) => {
 vi.mock('node-pty', () => ({ spawn: (...args: unknown[]) => fixture.spawn(...args) }));
 vi.mock('@/lib/tmux', async (original) => ({
   ...await original<typeof import('@/lib/tmux')>(),
-  exitCopyMode: vi.fn(async () => undefined), hasSession: vi.fn(async () => true), isContentPendingInComposer: vi.fn(async () => false), createSession: vi.fn(async () => undefined), resolveExistingDir: vi.fn(async () => '/tmp'),
+  exitCopyMode: vi.fn(async () => undefined), hasSession: vi.fn(async () => true), hasSessionOrUnreachable: vi.fn(async () => true), sessionPresence: vi.fn(async () => 'present'), isContentPendingInComposer: vi.fn(async () => false), createSession: vi.fn(async () => undefined), resolveExistingDir: vi.fn(async () => '/tmp'),
   sendKeys: fixture.send, sendTypedText: fixture.type, sendBracketedPasteText: fixture.type, submitComposer: fixture.submit,
   killSession: fixture.reap, observeSessionStrict: fixture.session,
 }));

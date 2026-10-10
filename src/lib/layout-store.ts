@@ -4,13 +4,14 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { nanoid } from 'nanoid';
-import { createSession, hasSession, killSession, resolveExistingDir, sendKeys, workspaceSessionName } from '@/lib/tmux';
+import { assertRemoteHostsAnswer, createSession, hasSession, hasSessionOrUnreachable, killSession, resolveExistingDir, sendKeys, workspaceSessionName } from '@/lib/tmux';
 import { broadcastSync } from '@/lib/sync-server';
 import { isAgentPanelType as isAgentPanel } from '@/lib/agent-panel-types';
 import { createLogger } from '@/lib/logger';
 import { emitTabClosing, hasKnownTabs, observeLayoutTabs, observeWorkspaceRemoved } from '@/lib/tab-lifecycle';
 import { findTabIdBySession, revokeTabToken } from '@/lib/tab-token';
-import { forgetSessionHost, registerSessionHost } from '@/lib/session-host';
+import { forgetSessionHost, registerSessionHost, sessionHostOf } from '@/lib/session-host';
+import { RemoteHostError } from '@/lib/remote-host';
 import {
   collectPanes,
   collectAllTabs,
@@ -314,14 +315,34 @@ export const createPane = async (wsId: string, cwd?: string): Promise<{ paneId: 
   return { paneId, tab };
 };
 
+/**
+ * Close the remote tabs among `tabs` before anything else, outside every
+ * layout and store lock (ADR-0022, review r1 B3). Every host must answer first,
+ * so a host that does not answer refuses the whole close (`RemoteHostError`)
+ * before any tab, local or remote, is touched. Returns each closed session's reap.
+ */
+export const closeRemoteTabsFirst = async (tabs: readonly ITab[]): Promise<Map<string, IReapResult | null>> => {
+  const remote = tabs.filter((t) => t.host && t.panelType !== 'web-browser');
+  const reaps = new Map<string, IReapResult | null>();
+  if (remote.length === 0) return reaps;
+  await assertRemoteHostsAnswer(remote.map((t) => t.sessionName));
+  for (const tab of remote) reaps.set(tab.sessionName, await killSession(tab.sessionName, { tabId: tab.id }));
+  return reaps;
+};
+
 export const deletePane = async (
   paneId: string,
   sessions: string[] = [],
 ): Promise<void> => {
-  for (const session of sessions) {
+  // A remote session refuses the close while its host does not answer (review r1 B3).
+  const remote: string[] = [];
+  for (const session of sessions) if (await sessionHostOf(session)) remote.push(session);
+  if (remote.length > 0) await assertRemoteHostsAnswer(remote);
+  for (const session of [...remote, ...sessions.filter((s) => !remote.includes(s))]) {
     try {
       await killSession(session);
-    } catch {
+    } catch (err) {
+      if (err instanceof RemoteHostError) throw err;
       // session already gone
     }
   }
@@ -497,7 +518,8 @@ export const restartTabSession = async (wsId: string, paneId: string, tabId: str
     if (!tab) return false;
 
     if (tab.host) registerSessionHost(tab.sessionName, tab.host);
-    const exists = await hasSession(tab.sessionName);
+    // A remote host that does not answer is no proof the session is gone: never recreate over it (B2).
+    const exists = tab.host ? await hasSessionOrUnreachable(tab.sessionName) : await hasSession(tab.sessionName);
     if (exists) return true;
 
     // A remote cwd is checked by the remote tmux, which starts a missing one in HOME (ADR-0022 §8).
@@ -853,6 +875,12 @@ export const splitPaneInLayout = async (
 };
 
 export const closePaneInLayout = async (wsId: string, paneId: string): Promise<ILayoutData | null> => withOrchestrationMappingWrite(wsId, async () => {
+  // Remote tabs first and without the layout lock: a host that does not answer refuses the close
+  // before any local tab is reaped, and a slow host never holds every workspace's layout (B3).
+  const before = await readLayoutFile(resolveLayoutFile(wsId));
+  const target = before ? findPane(before.root, paneId) : null;
+  if (!before || !target || collectPanes(before.root).length <= 1) return null;
+  const remoteReaps = await closeRemoteTabsFirst(target.tabs);
   const result = await withLock(async () => {
     const filePath = resolveLayoutFile(wsId);
     const layout = await readLayoutFile(filePath);
@@ -863,7 +891,9 @@ export const closePaneInLayout = async (wsId: string, paneId: string): Promise<I
     if (collectPanes(layout.root).length <= 1) return null;
 
     for (const tab of pane.tabs.filter((t) => t.panelType !== 'web-browser')) {
-      const reap = await killSession(tab.sessionName, { tabId: tab.id });
+      const reap = remoteReaps.has(tab.sessionName)
+        ? remoteReaps.get(tab.sessionName) ?? null
+        : await killSession(tab.sessionName, { tabId: tab.id });
       if (tab.orchestrationActivity?.launch || tab.orchestrationActivity?.turn) await requireAbandonedRuntime(tab.sessionName, reap);
     }
     const wasEqualized = isEqualized(layout.root);

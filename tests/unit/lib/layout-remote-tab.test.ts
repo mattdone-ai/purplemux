@@ -12,6 +12,8 @@ const mockHome = vi.hoisted(() => ({ value: '' }));
 const tmux = vi.hoisted(() => ({
   createSession: vi.fn(async (..._args: unknown[]) => {}),
   hasSession: vi.fn(async (_name: string) => false),
+  hasSessionOrUnreachable: vi.fn(async (_name: string) => false),
+  assertRemoteHostsAnswer: vi.fn(async (_names: readonly string[]) => {}),
   killSession: vi.fn(async (..._args: unknown[]) => null),
   resolveExistingDir: vi.fn(async (cwd?: string) => cwd ?? '/home'),
   sendKeys: vi.fn(async () => {}),
@@ -122,6 +124,66 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     expect(await restartTabSession('ws-a', 'pane-1', 'tab-r')).toBe(true);
     expect(tmux.resolveExistingDir).not.toHaveBeenCalled();
     expect(tmux.createSession).toHaveBeenCalledWith('pt-ws-a-pane-1-tab-r', 80, 24, '/only/on/ai-server', { workspaceId: 'ws-a', tabId: 'tab-r' });
+  });
+
+  it('restart never recreates over a host that does not answer (review r1 B2)', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'ai-server' },
+    ]));
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    tmux.hasSessionOrUnreachable.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+    const { restartTabSession } = await import('@/lib/layout-store');
+    await expect(restartTabSession('ws-a', 'pane-1', 'tab-r')).rejects.toMatchObject({ name: 'RemoteHostError' });
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it('a pane close asks the remote hosts first and reaps nothing local when one does not answer (review r1 B3)', async () => {
+    const twoPanes: ILayoutData = {
+      root: {
+        type: 'split', orientation: 'horizontal', ratio: 50,
+        children: [
+          { type: 'pane', id: 'pane-1', activeTabId: 'tab-l', tabs: [
+            { id: 'tab-l', sessionName: 'pt-ws-a-pane-1-tab-l', name: '', order: 0, panelType: 'terminal' },
+            { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 1, panelType: 'terminal', host: 'ai-server' },
+          ] },
+          { type: 'pane', id: 'pane-2', activeTabId: null, tabs: [] },
+        ],
+      } as never,
+      activePaneId: 'pane-1',
+      updatedAt: '2026-10-10T00:00:00.000Z',
+    };
+    await writeLayout('ws-a', twoPanes);
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+    const { closePaneInLayout } = await import('@/lib/layout-store');
+    await expect(closePaneInLayout('ws-a', 'pane-1')).rejects.toMatchObject({ name: 'RemoteHostError' });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8'))).toEqual(twoPanes);
+
+    tmux.killSession.mockClear();
+    expect(await closePaneInLayout('ws-a', 'pane-1')).not.toBeNull();
+    expect(tmux.killSession.mock.calls.map((c) => c[0])).toEqual(['pt-ws-a-pane-1-tab-r', 'pt-ws-a-pane-1-tab-l']);
+  });
+
+  it('the legacy pane delete lets a remote refusal through instead of discarding it (review r1 B3)', async () => {
+    const { registerSessionHost } = await import('@/lib/session-host');
+    registerSessionHost('pt-ws-a-pane-9-tab-r', 'ai-server');
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+    const { deletePane } = await import('@/lib/layout-store');
+    await expect(deletePane('pane-9', ['pt-local-x-y', 'pt-ws-a-pane-9-tab-r'])).rejects.toMatchObject({ name: 'RemoteHostError' });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it('a lost attach never rewrites a remote tab\'s cwd from this host\'s filesystem', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', cwd: '/only/on/ai-server', host: 'ai-server' },
+    ]));
+    tmux.resolveExistingDir.mockResolvedValueOnce('/home');
+    const { reconcileTabCwd } = await import('@/lib/layout-store');
+    await reconcileTabCwd('pt-ws-a-pane-1-tab-r');
+    expect(tmux.resolveExistingDir).not.toHaveBeenCalled();
+    expect((JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8')) as { root: { tabs: Array<{ cwd: string }> } }).root.tabs[0].cwd).toBe('/only/on/ai-server');
   });
 
   it('closing a remote tab forgets its host', async () => {

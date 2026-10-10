@@ -6,7 +6,7 @@ import { isValidModelName } from '@/lib/claude-command-shared';
 import { isValidReasoningForPanelType, reasoningErrorForPanelType } from '@/lib/agent-effort';
 import type { IAgentLaunchConfig } from '@/types/terminal';
 import { withCodexTargetLock } from '@/lib/providers/codex/launch-lifecycle';
-import { TAB_NOT_FOUND_BODY } from '@/lib/cli-error';
+import { TAB_NOT_FOUND_BODY, remoteHostUnreachableBody } from '@/lib/cli-error';
 import { RemoteHostError } from '@/lib/remote-host';
 import { checkReportsTo } from '@/lib/reports-to';
 
@@ -51,7 +51,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     try {
       closed = await closeTab(workspaceId, found.paneId, tabId, { keepProcesses });
     } catch (err) {
-      if (err instanceof RemoteHostError) return res.status(503).json({ error: err.message, code: 'remote-host-unreachable', host: err.host });
+      if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
       throw err;
     }
     const { ok, reap } = closed;

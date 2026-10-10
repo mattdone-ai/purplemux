@@ -9,7 +9,7 @@ import type { ILayoutData } from '@/types/terminal';
 
 const mockHome = vi.hoisted(() => ({ value: '' }));
 const REAP = { reaper: 'linux', envMarker: 'present', killed: [{ pid: 4242, comm: 'sleep', args: 'sleep 600' }], survivors: [] };
-const tmux = vi.hoisted(() => ({ killSession: vi.fn() }));
+const tmux = vi.hoisted(() => ({ killSession: vi.fn(), assertRemoteHostsAnswer: vi.fn(async (_names: readonly string[]) => {}) }));
 
 vi.mock('@/lib/logger', () => {
   const logger = { trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, fatal: () => {}, child: () => logger };
@@ -23,6 +23,7 @@ vi.mock('@/lib/tmux', () => ({
   createSession: vi.fn(async () => {}),
   hasSession: vi.fn(async () => true),
   killSession: tmux.killSession,
+  assertRemoteHostsAnswer: tmux.assertRemoteHostsAnswer,
   listSessions: vi.fn(async () => []),
   resolveExistingDir: vi.fn(async (cwd?: string) => cwd),
   sendKeys: vi.fn(async () => {}),
@@ -118,6 +119,56 @@ describe('every close path reaps by tab id (ADR-0016)', () => {
       ['s-a2', { tabId: 'tab-a2' }],
       ['s-b1', { tabId: 'tab-b1' }],
     ]));
+  });
+
+  describe('a workspace with a remote tab (ADR-0022, review r1 B3)', () => {
+    const withRemote = (): ILayoutData => {
+      const l = layout();
+      const paneB = (l.root as unknown as { children: Array<{ tabs: ILayoutData['root'] extends never ? never : Array<Record<string, unknown>> }> }).children[1];
+      paneB.tabs.push({ id: 'tab-r', sessionName: 's-r', name: 'r', order: 1, host: 'ai-server' });
+      return l;
+    };
+    const create = async () => {
+      const workspaces = await import('@/lib/workspace-store');
+      const dir = path.join(mockHome.value, `proj-${Math.random().toString(36).slice(2)}`);
+      await fs.mkdir(dir);
+      const ws = await workspaces.createWorkspace(dir);
+      const store = await import('@/lib/layout-store');
+      await store.writeLayoutFile(withRemote(), store.resolveLayoutFile(ws.id));
+      tmux.killSession.mockClear();
+      return { workspaces, ws, store };
+    };
+
+    it('a host that does not answer refuses the delete before any tab is reaped or any file changes', async () => {
+      const { workspaces, ws, store } = await create();
+      const { RemoteHostError } = await import('@/lib/remote-host');
+      tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+      await expect(workspaces.deleteWorkspace(ws.id)).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect((await workspaces.getWorkspaces()).workspaces.map((w) => w.id)).toContain(ws.id);
+      expect(await store.readLayoutFile(store.resolveLayoutFile(ws.id))).not.toBeNull();
+    });
+
+    it('a remote kill that fails after the check stops the delete with every local tab untouched', async () => {
+      const { workspaces, ws } = await create();
+      const { RemoteHostError } = await import('@/lib/remote-host');
+      tmux.killSession.mockImplementation(async (name: string) => {
+        if (name === 's-r') throw new RemoteHostError('ai-server', 'could not close');
+        return REAP;
+      });
+      await expect(workspaces.deleteWorkspace(ws.id)).rejects.toMatchObject({ name: 'RemoteHostError' });
+      expect(tmux.killSession.mock.calls.map((c) => c[0])).toEqual(['s-r']);
+      expect((await workspaces.getWorkspaces()).workspaces.map((w) => w.id)).toContain(ws.id);
+    });
+
+    it('closes the remote tab first, then the local ones, then deletes', async () => {
+      const { workspaces, ws } = await create();
+      expect(await workspaces.deleteWorkspace(ws.id)).toBe(true);
+      expect(tmux.killSession.mock.calls[0]).toEqual(['s-r', { tabId: 'tab-r' }]);
+      const names = tmux.killSession.mock.calls.map((c) => c[0]);
+      expect(names).toEqual(expect.arrayContaining(['s-a1', 's-a2', 's-b1']));
+      expect(names.filter((n) => n === 's-r')).toHaveLength(1);
+    });
   });
 
   // L38: a deliberate close announces itself BEFORE the reap, so the watchdog never reads it as a death.
