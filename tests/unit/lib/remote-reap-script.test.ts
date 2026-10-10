@@ -2,7 +2,7 @@ import { execFile, execFileSync, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { promisify } from 'util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { REMOTE_REAP_SCRIPT, parseRemoteReap } from '@/lib/remote-host';
+import { REMOTE_PROVIDER_SCRIPT, REMOTE_REAP_SCRIPT, parseRemoteProviderObservation, parseRemoteReap } from '@/lib/remote-host';
 import { buildRemoteShellLaunchCommand } from '@/lib/shell-env';
 
 // The remote close script and the remote pane launch command, run for real on
@@ -23,14 +23,14 @@ const supported = process.platform === 'linux' && hasTool('tmux');
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const runScript = (args: string[]): Promise<string> =>
+const runScript = (args: string[], script = REMOTE_REAP_SCRIPT): Promise<string> =>
   new Promise((resolve, reject) => {
     const child = spawn('sh', ['-s', '--', ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.on('error', reject);
     child.on('close', () => resolve(out));
-    child.stdin.end(REMOTE_REAP_SCRIPT);
+    child.stdin.end(script);
   });
 
 const markedPids = async (tab: string): Promise<number[]> => {
@@ -95,5 +95,19 @@ describe.skipIf(!supported)('remote reap script, run for real (ADR-0022 §9)', {
     expect(reap.envMarker).toBe('unknown');
     expect(reap.killed.length).toBeGreaterThanOrEqual(2);
     expect(await markedPids(tab)).toEqual([]);
+  });
+
+  it('a session tmux does not know is absent, never unknown (ADR-0022 slice b)', async () => {
+    const missing = parseRemoteProviderObservation(await runScript([sock, 'pt-ws-none-pane-x-tab-none', 'claude'], REMOTE_PROVIDER_SCRIPT));
+    expect(missing).toEqual({ state: 'absent', reason: 'session gone' });
+  });
+
+  it('finds a provider started in the pane, and only while it runs', async () => {
+    await run('tmux', ['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', session, '-x', '80', '-y', '24', 'sh -c "sleep 300"']);
+    await sleep(300);
+    const found = parseRemoteProviderObservation(await runScript([sock, session, 'sleep'], REMOTE_PROVIDER_SCRIPT));
+    expect(found.state).toBe('present');
+    if (found.state === 'present') expect(found.start).toMatch(/^\d+$/);
+    expect(parseRemoteProviderObservation(await runScript([sock, session, 'claude'], REMOTE_PROVIDER_SCRIPT)).state).toBe('absent');
   });
 });

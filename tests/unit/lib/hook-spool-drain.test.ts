@@ -907,7 +907,8 @@ describe('drainHookSpool (ADR-0020)', () => {
 describe('server boot wiring (ADR-0020)', () => {
   it('sets the drain before the status manager starts, starts the boot drains, unawaited, once the server listens and the port file exists, gates the inbox on them, and awaits the floors at shutdown', async () => {
     const server = await fs.readFile(path.join(__dirname, '..', '..', '..', 'server.ts'), 'utf-8');
-    const wire = server.indexOf('getStatusManager().setHookSpoolDrain(() => drainHookSpool(dispatchHook));');
+    // ADR-0022: the drain pulls remote tabs' spools first, then replays this server's spool.
+    const wire = server.indexOf('getStatusManager().setHookSpoolDrain(() => drainRemoteThenLocalHookSpools(dispatchHook));');
     const init = server.indexOf('await getStatusManager().init();');
     const listen = server.indexOf('? await startDev(port, appDir, bindPlan.host)');
     const portFile = server.indexOf('await ensureHookSettings(result.port);');

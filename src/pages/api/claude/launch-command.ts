@@ -10,6 +10,7 @@ import { createLogger } from '@/lib/logger';
 import { claudeProvider } from '@/lib/providers/claude';
 import { getActiveWorkspaceId } from '@/lib/workspace-store';
 import { getStatusManager } from '@/lib/status-manager';
+import { sessionHostOf } from '@/lib/session-host';
 
 const log = createLogger('claude-launch-command');
 
@@ -47,6 +48,10 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       : null;
     if (tabId && !launchPolicy) {
       return res.status(404).json({ error: 'Tab not found' });
+    }
+    // This route answers a command for this host's claude; a remote tab launches through `tab create` (ADR-0022).
+    if (launchPolicy && await sessionHostOf(launchPolicy.sessionName)) {
+      return res.status(409).json({ error: 'This tab runs on a remote host; its agent is launched by `purplemux tab create --host` (ADR-0022)', code: 'remote-type-unsupported' });
     }
     const options = {
       workspaceId: workspaceId ?? undefined,

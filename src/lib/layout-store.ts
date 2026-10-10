@@ -321,12 +321,18 @@ export const createPane = async (wsId: string, cwd?: string): Promise<{ paneId: 
  * so a host that does not answer refuses the whole close (`RemoteHostError`)
  * before any tab, local or remote, is touched. Returns each closed session's reap.
  */
-export const closeRemoteTabsFirst = async (tabs: readonly ITab[]): Promise<Map<string, IReapResult | null>> => {
+export const closeRemoteTabsFirst = async (
+  tabs: readonly ITab[],
+  onClosed?: (sessionName: string) => void,
+): Promise<Map<string, IReapResult | null>> => {
   const remote = tabs.filter((t) => t.host && t.panelType !== 'web-browser');
   const reaps = new Map<string, IReapResult | null>();
   if (remote.length === 0) return reaps;
   await assertRemoteHostsAnswer(remote.map((t) => t.sessionName));
-  for (const tab of remote) reaps.set(tab.sessionName, await killSession(tab.sessionName, { tabId: tab.id }));
+  for (const tab of remote) {
+    reaps.set(tab.sessionName, await killSession(tab.sessionName, { tabId: tab.id }));
+    onClosed?.(tab.sessionName);
+  }
   return reaps;
 };
 
@@ -436,7 +442,8 @@ export const closeTab = async (
 
 const requireAbandonedRuntime = async (sessionName: string, reap: IReapResult | null): Promise<void> => {
   const { observeSessionStrict } = await import('@/lib/tmux');
-  if (!reap || reap.reaper !== 'linux' || reap.survivors.length || (await observeSessionStrict(sessionName)).state !== 'absent') {
+  // A remote reap ran the same marker scan on its Linux host (ADR-0022 §9); tmux there proves absence.
+  if (!reap || (reap.reaper !== 'linux' && reap.reaper !== 'remote') || reap.survivors.length || (await observeSessionStrict(sessionName)).state !== 'absent') {
     throw new Error('Pending work retained: process reap or session absence is unconfirmed');
   }
 };
@@ -904,6 +911,8 @@ export const closePaneInLayout = async (wsId: string, paneId: string): Promise<I
     layout.updatedAt = new Date().toISOString();
     await writeLayoutFile(layout, filePath);
     syncWorkspaceDirectories(wsId, layout.root);
+    // A host with no tab left drops out of the pane scans (review r2 nit 3).
+    for (const tab of pane.tabs) forgetSessionHost(tab.sessionName);
     return layout;
   });
 

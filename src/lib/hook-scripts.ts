@@ -74,7 +74,7 @@ spool_hook() {
     SPOOL_META=",\\"bodyDropped\\":true,\\"bodyLength\\":\${#SPOOL_BODY}"
     SPOOL_BODY="null"
   fi
-  SPOOL_DIR="$HOME/.purplemux/${HOOK_SPOOL_DIRNAME}"
+  SPOOL_DIR="\${HOOK_SPOOL_DIR:-$HOME/.purplemux/${HOOK_SPOOL_DIRNAME}}"
   mkdir -p -m 700 "$SPOOL_DIR" 2>/dev/null || return 0
   SPOOL_RAND=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \\n')
   SPOOL_NAME="\${AT}-$$-\${SPOOL_RAND:-0}"
@@ -94,13 +94,13 @@ post_hook() {
   HOOK_BODY="$2"
   shift 2
   case "$HOOK_TARGET" in *\\?*) HOOK_QUERY="\${HOOK_TARGET#*\\?}" ;; *) HOOK_QUERY="" ;; esac
-  if [ -z "$PORT" ] || [ -z "$TOKEN" ]; then
+  if [ -z "\${HOOK_BASE_URL:-$PORT}" ] || [ -z "$TOKEN" ]; then
     spool_hook "$HOOK_QUERY" "$HOOK_BODY"
     return 0
   fi
   HOOK_RESULT=$(printf '%s' "$HOOK_BODY" | curl -s -X POST -o /dev/null -w '%{http_code} %{time_connect}' \\
     --connect-timeout 1 --max-time ${HOOK_MAX_TIME_SECONDS} "$@" -H 'Content-Type: application/json' -H "x-pmux-token: \${TOKEN}" \\
-    --data-binary @- "http://localhost:\${PORT}\${HOOK_TARGET}" 2>/dev/null)
+    --data-binary @- "\${HOOK_BASE_URL:-http://localhost:\${PORT}}\${HOOK_TARGET}" 2>/dev/null)
   HOOK_RC=$?
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
@@ -125,6 +125,8 @@ if [ \${#AT} -eq 19 ]; then AT="\${AT%??????}"; else AT=$(( $(date +%s) * 1000 )
 PORT=""
 TOKEN=""
 SPOOL_SKIP_EVENT=""
+HOOK_SPOOL_DIR=""
+HOOK_BASE_URL=""
 [ -f "$PORT_FILE" ] && PORT=$(cat "$PORT_FILE")
 [ -f "$TOKEN_FILE" ] && TOKEN=$(cat "$TOKEN_FILE")
 # \`timeout\` bounds tmux where coreutils has it (Linux); elsewhere tmux runs unbounded, as before.
@@ -230,6 +232,47 @@ BODY=$(cat)
 [ -z "$BODY" ] && BODY='{}'
 
 ( exec </dev/null >/dev/null 2>&1; post_hook "/api/status/hook?provider=grok&tmuxSession=\${SESSION}" "$BODY" ) &
+exit 0
+`;
+
+/**
+ * The Claude hook of a REMOTE tab (ADR-0022, slice b), installed on the remote
+ * host beside the hooks.json that names it. It posts the raw hook JSON to this
+ * server's callback URL (`PMUX_URL`) with the tab's own token
+ * (`PMUX_TAB_TOKEN`), both from the pane's environment; the server reads the
+ * session id and transcript path from the body. An event no server answers
+ * spools beside the script, and the server pulls that spool over ssh. The
+ * event name is one fixed word from hooks.json; anything else exits.
+ */
+export const REMOTE_HOOK_SCRIPT_CONTENT = `#!/bin/sh
+EVENT="\${1:-}"
+AT=$(date +%s%N 2>/dev/null)
+case "$AT" in *[!0-9]*) AT="" ;; esac
+if [ \${#AT} -eq 19 ]; then AT="\${AT%??????}"; else AT=$(( $(date +%s) * 1000 )); fi
+PORT=""
+TOKEN="\${PMUX_TAB_TOKEN:-}"
+HOOK_BASE_URL="\${PMUX_URL:-}"
+HOOK_SPOOL_DIR="$(cd "$(dirname "$0")" && pwd)/${HOOK_SPOOL_DIRNAME}"
+SPOOL_SKIP_EVENT=""
+HOOK_TIMEOUT=""
+command -v timeout >/dev/null 2>&1 && HOOK_TIMEOUT="timeout ${HOOK_TMUX_TIMEOUT_SECONDS}"
+SESSION=$($HOOK_TIMEOUT tmux display-message -p '#{session_name}' 2>/dev/null) || SESSION=""
+
+${SPOOL_FUNCTIONS}
+
+case "$EVENT" in
+  session-start|prompt-submit|notification|stop|pre-compact|post-compact|post-tool) ;;
+  *) exit 0 ;;
+esac
+case "$SESSION" in pt-*) ;; *) exit 0 ;; esac
+BODY=$(cat)
+[ -n "$BODY" ] || BODY='{}'
+TARGET="/api/status/hook?remote=claude&event=\${EVENT}&session=\${SESSION}"
+if [ "$EVENT" = "post-tool" ]; then
+  ( exec </dev/null >/dev/null 2>&1; post_hook "\${TARGET}&kind=tool" "$BODY" ) &
+  exit 0
+fi
+post_hook "$TARGET" "$BODY"
 exit 0
 `;
 

@@ -33,7 +33,12 @@ vi.mock('@/lib/workspace-token', () => ({ resolveCliScope: vi.fn(() => ({ type: 
 vi.mock('@/lib/providers', () => ({ getProviderByPanelType: vi.fn(() => null) }));
 vi.mock('@/lib/agent-availability', () => ({ checkAgentAvailabilityForPanelType: vi.fn(async () => ({ ok: true })), toAgentAvailabilityError: vi.fn() }));
 vi.mock('@/lib/agent-effort', () => ({ isValidReasoningForPanelType: vi.fn(() => true), reasoningErrorForPanelType: vi.fn() }));
-vi.mock('@/lib/claude-command', () => ({ buildClaudeFlags: vi.fn(async () => ''), isValidModelName: vi.fn(() => true) }));
+vi.mock('@/lib/claude-command', () => ({
+  buildClaudeFlags: vi.fn(async () => '--settings /home/mdone/.purplemux/hooks.json'),
+  buildRemoteClaudeLaunch: vi.fn(async (ws: string, o?: { model?: string; effort?: string }) => `PATH="$HOME/.purplemux-remote/mdserver1/bin":"$PATH" claude --settings "$HOME/.purplemux-remote/mdserver1/hooks.json" ws=${ws} model=${o?.model} effort=${o?.effort}`),
+  isValidModelName: vi.fn(() => true),
+}));
+const dirs = vi.hoisted(() => ({ remote: true as boolean | Error }));
 vi.mock('@/lib/providers/grok', () => ({ grokProvider: { buildLaunchCommand: vi.fn() } }));
 vi.mock('@/lib/status-manager', () => ({
   getStatusManager: () => ({ registerTab, markAgentLaunch: vi.fn(), getAllForClient: () => ({}) }),
@@ -54,6 +59,10 @@ vi.mock('@/lib/remote-host', async (importOriginal) => {
       if (registry.hosts instanceof Error) throw registry.hosts;
       return registry.hosts;
     }),
+    remoteDirExists: vi.fn(async () => {
+      if (dirs.remote instanceof Error) throw dirs.remote;
+      return dirs.remote;
+    }),
   };
 });
 
@@ -73,6 +82,7 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     registry.hosts = ['ai-server'];
+    dirs.remote = true;
     layout.addTabToPane.mockImplementation(async (_ws, _pane, name, cwd, panelType, _cmd, opts) => ({
       id: 'tab-new', sessionName: 'pt-ws-a-pane-one-tab-new', name, order: 0, cwd, panelType, ...(opts?.host ? { host: opts.host } : {}),
     }));
@@ -105,11 +115,59 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
     expect(state.body).toMatchObject({ code: 'remote-host-invalid', registered: [] });
   });
 
-  it.each(['claude-code', 'codex-cli', 'grok-cli', 'web-browser', 'diff', 'agent-sessions'])('refuses a remote %s tab with remote-type-unsupported', async (panelType) => {
+  it.each([
+    ['codex-cli', /managed launch proves the Codex process on this host/],
+    ['grok-cli', /no remote hook/],
+    ['web-browser', /terminal and claude-code/],
+    ['diff', /terminal and claude-code/],
+    ['agent-sessions', /terminal and claude-code/],
+  ])('refuses a remote %s tab with remote-type-unsupported and a reason', async (panelType, reason) => {
     const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', panelType });
     expect(state.statusCode).toBe(400);
-    expect(state.body).toMatchObject({ code: 'remote-type-unsupported' });
+    expect(state.body).toMatchObject({ code: 'remote-type-unsupported', error: expect.stringMatching(reason) });
     expect(layout.addTabToPane).not.toHaveBeenCalled();
+  });
+
+  it('creates a remote claude-code tab that launches with the kit on the host, model and effort pinned', async () => {
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', panelType: 'claude-code', model: 'opus', reasoning: 'high' });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).toMatchObject({ panelType: 'claude-code', host: 'ai-server', launched: true });
+    const [, , , , panelType, command, opts] = layout.addTabToPane.mock.calls[0];
+    expect(panelType).toBe('claude-code');
+    expect(command).toBe('PATH="$HOME/.purplemux-remote/mdserver1/bin":"$PATH" claude --settings "$HOME/.purplemux-remote/mdserver1/hooks.json" ws=ws-a model=opus effort=high');
+    expect(command).not.toContain('/home/mdone/.purplemux/hooks.json');
+    expect(opts).toMatchObject({ host: 'ai-server' });
+  });
+
+  it('a remote --cwd must exist on the host: it is the tab\'s start directory', async () => {
+    const ok = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', cwd: '/home/mdone/code/nomupay/x' });
+    expect(ok.statusCode).toBe(201);
+    expect(layout.addTabToPane.mock.calls[0][3]).toBe('/home/mdone/code/nomupay/x');
+    dirs.remote = false;
+    const missing = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', cwd: '/home/mdone/nope' });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.body).toMatchObject({ code: 'cwd-missing', error: expect.stringContaining('ai-server') });
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    dirs.remote = new RemoteHostError('ai-server', 'did not answer');
+    const down = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', cwd: '/home/mdone/code' });
+    expect(down.statusCode).toBe(503);
+    expect(down.body).toMatchObject({ code: 'remote-host-unreachable' });
+    expect(layout.addTabToPane).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['relative/dir', '', '/x\ny', 7])('refuses a --cwd that is not an absolute path: %j', async (cwd) => {
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', cwd });
+    expect(state.statusCode).toBe(400);
+    expect(state.body).toMatchObject({ code: 'cwd-missing' });
+  });
+
+  it('a local --cwd must exist on this host', async () => {
+    const missing = await call('POST', { workspaceId: 'ws-a', cwd: '/nonexistent/pmux-test-dir' });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.body).toMatchObject({ code: 'cwd-missing' });
+    const ok = await call('POST', { workspaceId: 'ws-a', cwd: '/tmp' });
+    expect(ok.statusCode).toBe(201);
+    expect(layout.addTabToPane.mock.calls[0][3]).toBe('/tmp');
   });
 
   it('an unreachable host answers remote-host-unreachable', async () => {

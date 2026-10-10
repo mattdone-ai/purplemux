@@ -76,9 +76,13 @@ const REMOTE_INHERITED_KEYS = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'XDG_
  * but the account values are the REMOTE host's: the sh that tmux runs the
  * command with expands them there. Only `extraEnv` comes from this host.
  */
-export const buildRemoteShellLaunchCommand = (extraEnv: Record<string, string> = {}): string => {
+export const buildRemoteShellLaunchCommand = (extraEnv: Record<string, string> = {}, envFile?: string): string => {
   const inherited = REMOTE_INHERITED_KEYS.map((k) => `${k}="$${k}"`).join(' ');
   const fixed = { PATH: LOGIN_SHELL_BASE_PATH, ...FORCED_OVERRIDES, ...extraEnv };
   const envArgs = Object.entries(fixed).map(([k, v]) => `${k}=${shQuote(v)}`).join(' ');
-  return `env -i TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" ${inherited} ${envArgs} "\${SHELL:-/bin/sh}" -l`;
+  const head = `env -i TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" ${inherited} ${envArgs}`;
+  if (!envFile) return `${head} "\${SHELL:-/bin/sh}" -l`;
+  // `envFile` is a double-quoted path the pane's sh expands; the file is read once, then removed.
+  const loader = 'set -a; [ -f "$1" ] && . "$1"; set +a; rm -f "$1"; exec "${SHELL:-/bin/sh}" -l';
+  return `${head} sh -c ${shQuote(loader)} pmux-tab ${envFile}`;
 };

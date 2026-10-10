@@ -72,4 +72,22 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
     expect(isSshFailure({ code: 'ENOENT' })).toBe(true);
     expect(isSshFailure({ code: 1 })).toBe(false);
   });
+
+  it('tmux\'s absence is read from any stderr line: an ssh warning or shell start-up output before it changes nothing (review r2 nit 2)', async () => {
+    const { isTmuxAbsence } = await import('@/lib/remote-host');
+    const absent = (stderr: string) => isTmuxAbsence({ code: 1, stderr });
+    expect(absent("Warning: Permanently added 'ai-server' (ED25519) to the list of known hosts.\ncan't find session: x")).toBe(true);
+    expect(absent('welcome banner\nno server running on /tmp/tmux-1000/pmux-mdserver1\n')).toBe(true);
+    expect(absent('some other failure')).toBe(false);
+    expect(isTmuxAbsence({ code: 255, stderr: "can't find session: x" })).toBe(false);
+    expect(isTmuxAbsence({ code: 1, killed: true, stderr: "can't find session: x" })).toBe(false);
+  });
+
+  it('the create tags the session in the same tmux command as new-session (review r2 nit 1)', async () => {
+    const { buildRemoteCreateScript } = await import('@/lib/remote-kit');
+    const script = buildRemoteCreateScript({ nonce: 'N0nce', files: [], session: 'pt-ws-a-pane-p-tab-r', cols: 80, rows: 24, launch: 'sh -l' });
+    const line = script.split('\n').find((l) => l.includes("'new-session'"));
+    expect(line).toMatch(/'new-session' .* 'sh -l' ';' 'set-option' '-t' '=pt-ws-a-pane-p-tab-r:' '@pmux-create' 'N0nce'$/);
+    expect(script.split('\n').filter((l) => l.includes('@pmux-create'))).toHaveLength(1);
+  });
 });

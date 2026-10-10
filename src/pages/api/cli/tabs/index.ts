@@ -8,7 +8,7 @@ import { resolveCliScope } from '@/lib/workspace-token';
 import { getProviderByPanelType } from '@/lib/providers';
 import { checkAgentAvailabilityForPanelType, toAgentAvailabilityError } from '@/lib/agent-availability';
 import { isValidReasoningForPanelType, reasoningErrorForPanelType } from '@/lib/agent-effort';
-import { buildClaudeFlags, isValidModelName } from '@/lib/claude-command';
+import { buildClaudeFlags, buildRemoteClaudeLaunch, isValidModelName } from '@/lib/claude-command';
 import { grokProvider } from '@/lib/providers/grok';
 import { getStatusManager } from '@/lib/status-manager';
 import { createLogger } from '@/lib/logger';
@@ -16,7 +16,9 @@ import { agentLaunchConfigFromOptions } from '@/lib/agent-launch-policy';
 import { checkAgentDispatchPolicy } from '@/lib/agent-dispatch-policy';
 import { checkReportsTo } from '@/lib/reports-to';
 import { tabIdentityOf } from '@/lib/tab-token';
-import { RemoteHostError, isValidRemoteHostName, readRemoteHosts } from '@/lib/remote-host';
+import { RemoteHostError, isValidRemoteHostName, readRemoteHosts, remoteDirExists } from '@/lib/remote-host';
+import fs from 'fs/promises';
+import path from 'path';
 import {
   prepareCodexManagedLaunch,
   submitCodexManagedLaunch,
@@ -33,13 +35,17 @@ const VALID_PANEL_TYPES: TPanelType[] = ['terminal', 'claude-code', 'codex-cli',
 
 type TRemoteHostCheck = { ok: true; host: string } | { ok: false; status: number; body: Record<string, unknown> };
 
-/**
- * A remote tab (ADR-0022): a registered host, and in this release a terminal
- * only. Agent tabs need hooks and transcripts this server cannot reach yet.
- */
+/** Why each type cannot run on a remote host (ADR-0022). */
+const REMOTE_TYPE_REFUSAL: Partial<Record<TPanelType, string>> = {
+  'codex-cli': 'codex-cli cannot run on a remote host: its managed launch proves the Codex process on this host (ADR-0021, ADR-0022)',
+  'grok-cli': 'grok-cli cannot run on a remote host yet: there is no remote hook for it (ADR-0022)',
+};
+
+/** A remote tab (ADR-0022): a registered host, and a terminal or a claude-code tab. */
 const checkRemoteHost = async (host: unknown, panelType: TPanelType): Promise<TRemoteHostCheck> => {
-  if (panelType !== 'terminal') {
-    return { ok: false, status: 400, body: { error: `only terminal tabs run on a remote host (ADR-0022); ${panelType} is not supported there yet`, code: 'remote-type-unsupported', panelType } };
+  if (panelType !== 'terminal' && panelType !== 'claude-code') {
+    const error = REMOTE_TYPE_REFUSAL[panelType] ?? `only terminal and claude-code tabs run on a remote host (ADR-0022); ${panelType} does not`;
+    return { ok: false, status: 400, body: { error, code: 'remote-type-unsupported', panelType } };
   }
   let registered: string[];
   try {
@@ -51,6 +57,33 @@ const checkRemoteHost = async (host: unknown, panelType: TPanelType): Promise<TR
     return { ok: false, status: 400, body: { error: `host is not a registered remote host; set fleet config remote.hosts (ADR-0022)`, code: 'remote-host-invalid', host: typeof host === 'string' ? host : null, registered } };
   }
   return { ok: true, host };
+};
+
+type TCwdCheck = { ok: true } | { ok: false; status: number; body: Record<string, unknown> };
+
+/**
+ * `--cwd`: an absolute directory that exists on the host the tab runs on. A
+ * remote worker works in its own checkout there; this host's tree says nothing
+ * about it (ADR-0022).
+ */
+const checkCwd = async (cwd: unknown, host: string | undefined): Promise<TCwdCheck> => {
+  const where = host ?? 'this host';
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || /[\0\n\r]/.test(cwd)) {
+    return { ok: false, status: 400, body: { error: 'cwd must be an absolute directory path', code: 'cwd-missing', cwd: typeof cwd === 'string' ? cwd : null } };
+  }
+  let exists: boolean;
+  if (host) {
+    try {
+      exists = await remoteDirExists(host, cwd);
+    } catch (err) {
+      if (err instanceof RemoteHostError) return { ok: false, status: 503, body: remoteHostUnreachableBody(err) };
+      throw err;
+    }
+  } else {
+    exists = await fs.stat(cwd).then((st) => st.isDirectory(), () => false);
+  }
+  if (!exists) return { ok: false, status: 400, body: { error: `${cwd} is not a directory on ${where}; create it there first (a remote worker uses its own checkout or worktree)`, code: 'cwd-missing', cwd, host: host ?? null } };
+  return { ok: true };
 };
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
@@ -125,7 +158,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   if (req.method === 'POST') {
-    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, host } = req.body as {
+    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, host, cwd } = req.body as {
       workspaceId?: string;
       name?: string;
       panelType?: string;
@@ -135,6 +168,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       scope?: unknown;
       reportsTo?: unknown;
       host?: unknown;
+      cwd?: unknown;
     };
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspaceId is required' });
@@ -172,6 +206,10 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       if (!checked.ok) return res.status(checked.status).json(checked.body);
       remoteHost = checked.host;
     }
+    if (cwd !== undefined) {
+      const checkedCwd = await checkCwd(cwd, remoteHost);
+      if (!checkedCwd.ok) return res.status(checkedCwd.status).json(checkedCwd.body);
+    }
     const availability = await checkAgentAvailabilityForPanelType(resolvedType);
     if (!availability.ok) {
       return res.status(availability.status).json(toAgentAvailabilityError(availability));
@@ -193,7 +231,9 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     let command: string | undefined;
     if (shouldLaunch) {
       if (resolvedType === 'claude-code') {
-        command = `claude ${await buildClaudeFlags(workspaceId, { model, effort: reasoning })}`;
+        command = remoteHost
+          ? await buildRemoteClaudeLaunch(workspaceId, { model, effort: reasoning })
+          : `claude ${await buildClaudeFlags(workspaceId, { model, effort: reasoning })}`;
       } else if (resolvedType === 'grok-cli') {
         // Catch-all else is codex; routing grok through it launched codex
         // inside a grok tab. Pin model/effort at launch the same as the others.
@@ -202,7 +242,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     }
 
     try {
-      const tab = await addTabToPane(workspaceId, paneId, name, ws.directories[0], resolvedType, command, {
+      const tab = await addTabToPane(workspaceId, paneId, name, typeof cwd === 'string' ? cwd : ws.directories[0], resolvedType, command, {
         scope: scope as string[] | undefined,
         agentLaunchConfig: agentLaunchConfigFromOptions(model, reasoning),
         reportsTo: typeof reportsTo === 'string' ? reportsTo : undefined,

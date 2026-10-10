@@ -13,7 +13,7 @@ import { getWorkspaceToken } from '@/lib/workspace-token';
 import { ensureTabToken, type ITabIdentity } from '@/lib/tab-token';
 import { createLogger } from '@/lib/logger';
 import { isLinux } from '@/lib/platform';
-import { getProcessArgs, readProcChildren } from '@/lib/process-utils';
+import { getProcessArgs, readProcChildren, type TStrictRuntimeObservation } from '@/lib/process-utils';
 import { PASTE_END, PASTE_START, TYPED_CHUNK_GAP_MS, planTypedInput } from '@/lib/typed-input';
 import { defaultReaperDeps, reapTabForClose, type IReapResult } from '@/lib/tab-reaper';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
@@ -24,18 +24,19 @@ import {
   isSshFailure,
   isTmuxAbsence,
   remoteKillIfTagged,
-  remoteSessionExistsGuard,
-  remoteTagSession,
   parseRemoteReap,
   reapCommand,
   readRemoteHosts,
-  remoteBaseDir,
-  remoteSocketName,
   remoteTmuxCommand,
+  REMOTE_PROVIDER_SCRIPT,
   REMOTE_REAP_SCRIPT,
-  runSsh,
+  parseRemoteProviderObservation,
+  remoteSocketName,
+  resolveCallbackUrl,
   shQuote,
+  runSsh,
 } from '@/lib/remote-host';
+import { buildRemoteCreateScript, remoteKitFiles, remoteKitPath, remoteTabEnvFile, remoteTabEnvRelative } from '@/lib/remote-kit';
 import { knownRemoteHosts, remoteHostsInUse, sessionHostOf } from '@/lib/session-host';
 
 const log = createLogger('terminal');
@@ -44,6 +45,7 @@ const execFile = promisify(execFileCb);
 
 const TMUX_SOCKET = 'purple';
 const TMUX_CONFIG_PATH = path.join(process.env.__PMUX_APP_DIR_UNPACKED || process.env.__PMUX_APP_DIR || process.cwd(), 'src', 'config', 'tmux.conf');
+const CLI_JS_PATH = path.join(process.env.__PMUX_APP_DIR_UNPACKED || process.env.__PMUX_APP_DIR || process.cwd(), 'bin', 'cli.js');
 const CMD_TIMEOUT = 5000;
 /** A remote close waits out the reap script's 3 s grace and settle on top of the ssh round trip. */
 const REMOTE_REAP_TIMEOUT = 20_000;
@@ -134,10 +136,11 @@ const tabEnv = async (sessionName: string, identity?: ITabIdentity): Promise<Rec
 };
 
 /**
- * A remote tab's session (ADR-0022 §8). The local tmux.conf goes to the remote
- * host first (stdin), so the remote server starts with it and an existing one
- * re-reads it. The pane gets only the reap marker: no token, no claude or grok
- * home — those name this host's paths and secrets.
+ * A remote tab's session (ADR-0022 §8; slice b). One `ssh … sh -s` run writes
+ * the kit (tmux.conf, the Claude hook and hooks.json, this server's CLI, the
+ * workspace prompt) and the tab's one-shot env file, then starts the session.
+ * The pane gets the reap marker, `PMUX_URL` and, through the env file only, its
+ * own tab token: never the workspace token, never a claude or grok home.
  */
 const createRemoteSession = async (
   host: string,
@@ -147,37 +150,46 @@ const createRemoteSession = async (
   cwd: string | undefined,
   identity: ITabIdentity | undefined,
 ): Promise<void> => {
-  const marker: Record<string, string> = identity
-    ? { PMUX_TAB_ID: identity.tabId, PMUX_WORKSPACE_ID: identity.workspaceId }
-    : {};
+  const env: Record<string, string> = {};
+  let tabEnv: { tabId: string; content: string } | undefined;
+  if (identity) {
+    env.PMUX_TAB_ID = identity.tabId;
+    env.PMUX_WORKSPACE_ID = identity.workspaceId;
+    env.PMUX_URL = await resolveCallbackUrl();
+    tabEnv = { tabId: identity.tabId, content: remoteTabEnvFile({ PMUX_TAB_TOKEN: await ensureTabToken(identity, name) }) };
+  }
+  const { getClaudePromptPath } = await import('@/lib/claude-prompt');
+  const [tmuxConf, cliJs, prompt] = await Promise.all([
+    fs.readFile(TMUX_CONFIG_PATH, 'utf-8'),
+    fs.readFile(CLI_JS_PATH, 'utf-8').catch(() => null),
+    identity ? fs.readFile(getClaudePromptPath(identity.workspaceId), 'utf-8').catch(() => null) : Promise.resolve(null),
+  ]);
+  const launch = buildRemoteShellLaunchCommand(env, tabEnv ? remoteKitPath(remoteTabEnvRelative(tabEnv.tabId)) : undefined);
   const nonce = nanoid(16);
-  const sock = shQuote(remoteSocketName());
-  const config = await fs.readFile(TMUX_CONFIG_PATH, 'utf-8');
-  const script = [
-    'set -e',
-    `d=${remoteBaseDir()}`,
-    'umask 077',
-    'mkdir -p "$d"',
-    `printf '%s' ${shQuote(Buffer.from(config).toString('base64'))} | base64 -d > "$d/tmux.conf.tmp.$$"`,
-    'mv -f "$d/tmux.conf.tmp.$$" "$d/tmux.conf"',
-    remoteSessionExistsGuard(name),
-    [
-      shQuote('tmux'), shQuote('-u'), shQuote('-L'), sock, shQuote('-f'), '"$d/tmux.conf"',
-      ...['new-session', '-d', '-s', name, '-x', String(cols), '-y', String(rows), ...(cwd ? ['-c', cwd] : [])].map(shQuote),
-      shQuote(buildRemoteShellLaunchCommand(marker)),
-    ].join(' '),
-    remoteTagSession(name, nonce),
-    `${shQuote('tmux')} ${shQuote('-L')} ${sock} ${shQuote('source-file')} "$d/tmux.conf"`,
-  ].join('\n');
+  const script = buildRemoteCreateScript({
+    nonce,
+    files: remoteKitFiles({ tmuxConf, cliJs, workspaceId: identity?.workspaceId, prompt, tabEnv }),
+    session: name,
+    cols,
+    rows,
+    cwd,
+    launch,
+  });
   try {
-    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: `${script}\n` });
+    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: script });
   } catch (err) {
+    // The guard runs before any file is written: a name that exists leaves everything as it was.
     if ((err as { code?: unknown }).code === REMOTE_SESSION_EXISTS_EXIT) {
       throw new Error(`remote session ${name} already exists on ${host}; it was left as it is`);
     }
     // The session may exist although the call failed (a later step, a lost answer). Only a session
-    // that carries this call's nonce is killed: never a live one of the same name (review r1, B2).
-    await runSsh(host, remoteKillIfTagged(name, nonce), { timeoutMs: CMD_TIMEOUT }).catch(() => {});
+    // that carries this call's nonce is killed: never a live one of the same name (review r1, B2);
+    // and the token's env file goes too.
+    const cleanup = [
+      remoteKillIfTagged(name, nonce),
+      ...(tabEnv ? [`rm -f ${remoteKitPath(remoteTabEnvRelative(tabEnv.tabId))}`] : []),
+    ].join('; ');
+    await runSsh(host, cleanup, { timeoutMs: CMD_TIMEOUT }).catch(() => {});
     if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)})`);
     throw new Error(`remote session ${name} on ${host} was not created (${describeRemoteFailure(err)})`);
   }
@@ -418,6 +430,31 @@ export const hasSessionOrUnreachable = async (name: string): Promise<boolean> =>
     throw new RemoteHostError(host, `remote host ${host} did not answer over ssh; ${name} may still run there`);
   }
   return presence === 'present';
+};
+
+/**
+ * The provider process of a remote tab, with strict identity (ADR-0021 on
+ * another host): the pane's id and pid and the provider's pid and start time,
+ * read on the host by one script. ssh failing is `unknown`, never `absent`.
+ */
+export const observeRemoteProviderProcess = async (
+  sessionName: string,
+  provider: 'claude' | 'codex' | 'grok',
+): Promise<TStrictRuntimeObservation> => {
+  const host = await sessionHostOf(sessionName);
+  if (!host) return { state: 'unknown', reason: 'not a remote session' };
+  let stdout: string;
+  try {
+    ({ stdout } = await runSsh(host, ['sh', '-s', '--', remoteSocketName(), sessionName, provider].map(shQuote).join(' '), {
+      timeoutMs: CMD_TIMEOUT,
+      input: REMOTE_PROVIDER_SCRIPT,
+    }));
+  } catch (err) {
+    return { state: 'unknown', reason: `remote host ${host} did not answer (${describeRemoteFailure(err)})` };
+  }
+  const observed = parseRemoteProviderObservation(stdout);
+  if (observed.state !== 'present') return observed;
+  return { state: 'present', identity: `remote:${host}:${sessionName}:${observed.paneId}:${observed.panePid}:${observed.pid}:${observed.start}:${provider}` };
 };
 
 /**

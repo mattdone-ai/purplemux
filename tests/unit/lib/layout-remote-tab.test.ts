@@ -14,6 +14,7 @@ const tmux = vi.hoisted(() => ({
   hasSession: vi.fn(async (_name: string) => false),
   hasSessionOrUnreachable: vi.fn(async (_name: string) => false),
   assertRemoteHostsAnswer: vi.fn(async (_names: readonly string[]) => {}),
+  observeSessionStrict: vi.fn(async () => ({ state: 'absent', reason: 'tmux said so' })),
   killSession: vi.fn(async (..._args: unknown[]) => null),
   resolveExistingDir: vi.fn(async (cwd?: string) => cwd ?? '/home'),
   sendKeys: vi.fn(async () => {}),
@@ -184,6 +185,43 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     await reconcileTabCwd('pt-ws-a-pane-1-tab-r');
     expect(tmux.resolveExistingDir).not.toHaveBeenCalled();
     expect((JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8')) as { root: { tabs: Array<{ cwd: string }> } }).root.tabs[0].cwd).toBe('/only/on/ai-server');
+  });
+
+  it('a remote tab with pending agent work closes on a remote reap with no survivors and tmux-proven absence', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+        orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 }, turn: { generation: 't', runtimeGeneration: 'g', at: 2 } } },
+    ]));
+    tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [] } as never);
+    const { closeTab } = await import('@/lib/layout-store');
+    expect((await closeTab('ws-a', 'pane-1', 'tab-r')).ok).toBe(true);
+  });
+
+  it('a remote reap with a survivor keeps the pending tab', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+        orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 } } },
+    ]));
+    tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [{ pid: 9, comm: 'x', args: 'x' }] } as never);
+    const { closeTab } = await import('@/lib/layout-store');
+    await expect(closeTab('ws-a', 'pane-1', 'tab-r')).rejects.toThrow('Pending work retained');
+  });
+
+  it('a pane close forgets the hosts of the tabs it closed', async () => {
+    const { registerSessionHost, knownRemoteHosts } = await import('@/lib/session-host');
+    const twoPanes: ILayoutData = {
+      root: { type: 'split', orientation: 'horizontal', ratio: 50, children: [
+        { type: 'pane', id: 'pane-1', activeTabId: 'tab-r', tabs: [{ id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'ai-server' }] },
+        { type: 'pane', id: 'pane-2', activeTabId: null, tabs: [] },
+      ] } as never,
+      activePaneId: 'pane-1',
+      updatedAt: '2026-10-10T00:00:00.000Z',
+    };
+    await writeLayout('ws-a', twoPanes);
+    registerSessionHost('pt-ws-a-pane-1-tab-r', 'ai-server');
+    const { closePaneInLayout } = await import('@/lib/layout-store');
+    await closePaneInLayout('ws-a', 'pane-1');
+    expect(knownRemoteHosts()).toEqual([]);
   });
 
   it('closing a remote tab forgets its host', async () => {

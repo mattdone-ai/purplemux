@@ -73,9 +73,21 @@ import { getOrchestratorPresenceMonitor } from '@/lib/orchestrator-presence';
 import type { IOrchestratorPresenceFacts } from '@/types/coordination';
 import fs from 'fs/promises';
 import { watch, type FSWatcher } from 'fs';
+import { syncRemoteTranscript } from '@/lib/remote-transcript';
 
 const toAlertProvider = (providerId: string | undefined): TAlertProviderId =>
   providerId === 'codex' || providerId === 'grok' ? providerId : 'claude';
+
+/**
+ * Whether the pane's agent runs. A remote pane has no pid here (ADR-0022): its
+ * foreground command, which tmux reports over ssh, is the evidence.
+ */
+const agentRunningIn = async (paneInfo: IPaneInfo | undefined, provider: IAgentProvider | null): Promise<boolean> => {
+  if (!paneInfo || !provider) return false;
+  if (paneInfo.host) return provider.matchesProcess(paneInfo.command);
+  if (!paneInfo.pid) return false;
+  return provider.isAgentRunning(paneInfo.pid, await getChildPids(paneInfo.pid));
+};
 
 const log = createLogger('status');
 const hookLog = createLogger('hooks');
@@ -352,10 +364,7 @@ export class StatusManager {
 
     const provider = getProviderByPanelType(entry.panelType);
     const paneInfo = (await getAllPanesInfo()).get(entry.tmuxSession);
-    const childPids = paneInfo?.pid ? await getChildPids(paneInfo.pid) : [];
-    const agentRunning = paneInfo?.pid && provider
-      ? await provider.isAgentRunning(paneInfo.pid, childPids)
-      : false;
+    const agentRunning = await agentRunningIn(paneInfo, provider);
 
     if (!agentRunning) {
       this.applyCliState(tabId, entry, 'idle', { silent: true });
@@ -364,6 +373,7 @@ export class StatusManager {
       return;
     }
 
+    await syncRemoteTranscript(entry.tmuxSession).catch(() => false);
     const unknownStateHandle = this.runtimeHandle(entry);
     if (provider && unknownStateHandle) {
       const snapshot = await provider.readRuntimeSnapshot(unknownStateHandle, {
@@ -413,11 +423,20 @@ export class StatusManager {
     tab?: ITab,
   ): Promise<{ lastAssistantSnippet: string | null; currentAction: ICurrentAction | null; jsonlPath: string | null }> {
     const empty = { lastAssistantSnippet: null, currentAction: null, jsonlPath: null };
-    if (!paneInfo || !paneInfo.pid || !provider) return empty;
-
+    if (!(await agentRunningIn(paneInfo, provider)) || !paneInfo || !provider) return empty;
+    // A remote tab's transcript is the local copy its hooks bound (ADR-0022); nothing else is local.
+    if (paneInfo.host) {
+      const copy = tab ? provider.readJsonlPath(tab) : null;
+      if (!copy) return empty;
+      try {
+        await fs.access(copy);
+        const { lastAssistantSnippet, currentAction } = await provider.readRuntimeSnapshot(copy);
+        return { lastAssistantSnippet, currentAction, jsonlPath: copy };
+      } catch {
+        return empty;
+      }
+    }
     const childPids = await getChildPids(paneInfo.pid);
-    const running = await provider.isAgentRunning(paneInfo.pid, childPids);
-    if (!running) return empty;
 
     if (tab) {
       const persistedJsonlPath = provider.readJsonlPath(tab);
@@ -730,6 +749,11 @@ export class StatusManager {
           continue;
         }
 
+        // A busy remote tab's copy follows the remote transcript between hooks (ADR-0022): the
+        // watch on the copy then updates the snippet and current action.
+        if (paneInfo?.host && (existing.cliState === 'busy' || existing.cliState === 'needs-input')) {
+          void syncRemoteTranscript(tab.sessionName).catch(() => false);
+        }
         const processChanged = existing.currentProcess !== currentProcess;
         const messageChanged = existing.lastUserMessage !== tab.lastUserMessage;
         const panelTypeChanged = existing.panelType !== tab.panelType;
@@ -789,12 +813,7 @@ export class StatusManager {
         let agentRunningCache: boolean | null = null;
         const checkAgentRunning = async (): Promise<boolean> => {
           if (agentRunningCache !== null) return agentRunningCache;
-          if (!paneInfo?.pid || !provider) {
-            agentRunningCache = false;
-            return false;
-          }
-          const childPids = await getChildPids(paneInfo.pid);
-          agentRunningCache = await provider.isAgentRunning(paneInfo.pid, childPids);
+          agentRunningCache = await agentRunningIn(paneInfo, provider);
           return agentRunningCache;
         };
 
@@ -2241,11 +2260,15 @@ export class StatusManager {
       const provider = getProviderByPanelType(entry.panelType);
       const handle = this.runtimeHandle(entry);
       if (provider && handle) {
-        const read = async () => provider.readRuntimeSnapshot(handle, {
-          force: true,
-          tasksSince: await this.agentProcessStartedAt(tabId, entry),
-          withBackground: true,
-        });
+        const read = async () => {
+          // A remote tab's copy is brought up to date before each read (ADR-0022).
+          await syncRemoteTranscript(tmuxSession).catch(() => false);
+          return provider.readRuntimeSnapshot(handle, {
+            force: true,
+            tasksSince: await this.agentProcessStartedAt(tabId, entry),
+            withBackground: true,
+          });
+        };
         snapshot = await read();
         // The Stop hook can fire before the final entry reaches the file.
         if (!snapshot.idle || !snapshot.lastAssistantTail) {

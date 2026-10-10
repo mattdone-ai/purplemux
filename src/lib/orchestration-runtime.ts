@@ -1,4 +1,4 @@
-import { observeSessionStrict } from '@/lib/tmux';
+import { observeRemoteProviderProcess, observeSessionStrict } from '@/lib/tmux';
 import { observeProviderProcess, type TStrictRuntimeObservation } from '@/lib/process-utils';
 import { getStatusManager } from '@/lib/status-manager';
 import { getCodexModelStatus } from '@/lib/providers/codex/model-observation';
@@ -14,6 +14,8 @@ export const observeOrchestrationRuntime = async (tab: ITab): Promise<TStrictRun
 export const observeOrchestrationProcess = async (tab: ITab): Promise<TStrictRuntimeObservation> => {
   const provider = tab.panelType === 'claude-code' ? 'claude' : tab.panelType === 'codex-cli' ? 'codex' : tab.panelType === 'grok-cli' ? 'grok' : null;
   if (!provider) return { state: 'unknown', reason: 'candidate is not an agent tab' };
+  // A remote tab's process lives on its host: observed there, never through a local pid (ADR-0022).
+  if (tab.host) return observeRemoteProviderProcess(tab.sessionName, provider);
   const session = await observeSessionStrict(tab.sessionName);
   if (session.state !== 'present') return session;
   const process = await observeProviderProcess(session.panePid, provider);

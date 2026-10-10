@@ -18,16 +18,19 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
   let port = 0;
   let home = '';
   let requests: IRequest[] = [];
+  let tokens: Array<string | undefined> = [];
   let reply: { status: number; body: unknown } = { status: 201, body: {} };
 
   beforeEach(async () => {
     requests = [];
+    tokens = [];
     home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-cli-host-'));
     server = http.createServer((req, res) => {
       let raw = '';
       req.on('data', (d) => { raw += d; });
       req.on('end', () => {
         requests.push({ method: req.method ?? '', url: req.url ?? '', body: raw ? JSON.parse(raw) : null });
+        tokens.push(req.headers['x-pmux-token'] as string | undefined);
         res.writeHead(reply.status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(reply.body));
       });
@@ -61,6 +64,12 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ host: 'ai-server' });
   });
 
+  it('sends --cwd with the create', async () => {
+    reply = { status: 201, body: { tabId: 'tab-new' } };
+    await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'ai-server', '--cwd', '/home/mdone/wt/x']);
+    expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'ai-server', cwd: '/home/mdone/wt/x' });
+  });
+
   it('a --host without a value is a usage error and sends nothing', async () => {
     const result = await cli(['tab', 'create', '-w', 'ws-a', '--host']);
     expect(result.code).toBe(2);
@@ -78,8 +87,24 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
     expect(result.stderr).toContain(code);
   });
 
-  it('documents --host in the usage text', async () => {
+  it('PMUX_URL sends every request to that server with the tab token, without a port file (ADR-0022)', async () => {
+    reply = { status: 200, body: { tabs: [] } };
+    try {
+      const { stdout } = await run(process.execPath, [ENTRY, 'tab', 'list', '-w', 'ws-a'], {
+        env: { NODE_ENV: 'test', PATH: process.env.PATH ?? '', HOME: home, NO_UPDATE_NOTIFIER: '1', PMUX_URL: `http://127.0.0.1:${port}/`, PMUX_TAB_TOKEN: 'tab-secret' },
+      });
+      expect(JSON.parse(stdout)).toEqual({ tabs: [] });
+    } catch (err) {
+      throw new Error(String((err as { stderr?: string }).stderr));
+    }
+    expect(requests).toEqual([{ method: 'GET', url: '/api/cli/tabs?workspaceId=ws-a', body: null }]);
+    expect(tokens).toEqual(['tab-secret']);
+  });
+
+  it('documents --host and --cwd in the usage text', async () => {
     const result = await cli(['help']);
     expect(result.stdout + result.stderr).toMatch(/--host HOST/);
+    expect(result.stdout + result.stderr).toMatch(/--cwd DIR/);
+    expect(result.stdout + result.stderr).toMatch(/PMUX_URL/);
   });
 });

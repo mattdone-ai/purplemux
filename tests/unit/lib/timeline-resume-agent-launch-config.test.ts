@@ -33,6 +33,8 @@ vi.mock('@/lib/status-manager', () => ({
   getStatusManager: () => status,
 }));
 vi.mock('@/lib/providers/codex/managed-launch', () => managed);
+const hosts = vi.hoisted(() => ({ remote: new Set<string>() }));
+vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (hosts.remote.has(s) ? 'ai-server' : null) }));
 
 describe('timeline resume agent launch config', () => {
   beforeEach(() => {
@@ -57,6 +59,24 @@ describe('timeline resume agent launch config', () => {
       generation: 'codex-generation',
       phase: 'active',
     });
+  });
+
+  it('refuses to resume a remote tab: it would type this host\'s launch command there (ADR-0022)', async () => {
+    const sessionName = 'pt-ws-pins-pane-one-tab-r';
+    hosts.remote.add(sessionName);
+    const buildResumeCommand = vi.fn(async () => 'resume-command');
+    const sent: string[] = [];
+    const ws = { readyState: 1, bufferedAmount: 0, send: (payload: string) => sent.push(payload) };
+    const { handleResumeMessage } = await import('@/lib/timeline-server');
+    await handleResumeMessage(ws as never, { sessionName, provider: { id: 'claude', buildResumeCommand }, currentJsonlPath: null } as never, {
+      sessionId: '01a008c1-bb96-71d1-9769-b63ff478fd9f',
+      tmuxSession: sessionName,
+    });
+    hosts.remote.clear();
+    expect(sent.map((payload) => JSON.parse(payload).type)).toEqual(['timeline:resume-error']);
+    expect(buildResumeCommand).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(status.markAgentLaunch).not.toHaveBeenCalled();
   });
 
   it('forwards the connected tab persisted pins to the provider resume command', async () => {

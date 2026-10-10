@@ -1,5 +1,7 @@
 import { execFile } from 'child_process';
+import { readFileSync } from 'fs';
 import os from 'os';
+import path from 'path';
 import { readFleetConfig, valueOf } from '@/lib/fleet-config-store';
 import type { IReapedProcess, IReapResult } from '@/lib/tab-reaper';
 
@@ -25,6 +27,38 @@ export const parseRemoteHosts = (raw: string | null | undefined): string[] =>
 export const readRemoteHosts = async (): Promise<string[]> =>
   parseRemoteHosts(valueOf(await readFleetConfig(), REMOTE_HOSTS_KEY)?.value);
 
+export const REMOTE_CALLBACK_URL_KEY = 'remote.callback-url';
+
+const CALLBACK_URL = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?$/;
+
+export const isValidCallbackUrl = (value: unknown): value is string =>
+  typeof value === 'string' && CALLBACK_URL.test(value);
+
+const serverPort = (): string => {
+  if (process.env.PORT && /^\d{1,5}$/.test(process.env.PORT)) return process.env.PORT;
+  try {
+    const port = readFileSync(path.join(os.homedir(), '.purplemux', 'port'), 'utf-8').trim();
+    if (/^\d{1,5}$/.test(port)) return port;
+  } catch {
+    // no port file: the default below
+  }
+  return '8022';
+};
+
+/**
+ * Where a remote tab's hooks and CLI reach this server: fleet config
+ * `remote.callback-url`, else `http://<this hostname>:<port>` (a Tailscale
+ * name answers on the tailnet). Throws when the fleet config is unreadable.
+ */
+export const resolveCallbackUrl = async (): Promise<string> => {
+  const configured = valueOf(await readFleetConfig(), REMOTE_CALLBACK_URL_KEY)?.value;
+  if (configured !== undefined) {
+    if (!isValidCallbackUrl(configured)) throw new Error(`fleet config ${REMOTE_CALLBACK_URL_KEY} is not http(s)://host[:port]: ${JSON.stringify(configured)}`);
+    return configured;
+  }
+  return `http://${os.hostname()}:${serverPort()}`;
+};
+
 /** This server's name on a remote host: it keys the remote socket and config directory. */
 export const originName = (): string => {
   const name = os.hostname().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -36,9 +70,6 @@ export const originName = (): string => {
  * its scans must not see this server's sessions.
  */
 export const remoteSocketName = (): string => `pmux-${originName()}`;
-
-/** Expanded by the remote shell; `originName` is `[a-z0-9-]` only. */
-export const remoteBaseDir = (): string => `"$HOME"/.purplemux-remote/${originName()}`;
 
 export const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
@@ -57,18 +88,28 @@ export const REMOTE_SESSION_EXISTS_EXIT = 17;
 export const remoteSessionExistsGuard = (session: string): string =>
   `if ${remoteTmuxCommand(['has-session', '-t', `=${session}`])} 2>/dev/null; then echo ${shQuote(`pmux: session ${session} already exists`)} >&2; exit ${REMOTE_SESSION_EXISTS_EXIT}; fi`;
 
-export const remoteTagSession = (session: string, nonce: string): string =>
-  remoteTmuxCommand(['set-option', '-t', `=${session}:`, '@pmux-create', nonce]);
+/**
+ * Appended to the `new-session` arguments: tmux runs it in the same client
+ * command, so no dropped connection can leave the new session untagged
+ * (review r2 nit 1).
+ */
+export const remoteTagArgs = (session: string, nonce: string): string[] =>
+  [';', 'set-option', '-t', `=${session}:`, '@pmux-create', nonce];
 
 export const remoteKillIfTagged = (session: string, nonce: string): string =>
   `[ "$(${remoteTmuxCommand(['show-options', '-qv', '-t', `=${session}:`, '@pmux-create'])} 2>/dev/null)" = ${shQuote(nonce)} ] && ${remoteTmuxCommand(['kill-session', '-t', `=${session}`])}; true`;
 
-/** tmux's own word that a session or server does not exist (exit 1), as opposed to ssh or a timeout failing. */
+const TMUX_ABSENCE = /^(can't find (session|window)|no such session|no server running on |error connecting to .*\(No such file or directory\))/;
+
+/**
+ * tmux's own word that a session or server does not exist (exit 1), as opposed
+ * to ssh or a timeout failing. Any stderr line counts: ssh or the remote
+ * shell's start-up may print before it (review r2 nit 2).
+ */
 export const isTmuxAbsence = (err: unknown): boolean => {
   const e = err as IRemoteExecError | null;
   if (!e || e.code !== 1 || e.killed || e.signal) return false;
-  const stderr = e.stderr?.trim() ?? '';
-  return /^(can't find (session|window)|no such session|no server running on |error connecting to .*\(No such file or directory\))/.test(stderr);
+  return (e.stderr ?? '').split('\n').some((line) => TMUX_ABSENCE.test(line.trim()));
 };
 
 export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boolean } = {}): string[] => {
@@ -137,6 +178,29 @@ export const runSsh = (
     child?.stdin?.end(opts.input ?? '');
   });
 
+/** `runSsh` with stdout as bytes: a transcript chunk can end inside a multi-byte character. */
+export const runSshBuffer = (
+  host: string,
+  command: string,
+  opts: { timeoutMs: number; maxBytes: number },
+): Promise<Buffer> =>
+  new Promise((resolve, reject) => {
+    const child = execFile(
+      'ssh',
+      sshArgv(host, command),
+      { timeout: opts.timeoutMs, maxBuffer: opts.maxBytes + 64 * 1024, encoding: 'buffer' },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(Object.assign(err, { stderr: Buffer.isBuffer(stderr) ? stderr.toString('utf-8') : String(stderr ?? '') }));
+          return;
+        }
+        resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout)));
+      },
+    );
+    child?.stdin?.on('error', () => {});
+    child?.stdin?.end();
+  });
+
 export class RemoteHostError extends Error {
   constructor(readonly host: string, message: string) {
     super(message);
@@ -155,7 +219,8 @@ export class RemoteHostError extends Error {
  * Output, one line each: `marker\t<present|absent|unknown>`, then
  * `killed\t<pid>\t<comm>\t<args>` or `survivor\t…`, then `session\t<gone|present>`.
  */
-export const REMOTE_REAP_SCRIPT = `sock=$1; session=$2; tab=$3; keep=$4
+export const REMOTE_REAP_SCRIPT = `sock=$1; session=$2; tab=$3; keep=$4; origin=$5
+[ -n "$tab" ] && [ -n "$origin" ] && rm -f "$HOME/.purplemux-remote/$origin/tabs/$tab.env"
 srv=$(tmux -L "$sock" display-message -p '#{pid}' 2>/dev/null)
 pane=$(tmux -L "$sock" display-message -p -t "=$session:" '#{pane_pid}' 2>/dev/null)
 marker=unknown
@@ -227,8 +292,81 @@ done
 if tmux -L "$sock" has-session -t "=$session" 2>/dev/null; then printf 'session\\tpresent\\n'; else printf 'session\\tgone\\n'; fi
 `;
 
+/**
+ * The remote twin of `observeProviderProcess` (ADR-0021 strict identity,
+ * ADR-0022 slice b), as one `sh -s -- SOCKET SESSION PROVIDER` run: the
+ * session's one pane, then the pane's descendants (bounded at 512) for the
+ * provider's executable, `comm`, or a node/bun entrypoint. Output, one line:
+ * `present\t<pane id>\t<pane pid>\t<pid>\t<start time>`, `absent\t<reason>` or
+ * `unknown\t<reason>`. tmux's own "no such session" is absent.
+ */
+export const REMOTE_PROVIDER_SCRIPT = `sock=$1; session=$2; want=$3
+out=$(tmux -L "$sock" list-panes -t "=$session:" -F '#{session_name}\t#{pane_id}\t#{pane_pid}' 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+  case "$out" in *"can't find"*|*"no server running"*|*"No such file or directory"*) printf 'absent\tsession gone\n' ;; *) printf 'unknown\ttmux failed\n' ;; esac
+  exit 0
+fi
+[ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || { printf 'unknown\tsession identity ambiguous\n'; exit 0; }
+name=$(printf '%s' "$out" | cut -f1); pane=$(printf '%s' "$out" | cut -f2); root=$(printf '%s' "$out" | cut -f3)
+[ "$name" = "$session" ] || { printf 'unknown\tsession identity changed\n'; exit 0; }
+check() {
+  comm=$(cat /proc/"$1"/comm 2>/dev/null)
+  argv0=$(tr '\\0' '\\n' < /proc/"$1"/cmdline 2>/dev/null | sed -n 1p)
+  entry=$(tr '\\0' '\\n' < /proc/"$1"/cmdline 2>/dev/null | sed -n 2p)
+  exe=\${argv0##*/}
+  match=0
+  if [ "$exe" = "$want" ] || [ "$comm" = "$want" ]; then match=1; fi
+  case "$exe" in node|bun) case "$entry" in */"$want".js|*/@anthropic-ai/claude-code/*) match=1 ;; esac ;; esac
+  [ $match -eq 1 ] || return 0
+  start=$(sed 's/.*) //' /proc/"$1"/stat 2>/dev/null | cut -d' ' -f20)
+  [ -n "$start" ] || { printf 'unknown\tprocess start identity unavailable\n'; exit 0; }
+  printf 'present\t%s\t%s\t%s\t%s\n' "$pane" "$root" "$1" "$start"
+  exit 0
+}
+check "$root"
+frontier=$root; seen=0
+while [ -n "$frontier" ]; do
+  next=""
+  for p in $frontier; do
+    for c in $(cat /proc/"$p"/task/*/children 2>/dev/null); do
+      seen=$((seen + 1))
+      [ $seen -gt 512 ] && { printf 'unknown\tprocess inventory bound exceeded\n'; exit 0; }
+      next="$next $c"
+      check "$c"
+    done
+  done
+  frontier=$next
+done
+printf 'absent\tno %s process in the pane\n' "$want"
+`;
+
+export type TRemoteProviderObservation =
+  | { state: 'present'; paneId: string; panePid: string; pid: string; start: string }
+  | { state: 'absent' | 'unknown'; reason: string };
+
+export const parseRemoteProviderObservation = (stdout: string): TRemoteProviderObservation => {
+  const [kind, ...rest] = stdout.trim().split('\n').at(-1)?.split('\t') ?? [];
+  if (kind === 'present' && rest.length === 4 && rest.every(Boolean)) {
+    return { state: 'present', paneId: rest[0], panePid: rest[1], pid: rest[2], start: rest[3] };
+  }
+  if (kind === 'absent') return { state: 'absent', reason: rest.join(' ') || 'absent' };
+  return { state: 'unknown', reason: kind === 'unknown' ? rest.join(' ') : 'unreadable remote observation' };
+};
+
 export const reapCommand = (session: string, tabId: string | undefined, keepProcesses: boolean): string =>
-  ['sh', '-s', '--', remoteSocketName(), session, tabId ?? '', keepProcesses || !tabId ? '1' : '0'].map(shQuote).join(' ');
+  ['sh', '-s', '--', remoteSocketName(), session, tabId ?? '', keepProcesses || !tabId ? '1' : '0', originName()].map(shQuote).join(' ');
+
+/** Whether `dir` is a directory on `host`. Throws `RemoteHostError` when ssh fails. */
+export const remoteDirExists = async (host: string, dir: string): Promise<boolean> => {
+  try {
+    await runSsh(host, `test -d ${shQuote(dir)}`, { timeoutMs: 10_000 });
+    return true;
+  } catch (err) {
+    if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)})`);
+    return false;
+  }
+};
 
 export interface IRemoteReapResult extends IReapResult {
   sessionGone: boolean;

@@ -52,6 +52,11 @@ const findAutoResumeTargets = async (): Promise<IAutoResumeTarget[]> => {
     for (const tab of tabs) {
       const provider = getProviderByPanelType(tab.panelType);
       if (!provider) continue;
+      // A resume types this host's launch command; a remote tab is never resumed here (ADR-0022).
+      if (tab.host) {
+        log.info(`Skip resume for remote tab ${tab.id} on ${tab.host}`);
+        continue;
+      }
       const preflight = await getProviderPreflight(provider);
       if (!preflight.installed) {
         const reason = provider.id === 'claude' && preflight.binaryPath ? 'PATH not configured' : 'not installed';

@@ -22,7 +22,7 @@ import { startWatches, stopWatches } from './src/lib/watch-manager';
 import { startPortfolioRuntime, stopPortfolioRuntime } from './src/lib/portfolio-runtime';
 import { ensureHookSettings, removePortFile } from './src/lib/hook-settings';
 import { dispatchHook } from './src/lib/hook-dispatch';
-import { drainHookSpool } from './src/lib/hook-spool';
+import { drainRemoteThenLocalHookSpools } from './src/lib/remote-spool';
 import { enqueueSystemToast } from './src/lib/sync-server';
 import { getCliToken } from './src/lib/cli-token';
 import { acquireLock, releaseLock, registerLockCleanup } from './src/lib/lock';
@@ -396,7 +396,8 @@ export const start = async (opts?: IStartOptions): Promise<IStartResult> => {
   await autoResumeOnStartup();
   // Hooks spool what they cannot deliver while no server answers; the status
   // manager replays it through the route's own dispatcher (ADR-0020).
-  getStatusManager().setHookSpoolDrain(() => drainHookSpool(dispatchHook));
+  // Remote tabs spool on their host; each drain first moves those files here (ADR-0022).
+  getStatusManager().setHookSpoolDrain(() => drainRemoteThenLocalHookSpools(dispatchHook));
   await getStatusManager().init();
   await initLeases();
   // After the tab tokens: grants reconcile against the live tabs themselves (ADR-0010 boot-sweep note).
