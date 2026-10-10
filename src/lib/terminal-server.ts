@@ -2,11 +2,11 @@ import { IncomingMessage } from 'http';
 import { WebSocket } from 'ws';
 import * as pty from 'node-pty';
 import {
-  hasSession,
   createSession,
   killSession,
   defaultSessionName,
   exitCopyMode,
+  sessionPresence,
 } from './tmux';
 import { buildShellEnv } from '@/lib/shell-env';
 import { PRISTINE_ENV } from '@/lib/pristine-env';
@@ -15,6 +15,8 @@ import { encodeStdout, encodeInputError } from '@/lib/terminal-protocol';
 import { reconcileTabCwd } from '@/lib/layout-store';
 import { createLogger } from '@/lib/logger';
 import { sessionUsesTypedDelivery } from '@/lib/agent-prompt-delivery';
+import { remoteTmuxCommand, sshArgv } from '@/lib/remote-host';
+import { sessionHostOf } from '@/lib/session-host';
 import { createStdinTypedWriter } from '@/lib/stdin-typed-writer';
 
 const log = createLogger('terminal');
@@ -34,6 +36,14 @@ const THROTTLE_WINDOW_MS = 500;
 const THROTTLE_FLUSH_INTERVAL_MS = 250;
 
 const TMUX_SOCKET = 'purple';
+/**
+ * A remote attach (ssh) ended or could not start while the remote session may
+ * still run (ADR-0022, review r1 B1). Not 1000: the client reads 1000 as the
+ * session's end and closes the tab, which reaps the remote work. Not 1011: the
+ * client reads that as "not found" and restarts the session. Any other code is
+ * a disconnect the client retries with backoff.
+ */
+export const REMOTE_ATTACH_LOST_CODE = 4001;
 const textDecoder = new TextDecoder();
 
 // The server selects its tmux socket at process start. Keep that server-owned value for the PTY
@@ -47,6 +57,8 @@ interface IActiveConnection {
   ws: WebSocket;
   pty: pty.IPty;
   sessionName: string;
+  /** The remote host of the session; null for a local one. */
+  remoteHost: string | null;
   clientId: string | null;
   heartbeatTimer: ReturnType<typeof setInterval>;
   cleaned: boolean;
@@ -72,14 +84,19 @@ const terminalOutputTimestamps = globalStore.__purplemux_terminal_output_ts ??= 
 export const getLastTerminalOutput = (sessionName: string): number | undefined =>
   terminalOutputTimestamps.get(sessionName);
 
-const attachToSession = (sessionName: string, cols: number, rows: number): pty.IPty =>
-  pty.spawn('tmux', ['-u', '-L', TMUX_SOCKET, 'attach-session', '-t', sessionName], {
+/** A remote session attaches through `ssh -tt <host> tmux … attach-session` (ADR-0022 §10). */
+const attachToSession = (sessionName: string, cols: number, rows: number, host: string | null = null): pty.IPty => {
+  const [file, args] = host
+    ? ['ssh', sshArgv(host, remoteTmuxCommand(['-u', 'attach-session', '-t', sessionName]), { tty: true })]
+    : ['tmux', ['-u', '-L', TMUX_SOCKET, 'attach-session', '-t', sessionName]];
+  return pty.spawn(file, args, {
     name: 'xterm-256color',
     cols,
     rows,
     cwd: PRISTINE_ENV.HOME || '/',
     env: terminalAttachEnv(),
   });
+};
 
 const cleanup = (conn: IActiveConnection, sessionExited = false) => {
   if (conn.cleaned) return;
@@ -115,6 +132,25 @@ const cleanup = (conn: IActiveConnection, sessionExited = false) => {
   connections.delete(conn.ws);
 };
 
+
+/**
+ * A remote attach's ssh exited (review r1 B1). That proves nothing about the
+ * session: ssh also exits when the connection drops, sshd refuses it or the
+ * process is killed. Only tmux on the host saying the session is gone is the
+ * session's end (1000, and the client closes the tab); anything else is a lost
+ * attach the client retries.
+ */
+const endRemoteAttach = async (conn: IActiveConnection, exitCode: number, signal?: number): Promise<void> => {
+  const presence = await sessionPresence(conn.sessionName).catch(() => 'unknown' as const);
+  if (conn.cleaned) return;
+  if (presence === 'absent') {
+    cleanup(conn, true);
+    return;
+  }
+  log.warn({ session: conn.sessionName, host: conn.remoteHost, exitCode, signal, presence }, 'remote attach ended while the session may still run; the client will retry');
+  if (conn.ws.readyState === WebSocket.OPEN) conn.ws.close(REMOTE_ATTACH_LOST_CODE, 'Remote attach lost');
+  cleanup(conn);
+};
 
 export const pauseSession = (sessionName: string): { cols: number; rows: number } | null => {
   for (const conn of connections.values()) {
@@ -359,10 +395,17 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
     cleanup(conn);
   });
 
+  let remoteHost: string | null = null;
   if (sessionId) {
     sessionName = sessionId;
-    const exists = await hasSession(sessionId);
-    if (!exists) {
+    remoteHost = await sessionHostOf(sessionId);
+    const presence = await sessionPresence(sessionId);
+    if (presence === 'unknown') {
+      log.warn({ sessionName, host: remoteHost }, 'remote host did not answer; the client will retry');
+      ws.close(REMOTE_ATTACH_LOST_CODE, 'Remote host unreachable');
+      return;
+    }
+    if (presence === 'absent') {
       log.warn(`session not found: ${sessionName}`);
       await reconcileTabCwd(sessionName).catch((err) => {
         log.warn(`reconcile cwd failed: ${err instanceof Error ? err.message : err}`);
@@ -374,7 +417,7 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
     currentCols = urlCols > 0 ? urlCols : (pending.resize?.cols || 80);
     currentRows = urlRows > 0 ? urlRows : (pending.resize?.rows || 24);
     try {
-      ptyProcess = attachToSession(sessionName, currentCols, currentRows);
+      ptyProcess = attachToSession(sessionName, currentCols, currentRows, remoteHost);
     } catch (err) {
       log.error(`tmux attach failed: ${err instanceof Error ? err.message : err}`);
       ws.close(1011, 'Session attach failed');
@@ -415,6 +458,7 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
     ws,
     pty: ptyProcess,
     sessionName,
+    remoteHost,
     clientId,
     heartbeatTimer,
     cleaned: false,
@@ -494,6 +538,10 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
       log.debug(
         `pty exited (pid: ${ptyProcess!.pid}, code: ${exitCode}, signal: ${signal}, detaching: ${conn.detaching})`,
       );
+      if (conn.remoteHost && !conn.detaching) {
+        void endRemoteAttach(conn, exitCode, signal);
+        return;
+      }
       cleanup(conn, !conn.detaching);
     }),
   );

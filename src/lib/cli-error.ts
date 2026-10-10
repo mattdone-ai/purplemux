@@ -11,6 +11,13 @@
  */
 export const TAB_NOT_FOUND_BODY = Object.freeze({ error: 'Tab not found', code: 'tab-not-found' as const });
 
+/** A remote tab's host did not answer over ssh (ADR-0022): retryable, never "the tab is gone". */
+export const remoteHostUnreachableBody = (err: { message: string; host: string }) => ({
+  error: err.message,
+  code: 'remote-host-unreachable' as const,
+  host: err.host,
+});
+
 export const targetChangedBody = (tabId: string) => ({
   error: 'agent-target-changed' as const,
   code: 'target-changed' as const,

@@ -20,7 +20,7 @@ const GLOBAL_TOKEN = 'global-cli-token';
 const WORKSPACE_TOKEN = 'workspace-scoped-token';
 const VALID_COOKIE = 'valid-session-jwt';
 
-vi.mock('@/lib/tmux', () => tmux);
+vi.mock('@/lib/tmux', () => Object.assign(tmux, { hasSessionOrUnreachable: tmux.hasSession }));
 vi.mock('@/lib/agent-prompt-delivery', () => delivery);
 vi.mock('@/lib/cli-utils', () => ({ findTab: cliUtils.findTab }));
 vi.mock('@/lib/cli-token', () => ({
@@ -115,6 +115,15 @@ describe('POST /api/tabs/[tabId]/send', () => {
     tmux.isContentPendingInComposer.mockResolvedValue(false);
     cliUtils.findTab.mockResolvedValue({ workspaceId: WORKSPACE_ID, paneId: 'pane-1', tab: tabWith('idle') });
     ({ default: handler } = await import('@/pages/api/tabs/[tabId]/send'));
+  });
+
+  it('a remote host that does not answer is a retryable 503, never a dead session (ADR-0022)', async () => {
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    tmux.hasSession.mockRejectedValue(new RemoteHostError('ai-server', 'remote host ai-server did not answer over ssh'));
+    const response = await call({ content: 'run the tests' });
+    expect(response.statusCode).toBe(503);
+    expect(response.body).toMatchObject({ code: 'remote-host-unreachable', host: 'ai-server' });
+    expect(delivery.deliverPrompt).not.toHaveBeenCalled();
   });
 
   it('pastes the content and reports it submitted with the tab state', async () => {

@@ -2,6 +2,8 @@ import { authorizeHumanMutation } from '@/lib/human-mutation';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { deletePane, patchPane, closePaneInLayout } from '@/lib/layout-store';
 import { getActiveWorkspaceId } from '@/lib/workspace-store';
+import { RemoteHostError } from '@/lib/remote-host';
+import { remoteHostUnreachableBody } from '@/lib/cli-error';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (['POST', 'PATCH', 'DELETE', 'PUT'].includes(req.method ?? '') && !(await authorizeHumanMutation(req, res))) return;
@@ -9,12 +11,18 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const paneId = req.query.paneId as string;
 
   if (req.method === 'DELETE') {
-    if (!wsId) {
-      const sessions: string[] = req.body?.sessions ?? [];
-      await deletePane(paneId, sessions);
-      return res.status(204).end();
+    let result: Awaited<ReturnType<typeof closePaneInLayout>>;
+    try {
+      if (!wsId) {
+        const sessions: string[] = req.body?.sessions ?? [];
+        await deletePane(paneId, sessions);
+        return res.status(204).end();
+      }
+      result = await closePaneInLayout(wsId, paneId);
+    } catch (err) {
+      if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
+      throw err;
     }
-    const result = await closePaneInLayout(wsId, paneId);
     if (!result) {
       return res.status(404).json({ error: 'Pane not found' });
     }

@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const cliUtils = vi.hoisted(() => ({ authorizeWorkspace: vi.fn(), findTab: vi.fn() }));
 const tmux = vi.hoisted(() => ({ hasSession: vi.fn(), capturePaneContentAnsi: vi.fn() }));
 vi.mock('@/lib/cli-utils', () => cliUtils);
-vi.mock('@/lib/tmux', () => tmux);
+vi.mock('@/lib/tmux', () => Object.assign(tmux, { hasSessionOrUnreachable: tmux.hasSession }));
 
 const CAPTURE = fs.readFileSync(path.join(__dirname, '../../fixtures/panes/claude-dim-suggestion.ansi'), 'utf-8');
 const SUGGESTION = 'Billing cleared: re-run the listed runs and continue M2';

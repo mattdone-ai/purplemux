@@ -6,7 +6,9 @@ import { findTab } from '@/lib/cli-utils';
 import { getStatusManager } from '@/lib/status-manager';
 import { parseSendRequest, performTabSend, resolveTabCliState } from '@/lib/tab-send';
 import { recordOrchestrationSubmission } from '@/lib/orchestration-activity';
-import { hasSession, isContentPendingInComposer, sendBracketedPasteText } from '@/lib/tmux';
+import { hasSessionOrUnreachable, isContentPendingInComposer, sendBracketedPasteText } from '@/lib/tmux';
+import { RemoteHostError } from '@/lib/remote-host';
+import { remoteHostUnreachableBody } from '@/lib/cli-error';
 import { deliverPrompt, deliverPromptText } from '@/lib/agent-prompt-delivery';
 
 /**
@@ -31,28 +33,35 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const parsed = parseSendRequest(req.query, req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });
 
-  const result = await withOrchestrationMappingRead(parsed.request.workspaceId, () => withCodexTargetLock(parsed.request.workspaceId, parsed.request.tabId, () => performTabSend(
-    {
-      findTarget: async (workspaceId, tabId) => {
-        const found = await findTab(workspaceId, tabId);
-        if (!found || parsed.request.expectedSessionName && found.tab.sessionName !== parsed.request.expectedSessionName) return null;
-        return {
-          sessionName: found.tab.sessionName,
-          panelType: found.tab.panelType,
-          cliState: resolveTabCliState(found.tab, getStatusManager().getAllForClient()[tabId]),
-        };
+  let result;
+  try {
+    result = await withOrchestrationMappingRead(parsed.request.workspaceId, () => withCodexTargetLock(parsed.request.workspaceId, parsed.request.tabId, () => performTabSend(
+      {
+        findTarget: async (workspaceId, tabId) => {
+          const found = await findTab(workspaceId, tabId);
+          if (!found || parsed.request.expectedSessionName && found.tab.sessionName !== parsed.request.expectedSessionName) return null;
+          return {
+            sessionName: found.tab.sessionName,
+            panelType: found.tab.panelType,
+            cliState: resolveTabCliState(found.tab, getStatusManager().getAllForClient()[tabId]),
+          };
+        },
+        hasSession: hasSessionOrUnreachable,
+        paste: deliverPrompt,
+        pasteWithoutSubmit: async (sessionName, content) => {
+          await recordOrchestrationSubmission(sessionName, true);
+          if (parsed.request.literalPaste) await sendBracketedPasteText(sessionName, content);
+          else await deliverPromptText(sessionName, content);
+        },
+        isContentPendingInComposer,
       },
-      hasSession,
-      paste: deliverPrompt,
-      pasteWithoutSubmit: async (sessionName, content) => {
-        await recordOrchestrationSubmission(sessionName, true);
-        if (parsed.request.literalPaste) await sendBracketedPasteText(sessionName, content);
-        else await deliverPromptText(sessionName, content);
-      },
-      isContentPendingInComposer,
-    },
-    parsed.request,
-  )));
+      parsed.request,
+    )));
+  } catch (err) {
+    // A remote tab's host that did not answer is retryable, never "the session is dead" (ADR-0022).
+    if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
+    throw err;
+  }
 
   return res.status(result.status).json(result.body);
 };

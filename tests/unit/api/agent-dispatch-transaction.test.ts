@@ -41,6 +41,7 @@ vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => ({ getAllForCli
 vi.mock('@/lib/agent-prompt-delivery', () => ({ deliverPrompt: mocks.paste }));
 vi.mock('@/lib/tmux', () => ({
   hasSession: mocks.hasSession,
+  hasSessionOrUnreachable: (...args: Parameters<typeof mocks.hasSession>) => mocks.hasSession(...args),
   sendEscape: mocks.escape,
   isContentPendingInComposer: vi.fn(async () => false),
   observeTabSessionsStrict: async () => mocks.tabSessions,

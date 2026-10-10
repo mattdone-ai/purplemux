@@ -1,13 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authorizeWorkspace, findTab } from '@/lib/cli-utils';
-import { hasSession, getPaneCurrentCommand } from '@/lib/tmux';
+import { hasSessionOrUnreachable, getPaneCurrentCommand } from '@/lib/tmux';
 import { getProviderByPanelType } from '@/lib/providers';
 import { getLivenessManager } from '@/lib/liveness-manager';
 import { getCodexModelStatus } from '@/lib/providers/codex/model-observation';
-import { TAB_NOT_FOUND_BODY } from '@/lib/cli-error';
+import { TAB_NOT_FOUND_BODY, remoteHostUnreachableBody } from '@/lib/cli-error';
 import { tabIdentityOf } from '@/lib/tab-token';
 import { getStatusManager } from '@/lib/status-manager';
 import { resolveTabCliState } from '@/lib/tab-send';
+import { RemoteHostError } from '@/lib/remote-host';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
@@ -29,7 +30,14 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   // The live StatusManager entry, as `tab send` reads it; the layout copy lags (L8).
   const live = getStatusManager().getAllForClient()[tabId];
   const agentSessionId = live?.agentSessionId ?? provider?.readSessionId(found.tab) ?? null;
-  const alive = await hasSession(found.tab.sessionName);
+  let alive: boolean;
+  try {
+    alive = await hasSessionOrUnreachable(found.tab.sessionName);
+  } catch (err) {
+    // A host that did not answer is not a dead tab (ADR-0022, review r1 nit 1).
+    if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
+    throw err;
+  }
   const modelStatus = found.tab.panelType === 'codex-cli'
     ? await getCodexModelStatus(found.tab, alive ? {} : { runtimeAlive: false })
     : null;
@@ -38,10 +46,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const { probes, backgroundJobs } = await getLivenessManager().statusForTab(tabId);
   // How the watchdog classified the last stop (story 37): a READY nudge is explained by the status alone.
   const turnEnd = live?.turnEnd ?? null;
+  // The remote host that runs the tab (ADR-0022); absent for a local tab.
+  const host = found.tab.host ? { host: found.tab.host } : {};
   if (!alive) {
     return res.status(200).json({
       tabId,
       workspaceId,
+      ...host,
       alive: false,
       agentProviderId: provider?.id ?? null,
       agentSessionId,
@@ -58,6 +69,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   return res.status(200).json({
     tabId,
     workspaceId,
+    ...host,
     alive: true,
     command,
     cliState: resolveTabCliState(found.tab, live),

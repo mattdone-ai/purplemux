@@ -124,6 +124,11 @@ export interface ITab {
    * tab closes.
    */
   reportsTo?: string;
+  /**
+   * The ssh alias of the host whose tmux runs this tab (ADR-0022). Absent: this
+   * server's host. Set once at create; a tab never changes host.
+   */
+  host?: string;
   cliState?: TCliState;
   dismissedAt?: number | null;
   /**

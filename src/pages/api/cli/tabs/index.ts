@@ -16,6 +16,7 @@ import { agentLaunchConfigFromOptions } from '@/lib/agent-launch-policy';
 import { checkAgentDispatchPolicy } from '@/lib/agent-dispatch-policy';
 import { checkReportsTo } from '@/lib/reports-to';
 import { tabIdentityOf } from '@/lib/tab-token';
+import { RemoteHostError, isValidRemoteHostName, readRemoteHosts } from '@/lib/remote-host';
 import {
   prepareCodexManagedLaunch,
   submitCodexManagedLaunch,
@@ -24,10 +25,33 @@ import {
 import type { TPanelType } from '@/types/terminal';
 import type { TCliState } from '@/types/timeline';
 import type { ILastEvent } from '@/types/status';
+import { remoteHostUnreachableBody } from '@/lib/cli-error';
 
 const log = createLogger('api:cli:tabs');
 
 const VALID_PANEL_TYPES: TPanelType[] = ['terminal', 'claude-code', 'codex-cli', 'grok-cli', 'agent-sessions', 'web-browser', 'diff'];
+
+type TRemoteHostCheck = { ok: true; host: string } | { ok: false; status: number; body: Record<string, unknown> };
+
+/**
+ * A remote tab (ADR-0022): a registered host, and in this release a terminal
+ * only. Agent tabs need hooks and transcripts this server cannot reach yet.
+ */
+const checkRemoteHost = async (host: unknown, panelType: TPanelType): Promise<TRemoteHostCheck> => {
+  if (panelType !== 'terminal') {
+    return { ok: false, status: 400, body: { error: `only terminal tabs run on a remote host (ADR-0022); ${panelType} is not supported there yet`, code: 'remote-type-unsupported', panelType } };
+  }
+  let registered: string[];
+  try {
+    registered = await readRemoteHosts();
+  } catch (err) {
+    return { ok: false, status: 500, body: { error: err instanceof Error ? err.message : 'fleet config unreadable', code: 'config-store-unreadable' } };
+  }
+  if (!isValidRemoteHostName(host) || !registered.includes(host)) {
+    return { ok: false, status: 400, body: { error: `host is not a registered remote host; set fleet config remote.hosts (ADR-0022)`, code: 'remote-host-invalid', host: typeof host === 'string' ? host : null, registered } };
+  }
+  return { ok: true, host };
+};
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const cliScope = resolveCliScope(req, { response: res });
@@ -53,6 +77,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       reportsTo: string | null;
       /** launch: the server bound its token at launch; hook: taken at a SessionStart (story 36); none: no tab identity. */
       identity: 'launch' | 'hook' | 'none';
+      /** The remote host that runs the tab (ADR-0022); absent for a local tab. */
+      host?: string;
     }> = [];
 
     // An unscoped list must not become a directory of every other epic's
@@ -90,6 +116,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
             busySince: liveStatus[tab.id]?.busySince ?? null,
             reportsTo: tab.reportsTo ?? null,
             identity: tab.panelType === 'web-browser' ? 'none' : tabIdentityOf(id, tab.id),
+            ...(tab.host ? { host: tab.host } : {}),
           });
         }
       }
@@ -98,7 +125,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   if (req.method === 'POST') {
-    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo } = req.body as {
+    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, host } = req.body as {
       workspaceId?: string;
       name?: string;
       panelType?: string;
@@ -107,6 +134,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       launch?: boolean;
       scope?: unknown;
       reportsTo?: unknown;
+      host?: unknown;
     };
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspaceId is required' });
@@ -138,6 +166,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       });
     }
     const resolvedType: TPanelType = panelType ? (panelType as TPanelType) : 'terminal';
+    let remoteHost: string | undefined;
+    if (host !== undefined) {
+      const checked = await checkRemoteHost(host, resolvedType);
+      if (!checked.ok) return res.status(checked.status).json(checked.body);
+      remoteHost = checked.host;
+    }
     const availability = await checkAgentAvailabilityForPanelType(resolvedType);
     if (!availability.ok) {
       return res.status(availability.status).json(toAgentAvailabilityError(availability));
@@ -172,6 +206,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         scope: scope as string[] | undefined,
         agentLaunchConfig: agentLaunchConfigFromOptions(model, reasoning),
         reportsTo: typeof reportsTo === 'string' ? reportsTo : undefined,
+        host: remoteHost,
       });
       if (!tab) return res.status(500).json({ error: 'Failed to create tab' });
 
@@ -238,8 +273,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         agentLaunchConfig: tab.agentLaunchConfig,
         launched: !!command || codexLaunchState === 'active',
         ...(codexLaunchState ? { launchState: codexLaunchState } : {}),
+        ...(tab.host ? { host: tab.host } : {}),
       });
     } catch (err) {
+      if (err instanceof RemoteHostError) {
+        return res.status(503).json(remoteHostUnreachableBody(err));
+      }
       const msg = err instanceof Error ? err.message : 'unknown error';
       log.error(`create tab failed: ${msg}`);
       return res.status(500).json({ error: msg });

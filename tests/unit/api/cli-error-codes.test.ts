@@ -29,7 +29,7 @@ const layout = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/cli-utils', () => cliUtils);
-vi.mock('@/lib/tmux', () => tmux);
+vi.mock('@/lib/tmux', () => Object.assign(tmux, { hasSessionOrUnreachable: tmux.hasSession }));
 vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => ({ getAllForClient: () => ({}) }) }));
 vi.mock('@/lib/agent-steer', () => steer);
 vi.mock('@/lib/layout-store', () => layout);

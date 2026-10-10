@@ -10,13 +10,21 @@ import { applyDirectoriesPatch } from '@/lib/workspace-patch';
 import { parseOrchestrationPatch } from '@/lib/orchestration';
 import { parseOrchestrationPrecondition } from '@/lib/orchestration-contract';
 import { sendOrchestrationError } from '@/lib/orchestration-http';
+import { RemoteHostError } from '@/lib/remote-host';
+import { remoteHostUnreachableBody } from '@/lib/cli-error';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (['POST', 'PATCH', 'DELETE', 'PUT'].includes(req.method ?? '') && !(await authorizeHumanMutation(req, res))) return;
   const workspaceId = req.query.workspaceId as string;
 
   if (req.method === 'DELETE') {
-    const found = await deleteWorkspace(workspaceId);
+    let found: boolean;
+    try {
+      found = await deleteWorkspace(workspaceId);
+    } catch (err) {
+      if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));
+      throw err;
+    }
     if (!found) {
       return res.status(404).json({ error: 'Workspace not found' });
     }
