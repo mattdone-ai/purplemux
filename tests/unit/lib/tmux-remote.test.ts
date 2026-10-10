@@ -46,9 +46,10 @@ vi.mock('@/lib/session-host', () => ({
   registerSessionHost: (name: string, host: string | null) => { if (host) hostOf.map.set(name, host); },
   forgetSessionHost: (name: string) => { hostOf.map.delete(name); },
 }));
+const fleet = vi.hoisted(() => ({ hosts: null as string | null }));
 vi.mock('@/lib/fleet-config-store', () => ({
   readFleetConfig: async () => ({ values: {}, versions: {}, history: [] }),
-  valueOf: () => null,
+  valueOf: () => (fleet.hosts === null ? null : { value: fleet.hosts }),
 }));
 const audit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('@/lib/coordination-audit', () => ({ appendCoordinationAudit: audit }));
@@ -69,6 +70,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     hostOf.map = new Map([[REMOTE, 'ai-server']]);
     replies.fn = () => ({ stdout: '' });
     audit.mockClear();
+    fleet.hosts = 'ai-server';
   });
 
   it('a local session keeps the exact local argv', async () => {
@@ -174,7 +176,26 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
   it('a close that cannot reach the host throws, so the tab is not dropped with its session still running', async () => {
     replies.fn = () => ({ code: 255, stderr: 'ssh: connect to host ai-server port 22: Connection timed out' });
     const { killSession } = await import('@/lib/tmux');
-    await expect(killSession(REMOTE, { tabId: 'tab-remote1' })).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+    const closing = killSession(REMOTE, { tabId: 'tab-remote1' });
+    await expect(closing).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+    await expect(closing).rejects.toThrow('(exit 255: ssh: connect to host ai-server port 22: Connection timed out)');
+  });
+
+  it('a host taken out of remote.hosts that does not answer: the close goes ahead without a reap, audited', async () => {
+    fleet.hosts = 'gpu2';
+    replies.fn = () => ({ code: 255, stderr: 'ssh: Could not resolve hostname ai-server' });
+    const { killSession } = await import('@/lib/tmux');
+    expect(await killSession(REMOTE, { tabId: 'tab-remote1' })).toEqual({ reaper: 'remote', envMarker: 'unknown', killed: [], survivors: [] });
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ event: 'tab-reap-skipped', host: 'ai-server' }));
+  });
+
+  it('a create that fails after reaching the host removes the session it may have made and names the failure, not the script', async () => {
+    replies.fn = (_cmd, args) => (args.at(-1)?.includes('new-session') ? { code: 1, stderr: 'duplicate session' } : { stdout: '' });
+    const { createSession } = await import('@/lib/tmux');
+    const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await expect(creating).rejects.toThrow(`remote session ${REMOTE} on ai-server was not created (exit 1: duplicate session)`);
+    await expect(creating).rejects.not.toThrow(/new-session/);
+    expect(remoteCommand(calls.list[1])).toBe(`'tmux' '-L' 'pmux-mdserver1' 'kill-session' '-t' '=${REMOTE}'`);
   });
 
   it('creates the remote session with the pushed config, the remote socket and the marker, never a token or a local path', async () => {

@@ -45,21 +45,14 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
     expect(remoteTmuxCommand(['has-session', '-t', "a'b"])).toBe(`'tmux' '-L' 'pmux-md-server-local' 'has-session' '-t' 'a'\\''b'`);
   });
 
-  it('builds a non-interactive multiplexed ssh argv with the host after --', async () => {
-    const { sshArgv, sshControlDir } = await import('@/lib/remote-host');
+  it('builds a non-interactive, non-multiplexed ssh argv with the host after --', async () => {
+    const { sshArgv } = await import('@/lib/remote-host');
     const argv = sshArgv('ai-server', 'true');
     expect(argv.slice(-3)).toEqual(['--', 'ai-server', 'true']);
-    expect(argv).toEqual(expect.arrayContaining(['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ControlMaster=auto', '-o', `ControlPath=${sshControlDir()}/%C`]));
+    expect(argv).toEqual(expect.arrayContaining(['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ControlMaster=no', '-o', 'ControlPath=none']));
     expect(argv[0]).not.toBe('-tt');
     expect(sshArgv('ai-server', 'x', { tty: true })[0]).toBe('-tt');
-    expect((await fs.stat(sshControlDir())).mode & 0o777).toBe(0o700);
     expect(() => sshArgv('-oProxyCommand=sh', 'x')).toThrow(/invalid remote host/);
-  });
-
-  it('turns multiplexing off when the control socket path would not fit sun_path', async () => {
-    mockHome.value = path.join(mockHome.value, 'x'.repeat(80));
-    const { sshArgv } = await import('@/lib/remote-host');
-    expect(sshArgv('ai-server', 'true')).toEqual(expect.arrayContaining(['-o', 'ControlMaster=no', '-o', 'ControlPath=none']));
   });
 
   it('parses the reap report, keeping tabs inside args', async () => {

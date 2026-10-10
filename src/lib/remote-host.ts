@@ -1,7 +1,5 @@
 import { execFile } from 'child_process';
-import { mkdirSync } from 'fs';
 import os from 'os';
-import path from 'path';
 import { readFleetConfig, valueOf } from '@/lib/fleet-config-store';
 import type { IReapedProcess, IReapResult } from '@/lib/tab-reaper';
 
@@ -47,23 +45,6 @@ export const shQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 export const remoteTmuxCommand = (args: readonly string[]): string =>
   ['tmux', '-L', remoteSocketName(), ...args].map(shQuote).join(' ');
 
-/** A unix socket path must fit sun_path (108 bytes); `%C` expands to 40 hex characters. */
-const CONTROL_PATH_MAX = 100;
-const NO_MULTIPLEX = ['-o', 'ControlMaster=no', '-o', 'ControlPath=none'];
-
-export const sshControlDir = (): string => path.join(os.homedir(), '.purplemux', 'ssh');
-
-const controlOptions = (): string[] => {
-  const dir = sshControlDir();
-  if (dir.length + 1 + 40 > CONTROL_PATH_MAX) return NO_MULTIPLEX;
-  try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-  } catch {
-    return NO_MULTIPLEX;
-  }
-  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${dir}/%C`, '-o', 'ControlPersist=600'];
-};
-
 export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boolean } = {}): string[] => {
   if (!isValidRemoteHostName(host)) throw new Error(`invalid remote host name: ${JSON.stringify(host)}`);
   return [
@@ -72,7 +53,10 @@ export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boole
     '-o', 'ConnectTimeout=5',
     '-o', 'ServerAliveInterval=15',
     '-o', 'ServerAliveCountMax=3',
-    ...controlOptions(),
+    // No ControlMaster (ADR-0022 §5): a first multiplexed connection exited 255 with no stderr in 1
+    // of 10 fresh control directories, and a dead master stalls every call until ServerAlive gives up.
+    '-o', 'ControlMaster=no',
+    '-o', 'ControlPath=none',
     '--', host, remoteCommand,
   ];
 };
@@ -87,6 +71,14 @@ export interface IRemoteExecError extends Error {
   stdout?: string;
   stderr?: string;
 }
+
+/** What failed, without the command line (it can carry a whole script): exit status, timeout, stderr. */
+export const describeRemoteFailure = (err: unknown): string => {
+  const e = (err ?? {}) as IRemoteExecError;
+  const status = e.killed ? 'timed out' : e.signal ? `signal ${e.signal}` : `exit ${e.code ?? 'unknown'}`;
+  const stderr = e.stderr?.trim();
+  return stderr ? `${status}: ${stderr.slice(-500)}` : status;
+};
 
 export const isSshFailure = (err: unknown): boolean => {
   const e = err as IRemoteExecError | null;

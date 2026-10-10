@@ -257,7 +257,7 @@ A tab with `host` set runs its tmux session on that host. The server stays the o
 | `getSessionCwd` | the pane's directory | null: the path names the remote tree, not this one |
 | Close | local reaper (ADR-0016) | `REMOTE_REAP_SCRIPT` over `ssh … sh -s`, `reaper: 'remote'`; an ssh failure throws `RemoteHostError` |
 
-ssh runs with `BatchMode=yes`, `ConnectTimeout=5` and ControlMaster sockets in `~/.purplemux/ssh/`. The registry is fleet config `remote.hosts` (comma-separated ssh aliases).
+ssh runs with `BatchMode=yes`, `ConnectTimeout=5` and no ControlMaster (one connection per call, about 90 ms from Node). The registry is fleet config `remote.hosts` (comma-separated ssh aliases).
 
 ---
 

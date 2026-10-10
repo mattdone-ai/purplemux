@@ -19,6 +19,7 @@ import { defaultReaperDeps, reapTabForClose, type IReapResult } from '@/lib/tab-
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
 import {
   RemoteHostError,
+  describeRemoteFailure,
   isSshFailure,
   parseRemoteReap,
   reapCommand,
@@ -163,8 +164,11 @@ const createRemoteSession = async (
   try {
     await runSsh(host, script, { timeoutMs: CMD_TIMEOUT * 2, input: config });
   } catch (err) {
-    if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh: ${(err as { stderr?: string }).stderr?.trim() || (err as Error).message}`);
-    throw err;
+    // The session may exist although the call failed (a later step, a lost answer): never leave it
+    // running where no layout names it.
+    await runSsh(host, remoteTmuxCommand(['kill-session', '-t', `=${name}`]), { timeoutMs: CMD_TIMEOUT }).catch(() => {});
+    if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)})`);
+    throw new Error(`remote session ${name} on ${host} was not created (${describeRemoteFailure(err)})`);
   }
   log.debug(`remote tmux session created: ${name} on ${host} (cols: ${cols}, rows: ${rows})`);
 };
@@ -243,8 +247,14 @@ const killRemoteSession = async (host: string, name: string, opts: IKillSessionO
       input: REMOTE_REAP_SCRIPT,
     }));
   } catch (err) {
-    const detail = (err as { stderr?: string }).stderr?.trim() || (err as Error).message;
-    throw new RemoteHostError(host, `could not close ${name} on ${host}: ${detail}. The session may still run there; retry when the host answers, or remove ${host} from remote.hosts to drop the tab without a reap`);
+    // A host taken out of remote.hosts is a deliberate way out for a host that is gone for good.
+    const registered = await readRemoteHosts().catch(() => null);
+    if (registered && !registered.includes(host)) {
+      log.warn({ host, session: name, failure: describeRemoteFailure(err) }, 'unregistered remote host did not answer; tab closed without a reap');
+      if (opts.tabId) await appendCoordinationAudit({ event: 'tab-reap-skipped', tabId: opts.tabId, session: name, host, reason: 'host-unregistered-and-unreachable' });
+      return { reaper: 'remote', envMarker: 'unknown', killed: [], survivors: [] };
+    }
+    throw new RemoteHostError(host, `could not close ${name} on ${host} (${describeRemoteFailure(err)}). The session may still run there; retry when the host answers, or remove ${host} from remote.hosts to drop the tab without a reap`);
   }
   const { sessionGone, ...reap } = parseRemoteReap(stdout);
   if (!sessionGone) log.warn({ host, session: name }, 'remote tmux session still present after the reap');

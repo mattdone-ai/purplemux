@@ -40,7 +40,6 @@ File permissions are `0600` for anything containing a secret (config, tokens, la
 │   ├── .floors.json         # each tab's hook floor {tabId: epochMs}, saved by the server (≤ 1 write / 5 s)
 │   └── bad/                 # unreplayable files and rollback-<stamp>/ set-asides (pruned after 7 days)
 ├── pmux.lock                # single-instance lock {pid, port, startedAt}
-├── ssh/                     # ssh ControlMaster sockets of remote tabs (0700; ADR-0022)
 ├── logs/                    # pino-roll log files
 │   └── purplemux.YYYY-MM-DD.N.log
 ├── uploads/                 # images attached via web input bar
