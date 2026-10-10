@@ -15,6 +15,8 @@ import { encodeStdout, encodeInputError } from '@/lib/terminal-protocol';
 import { reconcileTabCwd } from '@/lib/layout-store';
 import { createLogger } from '@/lib/logger';
 import { sessionUsesTypedDelivery } from '@/lib/agent-prompt-delivery';
+import { remoteTmuxCommand, sshArgv } from '@/lib/remote-host';
+import { sessionHostOf } from '@/lib/session-host';
 import { createStdinTypedWriter } from '@/lib/stdin-typed-writer';
 
 const log = createLogger('terminal');
@@ -72,14 +74,19 @@ const terminalOutputTimestamps = globalStore.__purplemux_terminal_output_ts ??= 
 export const getLastTerminalOutput = (sessionName: string): number | undefined =>
   terminalOutputTimestamps.get(sessionName);
 
-const attachToSession = (sessionName: string, cols: number, rows: number): pty.IPty =>
-  pty.spawn('tmux', ['-u', '-L', TMUX_SOCKET, 'attach-session', '-t', sessionName], {
+/** A remote session attaches through `ssh -tt <host> tmux … attach-session` (ADR-0022 §10). */
+const attachToSession = (sessionName: string, cols: number, rows: number, host: string | null = null): pty.IPty => {
+  const [file, args] = host
+    ? ['ssh', sshArgv(host, remoteTmuxCommand(['-u', 'attach-session', '-t', sessionName]), { tty: true })]
+    : ['tmux', ['-u', '-L', TMUX_SOCKET, 'attach-session', '-t', sessionName]];
+  return pty.spawn(file, args, {
     name: 'xterm-256color',
     cols,
     rows,
     cwd: PRISTINE_ENV.HOME || '/',
     env: terminalAttachEnv(),
   });
+};
 
 const cleanup = (conn: IActiveConnection, sessionExited = false) => {
   if (conn.cleaned) return;
@@ -374,7 +381,7 @@ export const handleConnection = async (ws: WebSocket, request: IncomingMessage, 
     currentCols = urlCols > 0 ? urlCols : (pending.resize?.cols || 80);
     currentRows = urlRows > 0 ? urlRows : (pending.resize?.rows || 24);
     try {
-      ptyProcess = attachToSession(sessionName, currentCols, currentRows);
+      ptyProcess = attachToSession(sessionName, currentCols, currentRows, await sessionHostOf(sessionName));
     } catch (err) {
       log.error(`tmux attach failed: ${err instanceof Error ? err.message : err}`);
       ws.close(1011, 'Session attach failed');

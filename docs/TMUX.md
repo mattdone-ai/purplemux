@@ -243,6 +243,24 @@ All WebSocket connections are authenticated via NextAuth JWT in `server.ts` befo
 
 ---
 
+## Remote Tabs (ADR-0022)
+
+A tab with `host` set runs its tmux session on that host. The server stays the one control plane; only tmux moves.
+
+| Concern | Local tab | Remote tab |
+| --- | --- | --- |
+| Socket | `-L purple` | `ssh <host> tmux -L pmux-<origin hostname>` (never the remote's own `purple`) |
+| Config | `src/config/tmux.conf` | the same file, pushed to `$HOME/.purplemux-remote/<origin>/tmux.conf` at each create |
+| Routing | — | `session-host.ts` maps the session name to its host (layout `ITab.host`, cached on `globalThis`); every `tmux.ts` function asks it |
+| Attach | `tmux attach-session` under node-pty | `ssh -tt <host> tmux … attach-session` under node-pty |
+| Pane pid | real | never returned: `getSessionPanePid` → null, `getAllPanesInfo` → `pid: 0` + `host` |
+| `getSessionCwd` | the pane's directory | null: the path names the remote tree, not this one |
+| Close | local reaper (ADR-0016) | `REMOTE_REAP_SCRIPT` over `ssh … sh -s`, `reaper: 'remote'`; an ssh failure throws `RemoteHostError` |
+
+ssh runs with `BatchMode=yes`, `ConnectTimeout=5` and ControlMaster sockets in `~/.purplemux/ssh/`. The registry is fleet config `remote.hosts` (comma-separated ssh aliases).
+
+---
+
 ## Related Files
 
 | File | Description |

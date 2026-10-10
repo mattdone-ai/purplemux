@@ -127,6 +127,8 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'lease-policy': EXIT.USAGE,
   'watch-invalid': EXIT.USAGE,
   'reports-to-invalid': EXIT.USAGE,
+  'remote-host-invalid': EXIT.USAGE,
+  'remote-type-unsupported': EXIT.USAGE,
   'note-too-large': EXIT.USAGE,
   'deploy-invalid': EXIT.USAGE,
   'config-invalid': EXIT.USAGE,
@@ -157,6 +159,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'readiness-timeout': EXIT.NOT_READY,
   'server-unreachable': EXIT.UNREACHABLE,
   'routes-absent': EXIT.UNREACHABLE,
+  'remote-host-unreachable': EXIT.UNREACHABLE,
   'lease-not-found': EXIT.NOT_FOUND,
   'note-not-found': EXIT.NOT_FOUND,
   'watch-not-found': EXIT.NOT_FOUND,
@@ -171,6 +174,7 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'session-not-running': "the tab's session is dead; do not retry — a person must restart the tab",
   'target-changed': 'permanent — the tab was replaced while the command waited; do not retry',
   'routes-absent': 'no such route on this server (an older server, a foreign server, or a malformed id) — retrying cannot help',
+  'remote-host-unreachable': 'the remote host did not answer over ssh — retry, bounded, once it answers',
 }));
 
 const exitFor = (code) => (code && Object.hasOwn(CODE_EXIT, code) ? CODE_EXIT[code] : EXIT.UNEXPECTED);
@@ -1138,8 +1142,11 @@ const cmdTabCreate = async (args) => {
   const scope = scopeRaw ? scopeRaw.split(',').map((s) => s.trim()).filter(Boolean) : null;
   // Nudges go to this live tab of the same workspace first (ADR-0018).
   const reportsTo = flagValue(args, '--reports-to');
+  // The ssh alias of a registered remote host (ADR-0022); the tab's tmux runs there.
+  const host = flagValue(args, '--host');
   if (!wsId) die('--workspace is required');
   if (args.includes('--reports-to') && !reportsTo) die('--reports-to needs a tab id');
+  if (args.includes('--host') && !host) die('--host needs a host name from fleet config remote.hosts');
   const { body } = await api('POST', '/api/cli/tabs', {
     workspaceId: wsId,
     ...(name ? { name } : {}),
@@ -1149,6 +1156,7 @@ const cmdTabCreate = async (args) => {
     ...(noLaunch ? { launch: false } : {}),
     ...(scope && scope.length ? { scope } : {}),
     ...(reportsTo ? { reportsTo } : {}),
+    ...(host ? { host } : {}),
   });
   out(body);
 };
@@ -1513,6 +1521,9 @@ Commands:
                                            --scope takes comma-separated path globs the tab should edit, e.g. --scope 'src/**,tests/**'
              [--reports-to TAB_ID]         Send this tab's watchdog nudges to TAB_ID (a live tab of the SAME
                                            workspace) instead of the workspace orchestrator; exit 2 otherwise
+             [--host HOST]                 Run the tab's tmux on HOST over ssh (ADR-0022): an ssh alias listed in
+                                           fleet config remote.hosts. Terminal tabs only for now; exit 2 otherwise,
+                                           exit 6 when HOST does not answer
              [-m MODEL] [-r EFFORT]        Agent tabs auto-launch their CLI (hooks wired). -m sets the model; -r sets the
              [--no-launch]                 reasoning effort — claude-code: low|medium|high|xhigh|max (claude --effort;
                                            omitted = the user's global default, so orchestrators should ALWAYS pin it);

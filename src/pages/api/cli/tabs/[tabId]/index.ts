@@ -7,6 +7,7 @@ import { isValidReasoningForPanelType, reasoningErrorForPanelType } from '@/lib/
 import type { IAgentLaunchConfig } from '@/types/terminal';
 import { withCodexTargetLock } from '@/lib/providers/codex/launch-lifecycle';
 import { TAB_NOT_FOUND_BODY } from '@/lib/cli-error';
+import { RemoteHostError } from '@/lib/remote-host';
 import { checkReportsTo } from '@/lib/reports-to';
 
 
@@ -46,7 +47,14 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     // The tab's processes are reaped before its session dies (ADR-0016);
     // keepProcesses=1 signals only the pane group, as before story 16.
     const keepProcesses = req.query.keepProcesses === '1' || req.query.keepProcesses === 'true';
-    const { ok, reap } = await closeTab(workspaceId, found.paneId, tabId, { keepProcesses });
+    let closed: Awaited<ReturnType<typeof closeTab>>;
+    try {
+      closed = await closeTab(workspaceId, found.paneId, tabId, { keepProcesses });
+    } catch (err) {
+      if (err instanceof RemoteHostError) return res.status(503).json({ error: err.message, code: 'remote-host-unreachable', host: err.host });
+      throw err;
+    }
+    const { ok, reap } = closed;
     return res.status(200).json({ ok, ...(reap ? { reaper: reap.reaper, envMarker: reap.envMarker, killed: reap.killed, survivors: reap.survivors } : {}) });
   }
 

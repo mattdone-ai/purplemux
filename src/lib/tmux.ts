@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import path from 'path';
 import { nanoid } from 'nanoid';
 import { PRISTINE_ENV } from '@/lib/pristine-env';
-import { buildShellLaunchCommand } from '@/lib/shell-env';
+import { buildRemoteShellLaunchCommand, buildShellLaunchCommand } from '@/lib/shell-env';
 import { ensureWorkspaceGrokHome } from '@/lib/grok-home';
 import { writeGrokHookFile } from '@/lib/providers/grok/hook-config';
 import { GROK_HOOK_SCRIPT_PATH } from '@/lib/providers/grok/paths';
@@ -17,6 +17,20 @@ import { getProcessArgs, readProcChildren } from '@/lib/process-utils';
 import { PASTE_END, PASTE_START, TYPED_CHUNK_GAP_MS, planTypedInput } from '@/lib/typed-input';
 import { defaultReaperDeps, reapTabForClose, type IReapResult } from '@/lib/tab-reaper';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
+import {
+  RemoteHostError,
+  isSshFailure,
+  parseRemoteReap,
+  reapCommand,
+  readRemoteHosts,
+  remoteBaseDir,
+  remoteSocketName,
+  remoteTmuxCommand,
+  REMOTE_REAP_SCRIPT,
+  runSsh,
+  shQuote,
+} from '@/lib/remote-host';
+import { knownRemoteHosts, sessionHostOf } from '@/lib/session-host';
 
 const log = createLogger('terminal');
 
@@ -25,6 +39,18 @@ const execFile = promisify(execFileCb);
 const TMUX_SOCKET = 'purple';
 const TMUX_CONFIG_PATH = path.join(process.env.__PMUX_APP_DIR_UNPACKED || process.env.__PMUX_APP_DIR || process.cwd(), 'src', 'config', 'tmux.conf');
 const CMD_TIMEOUT = 5000;
+/** A remote close waits out the reap script's 3 s grace and settle on top of the ssh round trip. */
+const REMOTE_REAP_TIMEOUT = 20_000;
+
+/**
+ * One tmux call for a session, wherever it runs (ADR-0022): the local `purple`
+ * socket, or `ssh <host> tmux -L pmux-<origin>` with the same arguments.
+ */
+const runTmux = async (sessionName: string, args: string[]): Promise<{ stdout: string; stderr: string }> => {
+  const host = await sessionHostOf(sessionName);
+  if (host) return runSsh(host, remoteTmuxCommand(args), { timeoutMs: CMD_TIMEOUT });
+  return execFile('tmux', ['-L', TMUX_SOCKET, ...args], { timeout: CMD_TIMEOUT });
+};
 
 export const listSessions = async (): Promise<string[]> => {
   try {
@@ -101,6 +127,48 @@ const tabEnv = async (sessionName: string, identity?: ITabIdentity): Promise<Rec
   }
 };
 
+/**
+ * A remote tab's session (ADR-0022 §8). The local tmux.conf goes to the remote
+ * host first (stdin), so the remote server starts with it and an existing one
+ * re-reads it. The pane gets only the reap marker: no token, no claude or grok
+ * home — those name this host's paths and secrets.
+ */
+const createRemoteSession = async (
+  host: string,
+  name: string,
+  cols: number,
+  rows: number,
+  cwd: string | undefined,
+  identity: ITabIdentity | undefined,
+): Promise<void> => {
+  const marker: Record<string, string> = identity
+    ? { PMUX_TAB_ID: identity.tabId, PMUX_WORKSPACE_ID: identity.workspaceId }
+    : {};
+  const sock = shQuote(remoteSocketName());
+  const newSession = [
+    shQuote('tmux'), shQuote('-u'), shQuote('-L'), sock, shQuote('-f'), '"$d/tmux.conf"',
+    ...['new-session', '-d', '-s', name, '-x', String(cols), '-y', String(rows), ...(cwd ? ['-c', cwd] : [])].map(shQuote),
+    shQuote(buildRemoteShellLaunchCommand(marker)),
+  ].join(' ');
+  const script = [
+    `d=${remoteBaseDir()}`,
+    'umask 077',
+    'mkdir -p "$d"',
+    'cat > "$d/tmux.conf.tmp"',
+    'mv -f "$d/tmux.conf.tmp" "$d/tmux.conf"',
+    newSession,
+    `${shQuote('tmux')} ${shQuote('-L')} ${sock} ${shQuote('source-file')} "$d/tmux.conf"`,
+  ].join(' && ');
+  const config = await fs.readFile(TMUX_CONFIG_PATH, 'utf-8');
+  try {
+    await runSsh(host, script, { timeoutMs: CMD_TIMEOUT * 2, input: config });
+  } catch (err) {
+    if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh: ${(err as { stderr?: string }).stderr?.trim() || (err as Error).message}`);
+    throw err;
+  }
+  log.debug(`remote tmux session created: ${name} on ${host} (cols: ${cols}, rows: ${rows})`);
+};
+
 export const createSession = async (
   name: string,
   cols: number,
@@ -108,6 +176,8 @@ export const createSession = async (
   cwd?: string,
   identity?: ITabIdentity,
 ): Promise<void> => {
+  const host = await sessionHostOf(name);
+  if (host) return createRemoteSession(host, name, cols, rows, cwd, identity);
   // tmux 서버 global env cache를 우회하기 위해 `env -i $SHELL -l`을 명령으로 직접 넘긴다.
   // execFile의 env 옵션은 tmux 서버가 이미 떠있는 경우 무시되므로 의존하지 않는다.
   const shellCmd = buildShellLaunchCommand(await workspaceEnv(name, identity));
@@ -160,7 +230,41 @@ export const getTmuxServerPid = async (): Promise<number | null> => {
  * session already ended (its shell exited: the UI closes it itself) is still
  * reaped by the marker scan.
  */
+/**
+ * Close a remote tab's session with one reap script run on its host (ADR-0022
+ * §9). An ssh failure throws: dropping the tab would leave its session running
+ * where nobody sees it.
+ */
+const killRemoteSession = async (host: string, name: string, opts: IKillSessionOptions): Promise<IReapResult> => {
+  let stdout: string;
+  try {
+    ({ stdout } = await runSsh(host, reapCommand(name, opts.tabId, !!opts.keepProcesses), {
+      timeoutMs: REMOTE_REAP_TIMEOUT,
+      input: REMOTE_REAP_SCRIPT,
+    }));
+  } catch (err) {
+    const detail = (err as { stderr?: string }).stderr?.trim() || (err as Error).message;
+    throw new RemoteHostError(host, `could not close ${name} on ${host}: ${detail}. The session may still run there; retry when the host answers, or remove ${host} from remote.hosts to drop the tab without a reap`);
+  }
+  const { sessionGone, ...reap } = parseRemoteReap(stdout);
+  if (!sessionGone) log.warn({ host, session: name }, 'remote tmux session still present after the reap');
+  if (opts.tabId && (reap.killed.length > 0 || reap.survivors.length > 0)) {
+    await appendCoordinationAudit({
+      event: 'tab-reap',
+      tabId: opts.tabId,
+      session: name,
+      host,
+      keepProcesses: !!opts.keepProcesses,
+      killed: reap.killed,
+      survivors: reap.survivors,
+    });
+  }
+  return reap;
+};
+
 export const killSession = async (name: string, opts: IKillSessionOptions = {}): Promise<IReapResult | null> => {
+  const host = await sessionHostOf(name);
+  if (host) return killRemoteSession(host, name, opts);
   const alive = await hasSession(name);
   if (!alive && !opts.tabId) return null;
 
@@ -256,11 +360,7 @@ export const resolveExistingDir = async (preferred?: string): Promise<string> =>
 
 export const hasSession = async (name: string): Promise<boolean> => {
   try {
-    await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'has-session', '-t', name],
-      { timeout: CMD_TIMEOUT },
-    );
+    await runTmux(name, ['has-session', '-t', name]);
     return true;
   } catch {
     return false;
@@ -297,7 +397,13 @@ const readShellCwd = async (pid: number): Promise<string | null> => {
   }
 };
 
+/**
+ * The session's cwd as a directory on THIS host. A remote session has none
+ * (ADR-0022 §7): its path names another machine's tree, and the git, diff and
+ * sync routes would read or push the local checkout that shares the path.
+ */
 export const getSessionCwd = async (sessionName: string): Promise<string | null> => {
+  if (await sessionHostOf(sessionName)) return null;
   const shellPid = await getSessionPanePid(sessionName);
   if (shellPid) {
     const cwd = await readShellCwd(shellPid);
@@ -315,7 +421,9 @@ export const getSessionCwd = async (sessionName: string): Promise<string | null>
   }
 };
 
+/** The pane pid on THIS host; null for a remote session, whose pid names another host's process (ADR-0022 §6). */
 export const getSessionPanePid = async (sessionName: string): Promise<number | null> => {
+  if (await sessionHostOf(sessionName)) return null;
   try {
     const { stdout } = await execFile(
       'tmux',
@@ -351,11 +459,7 @@ export const getPaneCurrentCommand = async (
   sessionName: string,
 ): Promise<string | null> => {
   try {
-    const { stdout } = await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'list-panes', '-t', sessionName, '-F', '#{pane_current_command}'],
-      { timeout: CMD_TIMEOUT },
-    );
+    const { stdout } = await runTmux(sessionName, ['list-panes', '-t', sessionName, '-F', '#{pane_current_command}']);
     return stdout.trim() || null;
   } catch {
     return null;
@@ -365,36 +469,75 @@ export const getPaneCurrentCommand = async (
 export interface IPaneInfo {
   command: string;
   path: string;
+  /** The pane pid on THIS host; 0 for a remote pane (ADR-0022 §6). */
   pid: number;
   windowActivity: number;
+  /** The remote host that runs this pane; absent for a local one. */
+  host?: string;
 }
 
-export const getAllPanesInfo = async (): Promise<Map<string, IPaneInfo>> => {
+const ALL_PANES_FORMAT = '#{session_name}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}\t#{window_activity}';
+
+const parsePanes = (stdout: string, host?: string): Map<string, IPaneInfo> => {
+  const result = new Map<string, IPaneInfo>();
+  for (const line of stdout.trim().split('\n')) {
+    if (!line) continue;
+    const [session, command, path, pidStr, activityStr] = line.split('\t');
+    if (!session || !command) continue;
+    if (host && !session.startsWith('pt-')) continue;
+    const pid = parseInt(pidStr, 10);
+    const windowActivity = parseInt(activityStr, 10);
+    result.set(session, {
+      command,
+      path: path || '',
+      pid: host || Number.isNaN(pid) ? 0 : pid,
+      windowActivity: Number.isNaN(windowActivity) ? 0 : windowActivity,
+      ...(host ? { host } : {}),
+    });
+  }
+  return result;
+};
+
+const localPanes = async (): Promise<Map<string, IPaneInfo>> => {
   try {
     const { stdout } = await execFile(
       'tmux',
-      ['-L', TMUX_SOCKET, 'list-panes', '-a', '-F', '#{session_name}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}\t#{window_activity}'],
+      ['-L', TMUX_SOCKET, 'list-panes', '-a', '-F', ALL_PANES_FORMAT],
       { timeout: CMD_TIMEOUT },
     );
-    const result = new Map<string, IPaneInfo>();
-    for (const line of stdout.trim().split('\n')) {
-      if (!line) continue;
-      const [session, command, path, pidStr, activityStr] = line.split('\t');
-      if (session && command) {
-        const pid = parseInt(pidStr, 10);
-        const windowActivity = parseInt(activityStr, 10);
-        result.set(session, {
-          command,
-          path: path || '',
-          pid: Number.isNaN(pid) ? 0 : pid,
-          windowActivity: Number.isNaN(windowActivity) ? 0 : windowActivity,
-        });
-      }
-    }
-    return result;
+    return parsePanes(stdout);
   } catch {
     return new Map();
   }
+};
+
+/** A host that does not answer contributes nothing: its tabs read as not running, never as local. */
+const remotePanes = async (host: string): Promise<Map<string, IPaneInfo>> => {
+  try {
+    const { stdout } = await runSsh(host, remoteTmuxCommand(['list-panes', '-a', '-F', ALL_PANES_FORMAT]), { timeoutMs: CMD_TIMEOUT });
+    return parsePanes(stdout, host);
+  } catch {
+    return new Map();
+  }
+};
+
+const remoteHostsToScan = async (): Promise<string[]> => {
+  const registered = await readRemoteHosts().catch((err) => {
+    log.warn(`remote hosts unreadable, scanning only the hosts of known sessions: ${err instanceof Error ? err.message : err}`);
+    return [] as string[];
+  });
+  return [...new Set([...registered, ...knownRemoteHosts()])];
+};
+
+export const getAllPanesInfo = async (): Promise<Map<string, IPaneInfo>> => {
+  const [local, ...remote] = await Promise.all([
+    localPanes(),
+    ...(await remoteHostsToScan()).map(remotePanes),
+  ]);
+  for (const panes of remote) {
+    for (const [session, info] of panes) if (!local.has(session)) local.set(session, info);
+  }
+  return local;
 };
 
 export const SAFE_SHELLS = new Set(['bash', 'zsh', 'fish', 'sh', 'dash']);
@@ -414,11 +557,7 @@ export const checkTerminalProcess = async (
 
 export const getPaneTitle = async (sessionName: string): Promise<string | null> => {
   try {
-    const { stdout } = await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', sessionName, '#{pane_title}'],
-      { timeout: CMD_TIMEOUT },
-    );
+    const { stdout } = await runTmux(sessionName, ['display-message', '-p', '-t', sessionName, '#{pane_title}']);
     return stdout.trim() || null;
   } catch {
     return null;
@@ -426,11 +565,7 @@ export const getPaneTitle = async (sessionName: string): Promise<string | null> 
 };
 
 export const exitCopyMode = async (sessionName: string): Promise<void> => {
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'copy-mode', '-q', '-t', sessionName],
-    { timeout: CMD_TIMEOUT },
-  ).catch(() => {});
+  await runTmux(sessionName, ['copy-mode', '-q', '-t', sessionName]).catch(() => {});
 };
 
 /**
@@ -440,11 +575,7 @@ export const exitCopyMode = async (sessionName: string): Promise<void> => {
  */
 export const sendEscape = async (sessionName: string): Promise<void> => {
   await exitCopyMode(sessionName);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, 'Escape'],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, 'Escape']);
 };
 
 export const sendKeys = async (
@@ -452,11 +583,7 @@ export const sendKeys = async (
   command: string,
 ): Promise<void> => {
   await exitCopyMode(sessionName);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, command, 'Enter'],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, command, 'Enter']);
 };
 
 // Send text and Enter as two separate tmux invocations split by 50ms.
@@ -468,17 +595,9 @@ export const sendKeysSeparated = async (
   text: string,
 ): Promise<void> => {
   await exitCopyMode(sessionName);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, text],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, text]);
   await sleep(50);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, 'Enter'],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, 'Enter']);
 };
 
 export const sendRawKeys = async (
@@ -486,11 +605,7 @@ export const sendRawKeys = async (
   keys: string,
 ): Promise<void> => {
   await exitCopyMode(sessionName);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, keys],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, keys]);
 };
 
 /**
@@ -502,11 +617,7 @@ export const sendBracketedPasteText = async (
   content: string,
 ): Promise<void> => {
   await exitCopyMode(sessionName);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, '-l', '--', `${PASTE_START}${content}${PASTE_END}`],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, '-l', '--', `${PASTE_START}${content}${PASTE_END}`]);
 };
 
 /**
@@ -520,37 +631,21 @@ export const sendTypedText = async (
   await exitCopyMode(sessionName);
   for (const step of planTypedInput(content)) {
     const keys = step.kind === 'newline' ? ['C-j'] : ['-l', '--', step.text];
-    await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, ...keys],
-      { timeout: CMD_TIMEOUT },
-    );
+    await runTmux(sessionName, ['send-keys', '-t', sessionName, ...keys]);
     await sleep(TYPED_CHUNK_GAP_MS);
   }
 };
 
 /** Press Enter once: the retry for a composer that kept its text (L37). */
 export const pressEnter = async (sessionName: string): Promise<void> => {
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, 'Enter'],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, 'Enter']);
 };
 
 /** Press Enter twice (handles Claude Code long input confirmation) */
 export const submitComposer = async (sessionName: string): Promise<void> => {
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, 'Enter'],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, 'Enter']);
   await sleep(600);
-  await execFile(
-    'tmux',
-    ['-L', TMUX_SOCKET, 'send-keys', '-t', sessionName, 'Enter'],
-    { timeout: CMD_TIMEOUT },
-  );
+  await runTmux(sessionName, ['send-keys', '-t', sessionName, 'Enter']);
 };
 
 /** Send text via bracketed paste mode and submit it */
@@ -576,20 +671,16 @@ export const getPaneDetailInfo = async (
   sessionName: string,
 ): Promise<IPaneDetailInfo> => {
   try {
-    const { stdout } = await execFile(
-      'tmux',
-      [
-        '-L', TMUX_SOCKET,
-        'display-message', '-p', '-t', sessionName,
-        '#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{session_created}',
-      ],
-      { timeout: CMD_TIMEOUT },
-    );
+    const remote = !!(await sessionHostOf(sessionName));
+    const { stdout } = await runTmux(sessionName, [
+      'display-message', '-p', '-t', sessionName,
+      '#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_width}\t#{pane_height}\t#{session_created}',
+    ]);
     const [cwdStr, command, pidStr, widthStr, heightStr, createdStr] = stdout.trim().split('\t');
     return {
       cwd: cwdStr || null,
       command: command || null,
-      pid: pidStr ? parseInt(pidStr, 10) || null : null,
+      pid: !remote && pidStr ? parseInt(pidStr, 10) || null : null,
       width: widthStr ? parseInt(widthStr, 10) || null : null,
       height: heightStr ? parseInt(heightStr, 10) || null : null,
       sessionCreated: createdStr ? parseInt(createdStr, 10) || null : null,
@@ -725,11 +816,7 @@ export interface ICaptureOptions {
 
 export const capturePaneContent = async (sessionName: string, opts: ICaptureOptions = {}): Promise<string | null> => {
   try {
-    const { stdout } = await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'capture-pane', '-p', ...(opts.escapes ? ['-e'] : []), '-t', sessionName],
-      { timeout: CMD_TIMEOUT },
-    );
+    const { stdout } = await runTmux(sessionName, ['capture-pane', '-p', ...(opts.escapes ? ['-e'] : []), '-t', sessionName]);
     return stdout;
   } catch {
     return null;
@@ -739,11 +826,7 @@ export const capturePaneContent = async (sessionName: string, opts: ICaptureOpti
 /** The visible pane with its SGR escapes (`-e`) and wrapped lines joined (`-J`). */
 export const capturePaneContentAnsi = async (sessionName: string): Promise<string | null> => {
   try {
-    const { stdout } = await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'capture-pane', '-p', '-e', '-J', '-t', sessionName],
-      { timeout: CMD_TIMEOUT },
-    );
+    const { stdout } = await runTmux(sessionName, ['capture-pane', '-p', '-e', '-J', '-t', sessionName]);
     return stdout;
   } catch {
     return null;
@@ -756,11 +839,7 @@ export const capturePaneContentWithHistory = async (
   opts: ICaptureOptions = {},
 ): Promise<string | null> => {
   try {
-    const { stdout } = await execFile(
-      'tmux',
-      ['-L', TMUX_SOCKET, 'capture-pane', '-p', ...(opts.escapes ? ['-e'] : []), '-S', `-${historyLines}`, '-t', sessionName],
-      { timeout: CMD_TIMEOUT },
-    );
+    const { stdout } = await runTmux(sessionName, ['capture-pane', '-p', ...(opts.escapes ? ['-e'] : []), '-S', `-${historyLines}`, '-t', sessionName]);
     return stdout;
   } catch {
     return null;
@@ -863,7 +942,10 @@ export const observeSessionStrict = async (sessionName: string): Promise<
   | { state: 'absent' | 'unknown'; reason: string }
 > => {
   try {
-    const { stdout } = await execFile('tmux', ['-L', TMUX_SOCKET, 'list-panes', '-t', `=${sessionName}`, '-F', '#{session_name}\t#{pane_id}\t#{pane_pid}'], { timeout: CMD_TIMEOUT });
+    const host = await sessionHostOf(sessionName);
+    const { stdout } = await runTmux(sessionName, ['list-panes', '-t', `=${sessionName}`, '-F', '#{session_name}\t#{pane_id}\t#{pane_pid}']);
+    // Its pid names another host's process: there is no local identity to prove (ADR-0022 §6).
+    if (host) return { state: 'unknown', reason: `session runs on remote host ${host}; no local process identity` };
     const lines = stdout.trim().split('\n');
     const [name, pane, pid] = lines[0].split('\t');
     if (lines.length !== 1 || name !== sessionName || !pane || !/^\d+$/.test(pid) || Number(pid) <= 0) return { state: 'unknown', reason: 'session identity changed or is ambiguous' };

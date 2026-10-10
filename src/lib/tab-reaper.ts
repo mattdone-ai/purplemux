@@ -31,8 +31,11 @@ export interface IReapedProcess {
 }
 
 export interface IReapResult {
-  /** `unavailable` without /proc (macOS): only the pane group is signalled (NFR-7). */
-  reaper: 'linux' | 'unavailable';
+  /**
+   * `unavailable` without /proc (macOS): only the pane group is signalled (NFR-7).
+   * `remote`: the reap ran on the tab's remote host (ADR-0022 §9).
+   */
+  reaper: 'linux' | 'unavailable' | 'remote';
   /** Whether the pane's own environment carries the tab marker (absent: a tab created before story 01). */
   envMarker: 'present' | 'absent' | 'unknown';
   killed: IReapedProcess[];

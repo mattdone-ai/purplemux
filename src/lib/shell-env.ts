@@ -68,3 +68,17 @@ export const buildShellLaunchCommand = (extraEnv: Record<string, string> = {}): 
   const tmuxVars = 'TMUX="$TMUX" TMUX_PANE="$TMUX_PANE"';
   return `env -i ${tmuxVars} ${envArgs} ${shQuote(defaultShell())} -l`;
 };
+
+const REMOTE_INHERITED_KEYS = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'XDG_RUNTIME_DIR'];
+
+/**
+ * The pane shell of a remote tab (ADR-0022). Like `buildShellLaunchCommand`,
+ * but the account values are the REMOTE host's: the sh that tmux runs the
+ * command with expands them there. Only `extraEnv` comes from this host.
+ */
+export const buildRemoteShellLaunchCommand = (extraEnv: Record<string, string> = {}): string => {
+  const inherited = REMOTE_INHERITED_KEYS.map((k) => `${k}="$${k}"`).join(' ');
+  const fixed = { PATH: LOGIN_SHELL_BASE_PATH, ...FORCED_OVERRIDES, ...extraEnv };
+  const envArgs = Object.entries(fixed).map(([k, v]) => `${k}=${shQuote(v)}`).join(' ');
+  return `env -i TMUX="$TMUX" TMUX_PANE="$TMUX_PANE" ${inherited} ${envArgs} "\${SHELL:-/bin/sh}" -l`;
+};

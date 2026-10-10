@@ -462,6 +462,8 @@ export class StatusManager {
   private async detectTerminalStatus(
     paneInfo?: IPaneInfo,
   ): Promise<{ terminalStatus: TTerminalStatus; listeningPorts: number[] }> {
+    // A remote pane has no local pid (ADR-0022 §11): its foreground command alone, no ports.
+    if (paneInfo?.host) return { terminalStatus: SAFE_SHELLS.has(paneInfo.command) ? 'idle' : 'running', listeningPorts: [] };
     if (!paneInfo || !paneInfo.pid) return { terminalStatus: 'idle', listeningPorts: [] };
 
     const ports = await getListeningPorts(paneInfo.pid);

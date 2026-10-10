@@ -23,12 +23,16 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const manager = getStatusManager();
   const workspaceId = manager.getAllForClient()[tabId]?.workspaceId;
   if (!workspaceId) return res.status(404).json({ error: 'Tab not found' });
-  await withOrchestrationMappingRead(workspaceId, async () => {
+  const launched = await withOrchestrationMappingRead(workspaceId, async () => {
     const found = await findTab(workspaceId, tabId);
     if (!found) throw new Error('Launch target disappeared');
+    // A remote tab is a terminal in this release (ADR-0022 §12).
+    if (found.tab.host) return false;
     await recordOrchestrationLaunch(workspaceId, tabId, found.tab.sessionName, panelType);
     manager.markAgentLaunch(tabId, { resetAgentSession: resetAgentSession === true });
+    return true;
   });
+  if (!launched) return res.status(409).json({ error: 'only terminal tabs run on a remote host (ADR-0022)', code: 'remote-type-unsupported', panelType });
   return res.status(204).end();
 };
 

@@ -4,6 +4,8 @@ import { removeTabFromPane, restartTabSession, patchTab } from '@/lib/layout-sto
 import { getActiveWorkspaceId } from '@/lib/workspace-store';
 import { getStatusManager } from '@/lib/status-manager';
 import { createLogger } from '@/lib/logger';
+import { findTab } from '@/lib/cli-utils';
+import { RemoteHostError } from '@/lib/remote-host';
 import type { ITab } from '@/types/terminal';
 
 const log = createLogger('layout');
@@ -19,7 +21,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const tabId = req.query.tabId as string;
 
   if (req.method === 'DELETE') {
-    const found = await removeTabFromPane(wsId, paneId, tabId);
+    let found: boolean;
+    try {
+      found = await removeTabFromPane(wsId, paneId, tabId);
+    } catch (err) {
+      if (err instanceof RemoteHostError) return res.status(503).json({ error: err.message, code: 'remote-host-unreachable', host: err.host });
+      throw err;
+    }
     if (!found) {
       return res.status(404).json({ error: 'Tab not found' });
     }
@@ -61,7 +69,14 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         }
         patch.name = name.trim();
       }
-      if (panelType !== undefined) patch.panelType = panelType;
+      if (panelType !== undefined) {
+        // A remote tab is a terminal in this release (ADR-0022 §12): an agent
+        // launched there would post its hooks to the remote host's own server.
+        if (panelType !== 'terminal' && (await findTab(wsId, tabId))?.tab.host) {
+          return res.status(409).json({ error: 'only terminal tabs run on a remote host (ADR-0022)', code: 'remote-type-unsupported', panelType });
+        }
+        patch.panelType = panelType;
+      }
       if (title !== undefined) patch.title = title;
       if (cwd !== undefined) patch.cwd = cwd;
       if (lastCommand !== undefined) patch.lastCommand = lastCommand;

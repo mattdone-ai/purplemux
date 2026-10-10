@@ -155,7 +155,8 @@ GET /api/cli/tabs?workspaceId=WS
   launch (token bound at launch), hook (taken at a Claude SessionStart and used at least once,
   story 36) or none (no tab token yet: a hook token that was minted but never presented shows none).
   Response: { "tabs": [{ "tabId", "workspaceId", "name", "sessionName", "panelType", "agentProviderId", "agentSessionId",
-    "cliState", "lastEvent", "busySince", "reportsTo", "identity" }] }
+    "cliState", "lastEvent", "busySince", "reportsTo", "identity", "host"? }] }
+  "host" is present only on a remote tab (ADR-0022): the ssh alias whose tmux runs it.
   cliState / lastEvent ({ name, at, seq }) / busySince are the live status (null when unknown).
   A busy tab whose lastEvent is "stop" waits only on open background work (WAITING, ADR-0018:
   a turn that ended with no marker line while its own background shells, agents or registered
@@ -163,8 +164,14 @@ GET /api/cli/tabs?workspaceId=WS
 
 POST /api/cli/tabs
   Body: { "workspaceId": "WS", "name"?: "...", "panelType"?: "terminal" | "claude-code" | "codex-cli" | "grok-cli" | "agent-sessions" | "web-browser" | "diff",
-          "model"?: "...", "reasoning"?: "...", "launch"?: boolean, "reportsTo"?: "tab-..." }
+          "model"?: "...", "reasoning"?: "...", "launch"?: boolean, "reportsTo"?: "tab-...", "host"?: "HOST" }
   Invalid panelType returns HTTP 400 with validPanelTypes.
+  "host" runs the tab's tmux on that host over ssh (ADR-0022). It must be listed in fleet config
+  remote.hosts, else 400 { "code": "remote-host-invalid" }; only a terminal tab runs remote for now,
+  else 400 { "code": "remote-type-unsupported" } (both CLI exit 2). A host that does not answer
+  over ssh is 503 { "code": "remote-host-unreachable", "host" } (exit 6). The pane gets
+  PMUX_TAB_ID and PMUX_WORKSPACE_ID, no token. Status, result, send and close work as for a
+  local tab; status serves "host".
   "reportsTo" names a live tab of the SAME workspace that receives this tab's watchdog nudges
   ahead of the workspace orchestrator; anything else is 400 { "code": "reports-to-invalid" }
   (CLI exit 2). It is cleared when that tab closes.
@@ -177,7 +184,7 @@ POST /api/cli/tabs
   "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" (grok --effort);
   codex-cli: "minimal" | "low" | "medium" | "high" (model_reasoning_effort). "launch": false
   keeps the old bare-shell behavior.
-  Response: { "tabId", "workspaceId", "paneId", "sessionName", "name", "panelType", "agentProviderId", "agentSessionId", "launched" }
+  Response: { "tabId", "workspaceId", "paneId", "sessionName", "name", "panelType", "agentProviderId", "agentSessionId", "launched", "host"? }
 
 GET /api/cli/tabs/<tabId>?workspaceId=WS
   Tab info.

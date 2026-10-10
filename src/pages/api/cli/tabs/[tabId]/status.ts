@@ -38,10 +38,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const { probes, backgroundJobs } = await getLivenessManager().statusForTab(tabId);
   // How the watchdog classified the last stop (story 37): a READY nudge is explained by the status alone.
   const turnEnd = live?.turnEnd ?? null;
+  // The remote host that runs the tab (ADR-0022); absent for a local tab.
+  const host = found.tab.host ? { host: found.tab.host } : {};
   if (!alive) {
     return res.status(200).json({
       tabId,
       workspaceId,
+      ...host,
       alive: false,
       agentProviderId: provider?.id ?? null,
       agentSessionId,
@@ -58,6 +61,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   return res.status(200).json({
     tabId,
     workspaceId,
+    ...host,
     alive: true,
     command,
     cliState: resolveTabCliState(found.tab, live),

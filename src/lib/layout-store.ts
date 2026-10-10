@@ -10,6 +10,7 @@ import { isAgentPanelType as isAgentPanel } from '@/lib/agent-panel-types';
 import { createLogger } from '@/lib/logger';
 import { emitTabClosing, hasKnownTabs, observeLayoutTabs, observeWorkspaceRemoved } from '@/lib/tab-lifecycle';
 import { findTabIdBySession, revokeTabToken } from '@/lib/tab-token';
+import { forgetSessionHost, registerSessionHost } from '@/lib/session-host';
 import {
   collectPanes,
   collectAllTabs,
@@ -181,8 +182,10 @@ export const clearLayoutCache = (wsId: string): void => {
 export { collectPanes, collectAllTabs, normalizeTree } from '@/lib/layout-tree';
 
 const syncWorkspaceDirectories = (wsId: string, root: TLayoutNode): void => {
+  // A remote tab's cwd names another host's tree (ADR-0022 §7).
   const cwds = [...new Set(
     collectAllTabs(root)
+      .filter((t) => !t.host)
       .map((t) => t.cwd)
       .filter((c): c is string => !!c),
   )];
@@ -214,6 +217,9 @@ export const crossCheckLayout = async (
       if (tab.panelType === 'web-browser') continue;
       layoutSessions.add(tab.sessionName);
 
+      // The local tmux list says nothing about a remote session, and a remote
+      // tab recreated here would run its work on the wrong host (ADR-0022).
+      if (tab.host) continue;
       if (!tmuxSet.has(tab.sessionName) && isAgentPanelType(tab.panelType)) {
         const cwd = tab.cwd || defaultCwd;
         log.debug(`crossCheck: agent tab session recreated: ${tab.sessionName} (cwd: ${cwd})`);
@@ -321,7 +327,7 @@ export const deletePane = async (
   }
 };
 
-export const addTabToPane = async (wsId: string, paneId: string, name?: string, cwd?: string, panelType?: string, command?: string, opts?: { scope?: string[]; agentLaunchConfig?: IAgentLaunchConfig; reportsTo?: string }): Promise<ITab | null> =>
+export const addTabToPane = async (wsId: string, paneId: string, name?: string, cwd?: string, panelType?: string, command?: string, opts?: { scope?: string[]; agentLaunchConfig?: IAgentLaunchConfig; reportsTo?: string; host?: string }): Promise<ITab | null> =>
   withLock(async () => {
     const filePath = resolveLayoutFile(wsId);
     const layout = await readLayoutFile(filePath);
@@ -333,15 +339,23 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
     const isWebBrowser = panelType === 'web-browser';
     const tabId = generateTabId();
     const sessionName = workspaceSessionName(wsId, paneId, tabId);
+    const host = !isWebBrowser ? opts?.host : undefined;
     if (!isWebBrowser) {
-      await createSession(sessionName, 80, 24, cwd, { workspaceId: wsId, tabId });
+      // Before the session exists: every tmux call for it must already go to its host.
+      if (host) registerSessionHost(sessionName, host);
+      try {
+        await createSession(sessionName, 80, 24, cwd, { workspaceId: wsId, tabId });
+      } catch (err) {
+        if (host) forgetSessionHost(sessionName);
+        throw err;
+      }
     }
 
     const nextOrder = pane.tabs.length > 0 ? Math.max(...pane.tabs.map((t) => t.order)) + 1 : 0;
     const defaultName = defaultTabNameForPanelType(panelType as ITab['panelType']);
     const tabName = name?.trim() || defaultName;
     const scope = opts?.scope?.map((s) => s.trim()).filter(Boolean);
-    const tab: ITab = { id: tabId, sessionName, name: tabName, order: nextOrder, ...(cwd ? { cwd } : {}), ...(panelType ? { panelType: panelType as ITab['panelType'] } : {}), ...(scope?.length ? { scope } : {}), ...(opts?.agentLaunchConfig ? { agentLaunchConfig: opts.agentLaunchConfig } : {}), ...(opts?.reportsTo ? { reportsTo: opts.reportsTo } : {}) };
+    const tab: ITab = { id: tabId, sessionName, name: tabName, order: nextOrder, ...(cwd ? { cwd } : {}), ...(panelType ? { panelType: panelType as ITab['panelType'] } : {}), ...(scope?.length ? { scope } : {}), ...(opts?.agentLaunchConfig ? { agentLaunchConfig: opts.agentLaunchConfig } : {}), ...(opts?.reportsTo ? { reportsTo: opts.reportsTo } : {}), ...(host ? { host } : {}) };
 
     if (command && !isWebBrowser) prepareOrchestrationLaunch(tab);
     pane.tabs.push(tab);
@@ -447,6 +461,7 @@ const removeClosedTab = async (
 
     return true;
   });
+  if (ok) forgetSessionHost(tabInfo.sessionName);
   return { ok, reap };
 };
 
@@ -481,10 +496,12 @@ export const restartTabSession = async (wsId: string, paneId: string, tabId: str
     const tab = pane.tabs.find((t) => t.id === tabId);
     if (!tab) return false;
 
+    if (tab.host) registerSessionHost(tab.sessionName, tab.host);
     const exists = await hasSession(tab.sessionName);
     if (exists) return true;
 
-    const effectiveCwd = await resolveExistingDir(tab.cwd);
+    // A remote cwd is checked by the remote tmux, which starts a missing one in HOME (ADR-0022 §8).
+    const effectiveCwd = tab.host ? tab.cwd : await resolveExistingDir(tab.cwd);
     const cwdLost = Boolean(tab.cwd && tab.cwd !== effectiveCwd);
 
     await createSession(tab.sessionName, 80, 24, effectiveCwd, { workspaceId: wsId, tabId: tab.id });
@@ -517,7 +534,8 @@ export const reconcileTabCwd = async (sessionName: string): Promise<void> =>
     const pane = collectPanes(layout.root).find((p) => p.id === parsed.paneId);
     if (!pane) return;
     const tab = pane.tabs.find((t) => t.id === parsed.tabId);
-    if (!tab || !tab.cwd) return;
+    // This host's filesystem says nothing about a remote tab's cwd (ADR-0022 §7).
+    if (!tab || !tab.cwd || tab.host) return;
 
     const effectiveCwd = await resolveExistingDir(tab.cwd);
     if (effectiveCwd === tab.cwd) return;
