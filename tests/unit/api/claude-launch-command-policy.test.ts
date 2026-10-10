@@ -23,6 +23,8 @@ vi.mock('@/lib/agent-availability', () => ({
   toAgentAvailabilityError: vi.fn(),
 }));
 vi.mock('@/lib/workspace-store', () => ({ getActiveWorkspaceId: vi.fn(async () => 'ws-active') }));
+const hosts = vi.hoisted(() => ({ remote: new Set<string>() }));
+vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (hosts.remote.has(s) ? 'ai-server' : null) }));
 
 const fakeResponse = () => {
   const state = { statusCode: 0, body: undefined as unknown };
@@ -69,6 +71,18 @@ describe('POST /api/claude/launch-command tab policy', () => {
     );
     expect(status.markAgentLaunch).toHaveBeenCalledWith('tab-pins', { resumeSessionId: sessionId });
     expect(state.statusCode).toBe(200);
+  });
+
+  it('refuses a remote tab: its agent is launched by tab create --host, never with this host\'s command (ADR-0022)', async () => {
+    hosts.remote.add('pt-ws-pins-pane-one-tab-pins');
+    const { default: handler } = await import('@/pages/api/claude/launch-command');
+    const { state, res } = fakeResponse();
+    await handler({ method: 'POST', body: { workspaceId: 'ws-pins', tabId: 'tab-pins' } } as NextApiRequest, res);
+    hosts.remote.clear();
+    expect(state.statusCode).toBe(409);
+    expect(state.body).toMatchObject({ code: 'remote-type-unsupported' });
+    expect(claude.buildLaunchCommand).not.toHaveBeenCalled();
+    expect(status.markAgentLaunch).not.toHaveBeenCalled();
   });
 
   it('refuses a tab absent from the named workspace', async () => {

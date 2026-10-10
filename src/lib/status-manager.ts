@@ -6,6 +6,7 @@ import { HOOK_REPLAY_WINDOW_MS, HOOK_SPOOL_DIR, type IHookSpoolDrainResult } fro
 import { HookFloorStore } from '@/lib/hook-floors';
 import { onTabClosed, onTabClosing } from '@/lib/tab-lifecycle';
 import { capturePaneContent, getAllPanesInfo, getListeningPorts, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid } from '@/lib/tmux';
+import { sessionHostOf } from '@/lib/session-host';
 import { getChildPids } from '@/lib/process-utils';
 import { getProvider, getProviderByPanelType } from '@/lib/providers/registry';
 import { detectAnyActiveSession } from '@/lib/providers/session-scan';
@@ -73,9 +74,31 @@ import { getOrchestratorPresenceMonitor } from '@/lib/orchestrator-presence';
 import type { IOrchestratorPresenceFacts } from '@/types/coordination';
 import fs from 'fs/promises';
 import { watch, type FSWatcher } from 'fs';
+import { syncRemoteTranscript } from '@/lib/remote-transcript';
 
 const toAlertProvider = (providerId: string | undefined): TAlertProviderId =>
   providerId === 'codex' || providerId === 'grok' ? providerId : 'claude';
+
+/**
+ * Whether the pane's agent runs. A remote pane has no pid here (ADR-0022): its
+ * foreground command, which tmux reports over ssh, is the evidence. `null` is
+ * "cannot tell": a remote tab whose host the last scan did not read (a failed
+ * scan, the backoff). No transition may act on it (review r3 B1).
+ */
+const agentRunningIn = async (
+  paneInfo: IPaneInfo | undefined,
+  provider: IAgentProvider | null,
+  remoteHost: string | null = null,
+  hostAnswered = false,
+): Promise<boolean | null> => {
+  if (!provider) return false;
+  if (remoteHost) {
+    if (paneInfo?.host) return provider.matchesProcess(paneInfo.command);
+    return hostAnswered ? false : null;
+  }
+  if (!paneInfo || !paneInfo.pid) return false;
+  return provider.isAgentRunning(paneInfo.pid, await getChildPids(paneInfo.pid));
+};
 
 const log = createLogger('status');
 const hookLog = createLogger('hooks');
@@ -351,11 +374,12 @@ export class StatusManager {
     if (!entry || entry.cliState !== 'unknown') return;
 
     const provider = getProviderByPanelType(entry.panelType);
-    const paneInfo = (await getAllPanesInfo()).get(entry.tmuxSession);
-    const childPids = paneInfo?.pid ? await getChildPids(paneInfo.pid) : [];
-    const agentRunning = paneInfo?.pid && provider
-      ? await provider.isAgentRunning(paneInfo.pid, childPids)
-      : false;
+    const panes = await getAllPanesInfo();
+    const paneInfo = panes.get(entry.tmuxSession);
+    const remoteHost = await sessionHostOf(entry.tmuxSession);
+    const agentRunning = await agentRunningIn(paneInfo, provider, remoteHost, !!remoteHost && !!panes.answeredRemoteHosts?.has(remoteHost));
+    // A remote host not read: the tab stays unknown until a hook or a read pane says (review r3 B1).
+    if (agentRunning === null) return;
 
     if (!agentRunning) {
       this.applyCliState(tabId, entry, 'idle', { silent: true });
@@ -364,6 +388,7 @@ export class StatusManager {
       return;
     }
 
+    await syncRemoteTranscript(entry.tmuxSession).catch(() => false);
     const unknownStateHandle = this.runtimeHandle(entry);
     if (provider && unknownStateHandle) {
       const snapshot = await provider.readRuntimeSnapshot(unknownStateHandle, {
@@ -413,11 +438,20 @@ export class StatusManager {
     tab?: ITab,
   ): Promise<{ lastAssistantSnippet: string | null; currentAction: ICurrentAction | null; jsonlPath: string | null }> {
     const empty = { lastAssistantSnippet: null, currentAction: null, jsonlPath: null };
-    if (!paneInfo || !paneInfo.pid || !provider) return empty;
-
+    if (!(await agentRunningIn(paneInfo, provider, tab?.host ?? null)) || !paneInfo || !provider) return empty;
+    // A remote tab's transcript is the local copy its hooks bound (ADR-0022); nothing else is local.
+    if (paneInfo.host) {
+      const copy = tab ? provider.readJsonlPath(tab) : null;
+      if (!copy) return empty;
+      try {
+        await fs.access(copy);
+        const { lastAssistantSnippet, currentAction } = await provider.readRuntimeSnapshot(copy);
+        return { lastAssistantSnippet, currentAction, jsonlPath: copy };
+      } catch {
+        return empty;
+      }
+    }
     const childPids = await getChildPids(paneInfo.pid);
-    const running = await provider.isAgentRunning(paneInfo.pid, childPids);
-    if (!running) return empty;
 
     if (tab) {
       const persistedJsonlPath = provider.readJsonlPath(tab);
@@ -683,12 +717,17 @@ export class StatusManager {
         }).catch((err) => log.warn(`model policy check failed: ${err instanceof Error ? err.message : err}`));
         if ((this.codexLifecycleEpoch.get(tab.id)?.epoch ?? 0) !== lifecycleEpoch) continue;
         const paneInfo = panesInfo.get(tab.sessionName);
+        // A remote tab whose host this scan did not read keeps what it showed (review r3 B1).
+        const hostAnswered = !!tab.host && !!panesInfo.answeredRemoteHosts?.has(tab.host);
+        const paneUnread = !!tab.host && !paneInfo && !hostAnswered;
 
-        const { terminalStatus, listeningPorts } = provider
-          ? { terminalStatus: 'idle' as const, listeningPorts: [] as number[] }
-          : await this.detectTerminalStatus(paneInfo);
-        const currentProcess = paneInfo?.command;
-        const newPaneTitle = paneInfo ? `${paneInfo.command}|${paneInfo.path}` : undefined;
+        const { terminalStatus, listeningPorts } = paneUnread && existing
+          ? { terminalStatus: existing.terminalStatus ?? 'idle', listeningPorts: existing.listeningPorts ?? [] }
+          : provider
+            ? { terminalStatus: 'idle' as const, listeningPorts: [] as number[] }
+            : await this.detectTerminalStatus(paneInfo);
+        const currentProcess = paneUnread && existing ? existing.currentProcess : paneInfo?.command;
+        const newPaneTitle = paneUnread && existing ? existing.paneTitle : paneInfo ? `${paneInfo.command}|${paneInfo.path}` : undefined;
 
         if (!existing) {
           const persisted: TCliState = (tab.cliState as TCliState | undefined) ?? 'idle';
@@ -730,6 +769,11 @@ export class StatusManager {
           continue;
         }
 
+        // A busy remote tab's copy follows the remote transcript between hooks (ADR-0022): the
+        // watch on the copy then updates the snippet and current action.
+        if (paneInfo?.host && (existing.cliState === 'busy' || existing.cliState === 'needs-input')) {
+          void syncRemoteTranscript(tab.sessionName).catch(() => false);
+        }
         const processChanged = existing.currentProcess !== currentProcess;
         const messageChanged = existing.lastUserMessage !== tab.lastUserMessage;
         const panelTypeChanged = existing.panelType !== tab.panelType;
@@ -786,20 +830,21 @@ export class StatusManager {
           }
         }
 
-        let agentRunningCache: boolean | null = null;
-        const checkAgentRunning = async (): Promise<boolean> => {
-          if (agentRunningCache !== null) return agentRunningCache;
-          if (!paneInfo?.pid || !provider) {
-            agentRunningCache = false;
-            return false;
-          }
-          const childPids = await getChildPids(paneInfo.pid);
-          agentRunningCache = await provider.isAgentRunning(paneInfo.pid, childPids);
+        let agentRunningCache: boolean | null | undefined;
+        const agentRunningNow = async (): Promise<boolean | null> => {
+          if (agentRunningCache === undefined) agentRunningCache = await agentRunningIn(paneInfo, provider, tab.host ?? null, hostAnswered);
           return agentRunningCache;
         };
+        const checkAgentRunning = async (): Promise<boolean> => (await agentRunningNow()) === true;
 
+        // A remote tab left unknown while its host was not read is resolved once its pane reads again.
+        if (existing.cliState === 'unknown' && tab.host && !paneUnread) {
+          this.resolveUnknown(tab.id).catch((err) => log.warn('resolveUnknown failed: %s', err));
+        }
+
+        // A remote tab whose pane is unread may be mid-turn: no timeout, idle or inactive transition acts on it.
         if (existing.cliState === 'busy' && existing.lastEvent
-            && now - existing.lastEvent.at > BUSY_STUCK_MS) {
+            && now - existing.lastEvent.at > BUSY_STUCK_MS && (await agentRunningNow()) !== null) {
           if (!(await checkAgentRunning())) {
             log.info({ tabId: tab.id }, 'busy stuck — agent process gone, forcing idle');
             this.applyCliState(tab.id, existing, 'idle', { silent: true });
@@ -823,7 +868,7 @@ export class StatusManager {
           if (!inGrace) {
             const title = existing.paneTitle ?? '';
             const titleShellStyle = !!title && SHELL_TITLE_RE.test(title);
-            if ((!title || titleShellStyle) && !(await checkAgentRunning())) {
+            if ((!title || titleShellStyle) && (await agentRunningNow()) === false) {
               log.info({ tabId: tab.id, prevState: existing.cliState }, 'agent process gone — transitioning to inactive');
               this.applyCliState(tab.id, existing, 'inactive', { silent: true });
               this.persistToLayout(existing);
@@ -2241,11 +2286,15 @@ export class StatusManager {
       const provider = getProviderByPanelType(entry.panelType);
       const handle = this.runtimeHandle(entry);
       if (provider && handle) {
-        const read = async () => provider.readRuntimeSnapshot(handle, {
-          force: true,
-          tasksSince: await this.agentProcessStartedAt(tabId, entry),
-          withBackground: true,
-        });
+        const read = async () => {
+          // A remote tab's copy is brought up to date before each read (ADR-0022).
+          await syncRemoteTranscript(tmuxSession).catch(() => false);
+          return provider.readRuntimeSnapshot(handle, {
+            force: true,
+            tasksSince: await this.agentProcessStartedAt(tabId, entry),
+            withBackground: true,
+          });
+        };
         snapshot = await read();
         // The Stop hook can fire before the final entry reaches the file.
         if (!snapshot.idle || !snapshot.lastAssistantTail) {

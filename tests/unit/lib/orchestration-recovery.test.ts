@@ -38,6 +38,14 @@ beforeEach(() => {
 afterEach(() => { fs.rmSync(fixture.home, { recursive: true, force: true }); });
 
 describe('guarded orchestration revision and recovery', () => {
+  it('a remote tab is never designated coordinator, before any runtime proof is asked (ADR-0022)', async () => {
+    layout([tab('tab-old'), { ...tab('tab-next'), host: 'ai-server' }]);
+    const { changeOrchestration } = await load();
+    await expect(changeOrchestration('ws-a', { enabled: true, orchestratorTabId: 'tab-next' }, options()))
+      .rejects.toMatchObject({ code: 'orchestrator-candidate-invalid', message: expect.stringContaining('remote host ai-server') });
+    expect(fixture.runtime.mock.calls.map((c) => (c[0] as ITab).id)).not.toContain('tab-next');
+  });
+
   it('normalizes legacy zero on read without writes and preserves future fields on change', async () => {
     write({ enabled: false, orchestratorTabId: null, future: 'retained' } as IWorkspaceOrchestration);
     const original = fs.readFileSync(file(), 'utf8');

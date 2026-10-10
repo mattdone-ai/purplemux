@@ -22,6 +22,17 @@ export const buildClaudeFlags = async (workspaceId?: string, opts?: { model?: st
   return parts.join(' ');
 };
 
+/** The Claude launch of a remote tab (ADR-0022): the kit's hooks, prompt and CLI on the host. */
+export const buildRemoteClaudeLaunch = async (workspaceId: string, opts?: { model?: string; effort?: string }): Promise<string> => {
+  const { buildRemoteClaudeCommand } = await import('@/lib/remote-kit');
+  return buildRemoteClaudeCommand({
+    workspaceId,
+    ...(opts?.model && isValidModelName(opts.model) ? { model: opts.model } : {}),
+    ...(opts?.effort && isValidClaudeEffort(opts.effort) ? { effort: opts.effort } : {}),
+    skipPermissions: await getDangerouslySkipPermissions(),
+  });
+};
+
 export const buildResumeCommand = async (
   sessionId: string,
   workspaceId?: string,

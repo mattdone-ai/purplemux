@@ -28,13 +28,13 @@ export const CODEX_HOOK_SCRIPT_PATH = CODEX_HOOK_SCRIPT;
 export const GROK_HOOK_SCRIPT_PATH = GROK_HOOK_SCRIPT;
 export { HOOK_SCRIPT_CONTENT, GROK_HOOK_SCRIPT_CONTENT };
 
-const hookEntry = (event: string, timeout = CLAUDE_HOOK_TIMEOUT_SECONDS, matcher = '') => [
+const hookEntry = (script: string, event: string, timeout = CLAUDE_HOOK_TIMEOUT_SECONDS, matcher = '') => [
   {
     matcher,
     hooks: [
       {
         type: 'command',
-        command: `sh "${HOOK_SCRIPT}" ${event}`,
+        command: `sh "${script}" ${event}`,
         timeout,
       },
     ],
@@ -46,17 +46,20 @@ const hookEntry = (event: string, timeout = CLAUDE_HOOK_TIMEOUT_SECONDS, matcher
 // matching them would multiply hook invocations for nothing.
 const SIGNAL_TOOLS = 'Edit|Write|MultiEdit|NotebookEdit|Bash';
 
+/** The Claude hook events, each running `script` with its event word. */
+export const claudeHookEvents = (script: string) => ({
+  SessionStart: hookEntry(script, 'session-start'),
+  UserPromptSubmit: hookEntry(script, 'prompt-submit'),
+  Notification: hookEntry(script, 'notification'),
+  Stop: hookEntry(script, 'stop'),
+  StopFailure: hookEntry(script, 'stop'),
+  PreCompact: hookEntry(script, 'pre-compact'),
+  PostCompact: hookEntry(script, 'post-compact'),
+  PostToolUse: hookEntry(script, 'post-tool', 2, SIGNAL_TOOLS),
+});
+
 const buildHookSettings = () => ({
-  hooks: {
-    SessionStart: hookEntry('session-start'),
-    UserPromptSubmit: hookEntry('prompt-submit'),
-    Notification: hookEntry('notification'),
-    Stop: hookEntry('stop'),
-    StopFailure: hookEntry('stop'),
-    PreCompact: hookEntry('pre-compact'),
-    PostCompact: hookEntry('post-compact'),
-    PostToolUse: hookEntry('post-tool', 2, SIGNAL_TOOLS),
-  },
+  hooks: claudeHookEvents(HOOK_SCRIPT),
   statusLine: {
     type: 'command' as const,
     command: `sh "${STATUSLINE_SCRIPT_PATH}"`,

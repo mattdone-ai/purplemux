@@ -19,6 +19,7 @@ import { open as fsOpen } from 'fs/promises';
 import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { getSessionPanePid, checkTerminalProcess, sendKeys, getSessionCwd, getPaneTitle } from './tmux';
+import { sessionHostOf } from './session-host';
 import { cwdToProjectPath } from './session-list';
 import { EMPTY_PENDING } from './buffer-lines';
 import { buildSessionKey } from './session-key';
@@ -703,6 +704,11 @@ export const handleResumeMessage = async (
   const tmuxSession = conn.sessionName;
 
   try {
+    // A resume types this host's launch command; a remote tab's agent is launched by `tab create` only (ADR-0022).
+    if (await sessionHostOf(tmuxSession)) {
+      sendJson(ws, { type: 'timeline:resume-error', message: 'This tab runs on a remote host; resume is not available there. Close it and create a new remote tab.' });
+      return;
+    }
     const { isSafe, processName } = await checkTerminalProcess(tmuxSession);
 
     if (!isSafe) {

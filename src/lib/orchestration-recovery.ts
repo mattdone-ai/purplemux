@@ -96,6 +96,8 @@ export const changeOrchestration = async (
         }
         const candidate = tabs.find((tab) => tab.id === next.orchestratorTabId);
         if (!candidate || !isAgentPanelType(candidate.panelType)) throw new OrchestrationError(409, 'orchestrator-candidate-invalid', 'Recovery requires an agent tab in this workspace');
+        // A coordinator runs on this server's host: its process proof, nudges and recovery are local (ADR-0022).
+        if (candidate.host) throw new OrchestrationError(409, 'orchestrator-candidate-invalid', `A tab on remote host ${candidate.host} cannot coordinate a workspace (ADR-0022); designate a local agent tab`);
         const observation = await observeOrchestrationRuntime(candidate);
         if (observation.state !== 'present') throw new OrchestrationError(409, observation.state === 'unknown' ? 'orchestrator-state-unknown' : 'orchestrator-candidate-invalid', observation.reason);
         if (!(await candidateModelUsable(candidate))) throw new OrchestrationError(409, 'orchestrator-candidate-invalid', 'Candidate model identity is not verified; recovery does not grant a bootstrap claim');

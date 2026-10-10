@@ -8,6 +8,7 @@ import { isCodexSubagentHook } from '@/lib/providers/codex/subagent-hook';
 import { processGrokHookPayload, shouldEmitGrokHookEvent } from '@/lib/providers/grok/hook-handler';
 import { grokHookEvent, parseGrokToolActivity } from '@/lib/providers/grok/hook-payload';
 import { grokHookEvents } from '@/lib/providers/grok/hook-events';
+import { handleRemoteClaudeHook } from '@/lib/remote-hook';
 import {
   withReplayedCodexHookGeneration,
   withValidatedCodexHookGeneration,
@@ -210,6 +211,7 @@ export const dispatchHook = async (delivery: IHookDelivery): Promise<IHookOutcom
   if (delivery.replayedAt === undefined && Number.isSafeInteger(occurredAt) && occurredAt > 0 && occurredAt <= Date.now()) {
     delivery = { ...delivery, occurredAt };
   }
+  if (queryString(delivery.query, 'remote') === 'claude') return handleRemoteClaudeHook(delivery);
   const provider = queryString(delivery.query, 'provider') ?? 'claude';
   if (provider === 'codex') return handleCodexHook(delivery);
   if (provider === 'grok') return handleGrokHook(delivery);

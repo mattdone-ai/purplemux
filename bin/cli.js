@@ -16,11 +16,14 @@ const readFileOrNull = (file) => {
   }
 };
 
+// A remote tab (ADR-0022) reaches its server by URL; everything else by the local port.
+const URL_OVERRIDE = (process.env.PMUX_URL || '').replace(/\/+$/, '') || null;
 const PORT = process.env.PMUX_PORT || readFileOrNull(path.join(os.homedir(), '.purplemux', 'port'));
 const TAB_TOKEN = process.env.PMUX_TAB_TOKEN || null;
 const ENV_TOKEN = process.env.PMUX_TOKEN || null;
 const ADMIN_TOKEN = readFileOrNull(path.join(os.homedir(), '.purplemux', 'cli-token'));
-const BASE = `http://localhost:${PORT}`;
+const BASE = URL_OVERRIDE || `http://localhost:${PORT}`;
+const SERVER_LABEL = URL_OVERRIDE ? `at ${URL_OVERRIDE}` : `on port ${PORT}`;
 
 /**
  * The token to present for a request against `requestPath`.
@@ -129,6 +132,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'reports-to-invalid': EXIT.USAGE,
   'remote-host-invalid': EXIT.USAGE,
   'remote-type-unsupported': EXIT.USAGE,
+  'cwd-missing': EXIT.USAGE,
   'note-too-large': EXIT.USAGE,
   'deploy-invalid': EXIT.USAGE,
   'config-invalid': EXIT.USAGE,
@@ -209,7 +213,7 @@ const die = (msg) => {
 };
 
 const requireEnv = () => {
-  if (!PORT) fail('server-unreachable', 'PMUX_PORT not set and ~/.purplemux/port missing (is the server running?)');
+  if (!PORT && !URL_OVERRIDE) fail('server-unreachable', 'PMUX_URL and PMUX_PORT not set and ~/.purplemux/port missing (is the server running?)');
   if (!TAB_TOKEN && !ENV_TOKEN && !ADMIN_TOKEN) fail('server-unreachable', 'PMUX_TAB_TOKEN and PMUX_TOKEN not set and ~/.purplemux/cli-token missing (is the server running?)');
 };
 
@@ -303,7 +307,7 @@ const isJson = (resp) => (resp.headers.get('content-type') || '').includes('json
  */
 const failIfRouteAbsent = (resp, requestPath) => {
   if (resp.status === 404 && !isJson(resp) && requestPath.startsWith('/api/cli/')) {
-    fail('routes-absent', `${requestPath.split('?')[0]} is not served by the purplemux on port ${PORT}`);
+    fail('routes-absent', `${requestPath.split('?')[0]} is not served by the purplemux ${SERVER_LABEL}`);
   }
 };
 
@@ -320,7 +324,7 @@ const api = async (method, path, data) => {
   // Every CLI route answers JSON; a success without it is not a purplemux
   // answer (another server on the port), and printing `null` would pass it off
   // as one.
-  if (!isJson(resp)) fail(null, `HTTP ${resp.status} without a JSON body — is purplemux the server on port ${PORT}?`);
+  if (!isJson(resp)) fail(null, `HTTP ${resp.status} without a JSON body — is purplemux the server ${SERVER_LABEL}?`);
   return { resp, body };
 };
 
@@ -1144,9 +1148,12 @@ const cmdTabCreate = async (args) => {
   const reportsTo = flagValue(args, '--reports-to');
   // The ssh alias of a registered remote host (ADR-0022); the tab's tmux runs there.
   const host = flagValue(args, '--host');
+  // The tab's start directory: it must exist on the host the tab runs on.
+  const cwd = flagValue(args, '--cwd');
   if (!wsId) die('--workspace is required');
   if (args.includes('--reports-to') && !reportsTo) die('--reports-to needs a tab id');
   if (args.includes('--host') && !host) die('--host needs a host name from fleet config remote.hosts');
+  if (args.includes('--cwd') && !cwd) die('--cwd needs an absolute directory on the tab\'s host');
   const { body } = await api('POST', '/api/cli/tabs', {
     workspaceId: wsId,
     ...(name ? { name } : {}),
@@ -1157,6 +1164,7 @@ const cmdTabCreate = async (args) => {
     ...(scope && scope.length ? { scope } : {}),
     ...(reportsTo ? { reportsTo } : {}),
     ...(host ? { host } : {}),
+    ...(cwd ? { cwd } : {}),
   });
   out(body);
 };
@@ -1306,6 +1314,7 @@ const cmdTabClose = async (args) => {
   for (const p of Array.isArray(body.killed) ? body.killed : []) lines.push(`killed ${p.pid} ${p.comm} ${p.args}`);
   for (const p of Array.isArray(body.survivors) ? body.survivors : []) lines.push(`survivor ${p.pid} ${p.comm} ${p.args}`);
   if (body.reaper === 'unavailable') lines.push('reaper: unavailable (no /proc): only the pane group was signalled');
+  if (body.reaper === 'remote-skipped') lines.push('reaper: skipped (the host is out of remote.hosts and did not answer): nothing on it was reaped');
   if (body.envMarker === 'absent') lines.push('envMarker: absent (a tab created before per-tab identity): only its pane descendants were reaped');
   process.stdout.write(`${lines.join('\n')}\n`);
 };
@@ -1522,8 +1531,12 @@ Commands:
              [--reports-to TAB_ID]         Send this tab's watchdog nudges to TAB_ID (a live tab of the SAME
                                            workspace) instead of the workspace orchestrator; exit 2 otherwise
              [--host HOST]                 Run the tab's tmux on HOST over ssh (ADR-0022): an ssh alias listed in
-                                           fleet config remote.hosts. Terminal tabs only for now; exit 2 otherwise,
-                                           exit 6 when HOST does not answer
+                                           fleet config remote.hosts. terminal and claude-code only; exit 2
+                                           otherwise, exit 6 when HOST does not answer. The pane's purplemux
+                                           reaches this server through PMUX_URL with the tab's own token
+             [--cwd DIR]                   Start the tab in DIR, an absolute directory that must exist on the
+                                           tab's host (cwd-missing, exit 2). A remote worker works in its own
+                                           checkout or worktree on that host
              [-m MODEL] [-r EFFORT]        Agent tabs auto-launch their CLI (hooks wired). -m sets the model; -r sets the
              [--no-launch]                 reasoning effort — claude-code: low|medium|high|xhigh|max (claude --effort;
                                            omitted = the user's global default, so orchestrators should ALWAYS pin it);
@@ -1683,6 +1696,7 @@ Exit codes:
     error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
 
 Environment:
+  PMUX_URL           Server base URL, e.g. http://mdserver1:8022 (a remote tab's CLI; wins over PMUX_PORT)
   PMUX_PORT          Server port (falls back to ~/.purplemux/port)
   PMUX_TAB_TOKEN     This tab's own token; names the calling tab (set in every tab created by the server)
   PMUX_TOKEN         This tab's workspace token (ignored while PMUX_TAB_TOKEN is set; unset that to override)

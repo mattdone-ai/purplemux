@@ -6,6 +6,7 @@ import { listSessions, killSession } from '@/lib/tmux';
 import { createLogger } from '@/lib/logger';
 import { emitTabClosing } from '@/lib/tab-lifecycle';
 import { RemoteHostError } from '@/lib/remote-host';
+import { forgetSessionHost } from '@/lib/session-host';
 import { broadcastSync } from '@/lib/sync-server';
 import {
   readLayoutFile,
@@ -475,11 +476,15 @@ export const deleteWorkspace = async (workspaceId: string): Promise<boolean> =>
     const before = await readLayoutFile(resolveLayoutFile(workspaceId));
     const remoteTabs = before ? collectAllTabs(before.root).filter((t) => t.host) : [];
     for (const tab of remoteTabs) emitTabClosing({ workspaceId, tabId: tab.id, sessionName: tab.sessionName, phase: 'closing' });
-    let remoteClosed = new Set<string>();
+    const remoteClosed = new Set<string>();
     try {
-      if (remoteTabs.length > 0) remoteClosed = new Set((await closeRemoteTabsFirst(remoteTabs)).keys());
+      if (remoteTabs.length > 0) await closeRemoteTabsFirst(remoteTabs, (sessionName) => remoteClosed.add(sessionName));
     } catch (err) {
-      for (const tab of remoteTabs) emitTabClosing({ workspaceId, tabId: tab.id, sessionName: tab.sessionName, phase: 'aborted' });
+      // A tab reaped before the refusal stays closing: its work is gone, and an `aborted` would
+      // let the watchdog report it dead (review r2 nit 5). The rest get their checks back.
+      for (const tab of remoteTabs) {
+        if (!remoteClosed.has(tab.sessionName)) emitTabClosing({ workspaceId, tabId: tab.id, sessionName: tab.sessionName, phase: 'aborted' });
+      }
       throw err;
     }
     return withLock(async () => {
@@ -515,6 +520,7 @@ export const deleteWorkspace = async (workspaceId: string): Promise<boolean> =>
     await removeWorkspaceGrokHome(workspaceId).catch(() => {});
     revokeWorkspaceToken(workspaceId);
     await revokeWorkspaceTabTokens(workspaceId);
+    if (layout) for (const tab of collectAllTabs(layout.root)) forgetSessionHost(tab.sessionName);
     log.info(`Deleted: ${workspaceId} (${ws.name})`);
     return true;
     });

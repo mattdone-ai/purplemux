@@ -164,14 +164,17 @@ GET /api/cli/tabs?workspaceId=WS
 
 POST /api/cli/tabs
   Body: { "workspaceId": "WS", "name"?: "...", "panelType"?: "terminal" | "claude-code" | "codex-cli" | "grok-cli" | "agent-sessions" | "web-browser" | "diff",
-          "model"?: "...", "reasoning"?: "...", "launch"?: boolean, "reportsTo"?: "tab-...", "host"?: "HOST" }
+          "model"?: "...", "reasoning"?: "...", "launch"?: boolean, "reportsTo"?: "tab-...", "host"?: "HOST", "cwd"?: "/abs/dir" }
   Invalid panelType returns HTTP 400 with validPanelTypes.
   "host" runs the tab's tmux on that host over ssh (ADR-0022). It must be listed in fleet config
-  remote.hosts, else 400 { "code": "remote-host-invalid" }; only a terminal tab runs remote for now,
-  else 400 { "code": "remote-type-unsupported" } (both CLI exit 2). A host that does not answer
+  remote.hosts, else 400 { "code": "remote-host-invalid" }; terminal and claude-code tabs run remote,
+  codex-cli and grok-cli do not: 400 { "code": "remote-type-unsupported" } (both CLI exit 2). A host that does not answer
   over ssh is 503 { "code": "remote-host-unreachable", "host" } (exit 6). The pane gets
-  PMUX_TAB_ID and PMUX_WORKSPACE_ID, no token. Status, result, send and close work as for a
-  local tab; status serves "host".
+  PMUX_TAB_ID, PMUX_WORKSPACE_ID, PMUX_URL (this server) and its own tab token, never the
+  workspace token. A remote claude-code tab's hooks, transcript and CLI reach this server, so
+  status, result, send, close and the watchdog work as for a local tab; status serves "host".
+  "cwd" is the tab's start directory, an absolute path that must exist on the tab's host,
+  else 400 { "code": "cwd-missing" } (exit 2).
   "reportsTo" names a live tab of the SAME workspace that receives this tab's watchdog nudges
   ahead of the workspace orchestrator; anything else is 400 { "code": "reports-to-invalid" }
   (CLI exit 2). It is cleared when that tab closes.

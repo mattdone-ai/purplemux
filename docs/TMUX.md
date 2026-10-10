@@ -259,6 +259,9 @@ A tab with `host` set runs its tmux session on that host. The server stays the o
 | Close of a pane or workspace | tabs in order | every remote host asked first; remote tabs closed first, outside the layout and store locks; a silent host refuses the whole close |
 | Session presence | `hasSession` | `sessionPresence`: only tmux's own answer is `absent`; ssh failing is `unknown` (503 on send, status, result, restart) |
 | Attach ends | close 1000 | 1000 only when tmux says the session is gone, else 4001 (the client retries) |
+| Agent hooks (claude-code) | `~/.purplemux/status-hook.sh` to localhost | the kit's `status-hook.sh` on the host posts to `PMUX_URL` with the tab token; spools beside itself |
+| Transcript | read where Claude writes it | copied to `~/.purplemux/remote-transcripts/` by bounded ssh reads before each hook and stop read |
+| Agent process proof | local `/proc` walk | `REMOTE_PROVIDER_SCRIPT` on the host (`observeRemoteProviderProcess`) |
 
 ssh runs with `BatchMode=yes`, `ConnectTimeout=5` and no ControlMaster (one connection per call, about 90 ms from Node). The registry is fleet config `remote.hosts` (comma-separated ssh aliases).
 

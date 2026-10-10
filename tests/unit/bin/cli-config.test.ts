@@ -80,6 +80,18 @@ describe('purplemux config — the installed CLI against the real fleet-config r
         req.query.key = 'gate.slots';
         return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
       },
+      '/api/cli/fleet-config/remote.hosts': async (req, res) => {
+        req.query.key = 'remote.hosts';
+        return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
+      },
+      '/api/cli/fleet-config/remote.callback-url': async (req, res) => {
+        req.query.key = 'remote.callback-url';
+        return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
+      },
+      '/api/cli/fleet-config/remote.callback-allow-hosts': async (req, res) => {
+        req.query.key = 'remote.callback-allow-hosts';
+        return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
+      },
       '/api/cli/fleet-config/constructor': async (req, res) => {
         req.query.key = 'constructor';
         return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
@@ -114,6 +126,27 @@ describe('purplemux config — the installed CLI against the real fleet-config r
     for (const env of [orch, worker, other, admin]) {
       expect(await cli(['config', 'get', 'gate.slots'], env)).toEqual({ code: 0, stdout: '6\n', stderr: '' });
     }
+  });
+
+  it('remote.* keys are the admin token\'s only, and their values are checked at write time (ADR-0022, review r3 nit 4)', async () => {
+    const byOrch = await cli(['config', 'set', 'remote.hosts', 'ai-server'], orch);
+    expect(byOrch.code).toBe(3);
+    expect(byOrch.stderr).toContain('admin token only');
+    expect((await cli(['config', 'set', 'remote.hosts', 'ai-server'], admin)).code).toBe(0);
+    expect((await cli(['config', 'set', 'remote.hosts', 'ai-server,-oProxyCommand=x'], admin)).code).toBe(2);
+    const plain = await cli(['config', 'set', 'remote.callback-url', 'http://example.com:8022'], admin);
+    expect(plain.code).toBe(2);
+    expect(plain.stderr).toContain('use https otherwise');
+    for (const ok of ['http://100.94.44.114:8022', 'http://mdserver1.tail1234.ts.net:8022', 'https://pmux.example.com']) {
+      expect((await cli(['config', 'set', 'remote.callback-url', ok], admin)).code, ok).toBe(0);
+    }
+    expect((await cli(['config', 'set', 'remote.callback-url', 'http://2130706433:8022'], admin)).code).toBe(2);
+    expect((await cli(['config', 'set', 'remote.callback-url', 'http://mdserver1:8022'], admin)).code).toBe(2);
+    expect((await cli(['config', 'set', 'remote.callback-allow-hosts', 'mdserver1'], orch)).code).toBe(3);
+    expect((await cli(['config', 'set', 'remote.callback-allow-hosts', '0x7f000001'], admin)).code).toBe(2);
+    expect((await cli(['config', 'set', 'remote.callback-allow-hosts', 'mdserver1'], admin)).code).toBe(0);
+    expect((await cli(['config', 'set', 'remote.callback-url', 'http://mdserver1:8022'], admin)).code).toBe(0);
+    expect((await cli(['config', 'unset', 'remote.callback-url'], orch)).code).toBe(3);
   });
 
   it('a worker tab, a tab of an orchestrator-less workspace and a workspace token with no tab are refused with exit 3', async () => {
