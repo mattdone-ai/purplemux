@@ -27,6 +27,7 @@ describe('remote Claude hook script (ADR-0022)', () => {
       '#!/bin/sh',
       `printf '%s\\n' "$*" >> '${path.join(dir, 'curl-args')}'`,
       `cat > '${path.join(dir, 'curl-body')}'`,
+      `cat /dev/fd/3 > '${path.join(dir, 'curl-headers')}' 2>/dev/null`,
       'printf \'%s\' "$FAKE_CURL_OUT"',
       'exit "$FAKE_CURL_EXIT"',
       '',
@@ -62,7 +63,10 @@ describe('remote Claude hook script (ADR-0022)', () => {
     run('stop', body, { out: '204 0.000100', exit: 0 });
     const args = fs.readFileSync(path.join(dir, 'curl-args'), 'utf-8');
     expect(args).toMatch(new RegExp(`http://mdserver1:8022/api/status/hook\\?remote=claude&event=stop&session=${SESSION}&occurredAt=\\d{13}`));
-    expect(args).toContain('x-pmux-token: tab-secret');
+    // The token never rides on curl's command line (readable in /proc/<pid>/cmdline): it comes on fd 3.
+    expect(args).not.toContain('tab-secret');
+    expect(args).toContain('-H @/dev/fd/3');
+    expect(fs.readFileSync(path.join(dir, 'curl-headers'), 'utf-8')).toBe('x-pmux-token: tab-secret\n');
     expect(fs.readFileSync(path.join(dir, 'curl-body'), 'utf-8')).toBe(body);
     expect(spooled()).toEqual([]);
   });

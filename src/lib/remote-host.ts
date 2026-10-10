@@ -29,10 +29,30 @@ export const readRemoteHosts = async (): Promise<string[]> =>
 
 export const REMOTE_CALLBACK_URL_KEY = 'remote.callback-url';
 
-const CALLBACK_URL = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?$/;
+const CALLBACK_URL = /^(https?):\/\/([A-Za-z0-9.-]+)(?::\d{1,5})?$/;
 
-export const isValidCallbackUrl = (value: unknown): value is string =>
-  typeof value === 'string' && CALLBACK_URL.test(value);
+/** A host an http callback may name: loopback, a Tailscale address or name, or a bare (MagicDNS) name. */
+const TAILNET_LOOKING = (host: string): boolean => {
+  if (host === 'localhost' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/\.ts\.net$/i.test(host)) return true;
+  const ip = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (ip) return Number(ip[1]) === 100 && Number(ip[2]) >= 64 && Number(ip[2]) <= 127;
+  return !host.includes('.');
+};
+
+/**
+ * Why a callback URL is refused, or null (review r3 nit 4). A tab's token rides
+ * every hook and CLI call to it: plain http only to a loopback or tailnet-looking
+ * host (WireGuard carries it there); anything else must be https.
+ */
+export const callbackUrlRefusal = (value: unknown): string | null => {
+  const m = typeof value === 'string' ? value.match(CALLBACK_URL) : null;
+  if (!m) return `${REMOTE_CALLBACK_URL_KEY} must be http(s)://host[:port]`;
+  if (m[1] === 'http' && !TAILNET_LOOKING(m[2])) return `${REMOTE_CALLBACK_URL_KEY} over plain http must name a loopback or tailnet host (100.64.0.0/10, *.ts.net, a bare MagicDNS name); use https otherwise`;
+  return null;
+};
+
+export const isValidCallbackUrl = (value: unknown): value is string => callbackUrlRefusal(value) === null;
 
 const serverPort = (): string => {
   if (process.env.PORT && /^\d{1,5}$/.test(process.env.PORT)) return process.env.PORT;
@@ -52,11 +72,10 @@ const serverPort = (): string => {
  */
 export const resolveCallbackUrl = async (): Promise<string> => {
   const configured = valueOf(await readFleetConfig(), REMOTE_CALLBACK_URL_KEY)?.value;
-  if (configured !== undefined) {
-    if (!isValidCallbackUrl(configured)) throw new Error(`fleet config ${REMOTE_CALLBACK_URL_KEY} is not http(s)://host[:port]: ${JSON.stringify(configured)}`);
-    return configured;
-  }
-  return `http://${os.hostname()}:${serverPort()}`;
+  const url = configured ?? `http://${os.hostname()}:${serverPort()}`;
+  const refusal = callbackUrlRefusal(url);
+  if (refusal) throw new Error(`${refusal} (${configured === undefined ? 'the default from this hostname' : 'fleet config'}: ${JSON.stringify(url)})`);
+  return url;
 };
 
 /** This server's name on a remote host: it keys the remote socket and config directory. */
@@ -371,6 +390,7 @@ export const remoteDirExists = async (host: string, dir: string): Promise<boolea
 export interface IRemoteReapResult extends IReapResult {
   sessionGone: boolean;
 }
+
 
 const toProcess = (fields: string[]): IReapedProcess | null => {
   const pid = Number(fields[0]);

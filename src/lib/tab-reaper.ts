@@ -34,12 +34,15 @@ export interface IReapResult {
   /**
    * `unavailable` without /proc (macOS): only the pane group is signalled (NFR-7).
    * `remote`: the reap ran on the tab's remote host (ADR-0022 §9).
+   * `remote-skipped`: the host was taken out of remote.hosts and did not answer; nothing was reaped.
    */
-  reaper: 'linux' | 'unavailable' | 'remote';
+  reaper: 'linux' | 'unavailable' | 'remote' | 'remote-skipped';
   /** Whether the pane's own environment carries the tab marker (absent: a tab created before story 01). */
   envMarker: 'present' | 'absent' | 'unknown';
   killed: IReapedProcess[];
   survivors: IReapedProcess[];
+  /** A remote reap only: tmux on the host reported the session gone after the kill. */
+  sessionGone?: boolean;
 }
 
 export interface ITabReaperDeps {

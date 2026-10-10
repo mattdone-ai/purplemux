@@ -55,7 +55,10 @@ export const HOOK_TMUX_TIMEOUT_SECONDS = 1;
  * PreToolUse adds nothing. A
  * body over `HOOK_SPOOL_MAX_BODY` is spooled as metadata only (`body: null`,
  * `bodyDropped`, `bodyLength`). Nothing retries: the hook stays one round trip,
- * bounded by `HOOK_MAX_TIME_SECONDS`.
+ * bounded by `HOOK_MAX_TIME_SECONDS`. The token reaches curl on fd 3 from a
+ * here-document, never on its command line: `/proc/<pid>/cmdline` is readable
+ * by every process of the user, and a reap audit records a process's args
+ * (ADR-0022 review r3).
  */
 const SPOOL_FUNCTIONS = `json_escape() {
   printf '%s' "$1" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g'
@@ -99,8 +102,11 @@ post_hook() {
     return 0
   fi
   HOOK_RESULT=$(printf '%s' "$HOOK_BODY" | curl -s -X POST -o /dev/null -w '%{http_code} %{time_connect}' \\
-    --connect-timeout 1 --max-time ${HOOK_MAX_TIME_SECONDS} "$@" -H 'Content-Type: application/json' -H "x-pmux-token: \${TOKEN}" \\
-    --data-binary @- "\${HOOK_BASE_URL:-http://localhost:\${PORT}}\${HOOK_TARGET}" 2>/dev/null)
+    --connect-timeout 1 --max-time ${HOOK_MAX_TIME_SECONDS} "$@" -H 'Content-Type: application/json' -H @/dev/fd/3 \\
+    --data-binary @- "\${HOOK_BASE_URL:-http://localhost:\${PORT}}\${HOOK_TARGET}" 2>/dev/null 3<<HOOK_HEADERS
+x-pmux-token: \${TOKEN}
+HOOK_HEADERS
+)
   HOOK_RC=$?
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
@@ -184,8 +190,11 @@ if [ "$EVENT" = "session-start" ] && [ -n "$PORT" ] && [ -z "\${PMUX_TAB_ID:-}" 
   && [ -n "\${CLAUDE_ENV_FILE:-}" ] && [ -n "\${TMUX_PANE:-}" ]; then
   PANE_SESSION=$($HOOK_TIMEOUT tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null) || PANE_SESSION=""
   if [ -n "$PANE_SESSION" ]; then
-    IDENT=$(curl -s --max-time 2 -X POST -H 'Content-Type: application/json' -H "x-pmux-token: \${PMUX_TOKEN}" \\
-      -d "{\\"session\\":\\"\${PANE_SESSION}\\"}" "http://localhost:\${PORT}/api/cli/tab-identity" 2>/dev/null)
+    IDENT=$(curl -s --max-time 2 -X POST -H 'Content-Type: application/json' -H @/dev/fd/3 \\
+      -d "{\\"session\\":\\"\${PANE_SESSION}\\"}" "http://localhost:\${PORT}/api/cli/tab-identity" 2>/dev/null 3<<HOOK_HEADERS
+x-pmux-token: \${PMUX_TOKEN}
+HOOK_HEADERS
+)
     ID_TAB=$(printf '%s' "$IDENT" | sed -n 's/.*"tabId"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p')
     ID_WS=$(printf '%s' "$IDENT" | sed -n 's/.*"workspaceId"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p')
     ID_TOKEN=$(printf '%s' "$IDENT" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\\([0-9a-f]\\{64\\}\\)".*/\\1/p')

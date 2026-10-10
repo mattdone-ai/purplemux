@@ -267,12 +267,12 @@ const killRemoteSession = async (host: string, name: string, opts: IKillSessionO
     if (registered && !registered.includes(host)) {
       log.warn({ host, session: name, failure: describeRemoteFailure(err) }, 'unregistered remote host did not answer; tab closed without a reap');
       if (opts.tabId) await appendCoordinationAudit({ event: 'tab-reap-skipped', tabId: opts.tabId, session: name, host, reason: 'host-unregistered-and-unreachable' });
-      return { reaper: 'remote', envMarker: 'unknown', killed: [], survivors: [] };
+      return { reaper: 'remote-skipped', envMarker: 'unknown', killed: [], survivors: [] };
     }
     throw new RemoteHostError(host, `could not close ${name} on ${host} (${describeRemoteFailure(err)}). The session may still run there; retry when the host answers, or remove ${host} from remote.hosts to drop the tab without a reap`);
   }
-  const { sessionGone, ...reap } = parseRemoteReap(stdout);
-  if (!sessionGone) log.warn({ host, session: name }, 'remote tmux session still present after the reap');
+  const reap = parseRemoteReap(stdout);
+  if (!reap.sessionGone) log.warn({ host, session: name }, 'remote tmux session still present after the reap');
   if (opts.tabId && (reap.killed.length > 0 || reap.survivors.length > 0)) {
     await appendCoordinationAudit({
       event: 'tab-reap',
@@ -628,9 +628,18 @@ const localPanes = async (): Promise<Map<string, IPaneInfo>> => {
 /** After a host fails to answer a pane scan, the scans skip it this long (review r1 nit 2). */
 const REMOTE_SCAN_BACKOFF_MS = 30_000;
 
-const gScan = globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number> };
+const gScan = globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number>; __ptRemoteScanAnswered?: Map<string, boolean> };
 if (!gScan.__ptRemoteScanBackoff) gScan.__ptRemoteScanBackoff = new Map();
+if (!gScan.__ptRemoteScanAnswered) gScan.__ptRemoteScanAnswered = new Map();
 const scanBackoff = gScan.__ptRemoteScanBackoff;
+const scanAnswered = gScan.__ptRemoteScanAnswered;
+
+/**
+ * Whether the last pane scan of `host` was answered (review r3 B1). A remote
+ * session missing from an answered scan is gone; missing from an unanswered
+ * one, or during the backoff, nothing is known about it.
+ */
+export const remotePaneScanAnswered = (host: string): boolean => scanAnswered.get(host) === true;
 
 /** A host that does not answer contributes nothing: its tabs read as not running, never as local. */
 const remotePanes = async (host: string): Promise<Map<string, IPaneInfo>> => {
@@ -638,12 +647,15 @@ const remotePanes = async (host: string): Promise<Map<string, IPaneInfo>> => {
   try {
     const { stdout } = await runSsh(host, remoteTmuxCommand(['list-panes', '-a', '-F', ALL_PANES_FORMAT]), { timeoutMs: CMD_TIMEOUT });
     scanBackoff.delete(host);
+    scanAnswered.set(host, true);
     return parsePanes(stdout, host);
   } catch (err) {
     if (isTmuxAbsence(err)) {
       scanBackoff.delete(host);
+      scanAnswered.set(host, true);
     } else {
       scanBackoff.set(host, Date.now() + REMOTE_SCAN_BACKOFF_MS);
+      scanAnswered.set(host, false);
       log.warn({ host, failure: describeRemoteFailure(err) }, 'remote pane scan failed; host skipped for 30 s');
     }
     return new Map();
@@ -1073,6 +1085,13 @@ export const observeSessionStrict = async (sessionName: string): Promise<
     if (lines.length !== 1 || name !== sessionName || !pane || !/^\d+$/.test(pid) || Number(pid) <= 0) return { state: 'unknown', reason: 'session identity changed or is ambiguous' };
     return { state: 'present', panePid: Number(pid), identity: `${name}:${pane}:${pid}` };
   } catch (error) {
+    // On a remote host the closed session can be the server's last: tmux then answers "no server
+    // running on" (review r3 B2). Any of tmux's own absence lines, never an ssh failure, is absence.
+    if (await sessionHostOf(sessionName)) {
+      return isTmuxAbsence(error)
+        ? { state: 'absent', reason: 'tmux on the remote host reported the session or its server absent' }
+        : { state: 'unknown', reason: 'remote host did not answer or did not prove session absence' };
+    }
     const failure = error as { code?: unknown; stderr?: string; killed?: boolean; signal?: unknown };
     const diagnostic = failure.stderr?.trim();
     if (failure.code === 1 && !failure.killed && !failure.signal

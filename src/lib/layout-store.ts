@@ -441,9 +441,14 @@ export const closeTab = async (
 });
 
 const requireAbandonedRuntime = async (sessionName: string, reap: IReapResult | null): Promise<void> => {
+  // A host taken out of remote.hosts that does not answer is the owner's deliberate way out (ADR-0022 §9).
+  if (reap?.reaper === 'remote-skipped') return;
   const { observeSessionStrict } = await import('@/lib/tmux');
-  // A remote reap ran the same marker scan on its Linux host (ADR-0022 §9); tmux there proves absence.
-  if (!reap || (reap.reaper !== 'linux' && reap.reaper !== 'remote') || reap.survivors.length || (await observeSessionStrict(sessionName)).state !== 'absent') {
+  // A remote reap ran the same marker scan on its Linux host (ADR-0022 §9). Its own has-session after
+  // the kill is tmux's word that the session is gone; otherwise tmux is asked again.
+  const confirmedGone = reap?.reaper === 'remote' && reap.sessionGone === true;
+  if (!reap || (reap.reaper !== 'linux' && reap.reaper !== 'remote') || reap.survivors.length
+    || (!confirmedGone && (await observeSessionStrict(sessionName)).state !== 'absent')) {
     throw new Error('Pending work retained: process reap or session absence is unconfirmed');
   }
 };
@@ -459,7 +464,15 @@ const removeClosedTab = async (
   const reap = tabInfo.panelType !== 'web-browser'
     ? await killSession(tabInfo.sessionName, { tabId, keepProcesses: opts.keepProcesses })
     : null;
-  if (tabInfo.pending) await requireAbandonedRuntime(tabInfo.sessionName, reap);
+  if (tabInfo.pending) {
+    try {
+      await requireAbandonedRuntime(tabInfo.sessionName, reap);
+    } catch (err) {
+      // The remote session was killed: nothing on that host may keep using the tab's token (review r3 B2).
+      if (reap?.reaper === 'remote' || reap?.reaper === 'remote-skipped') await revokeTabToken(tabId).catch(() => false);
+      throw err;
+    }
+  }
 
   const ok = await withLock(async () => {
     const filePath = resolveLayoutFile(wsId);

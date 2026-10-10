@@ -197,6 +197,42 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     expect((await closeTab('ws-a', 'pane-1', 'tab-r')).ok).toBe(true);
   });
 
+  it('a pending remote tab whose session was the last on its socket closes: the reap\'s own "session gone" is the proof (review r3 B2)', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+        orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 } } },
+    ]));
+    tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [], sessionGone: true } as never);
+    tmux.observeSessionStrict.mockResolvedValueOnce({ state: 'unknown', reason: 'no server running' } as never);
+    const { closeTab } = await import('@/lib/layout-store');
+    expect((await closeTab('ws-a', 'pane-1', 'tab-r')).ok).toBe(true);
+  });
+
+  it('a pending remote tab on a host taken out of remote.hosts closes on the skipped reap (§9 escape, review r3 nit 7)', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+        orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', turn: { generation: 't', runtimeGeneration: 'g', at: 2 } } },
+    ]));
+    tmux.killSession.mockResolvedValueOnce({ reaper: 'remote-skipped', envMarker: 'unknown', killed: [], survivors: [] } as never);
+    tmux.observeSessionStrict.mockResolvedValueOnce({ state: 'unknown', reason: 'host does not answer' } as never);
+    const { closeTab } = await import('@/lib/layout-store');
+    expect((await closeTab('ws-a', 'pane-1', 'tab-r')).ok).toBe(true);
+  });
+
+  it('a pending remote close that is still refused revokes the tab token anyway (review r3 B2)', async () => {
+    await writeLayout('ws-a', baseLayout([
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+        orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 } } },
+    ]));
+    const { ensureTabToken, getTabTokenRecord } = await import('@/lib/tab-token');
+    await ensureTabToken({ workspaceId: 'ws-a', tabId: 'tab-r' }, 'pt-ws-a-pane-1-tab-r');
+    expect(getTabTokenRecord('tab-r')).not.toBeNull();
+    tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [{ pid: 9, comm: 'x', args: 'x' }], sessionGone: false } as never);
+    const { closeTab } = await import('@/lib/layout-store');
+    await expect(closeTab('ws-a', 'pane-1', 'tab-r')).rejects.toThrow('Pending work retained');
+    expect(getTabTokenRecord('tab-r')).toBeNull();
+  });
+
   it('a remote reap with a survivor keeps the pending tab', async () => {
     await writeLayout('ws-a', baseLayout([
       { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',

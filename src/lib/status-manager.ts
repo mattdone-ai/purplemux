@@ -5,7 +5,8 @@ import { readLayoutFile, resolveLayoutFile, collectAllTabs, updateTabCliStatus, 
 import { HOOK_REPLAY_WINDOW_MS, HOOK_SPOOL_DIR, type IHookSpoolDrainResult } from '@/lib/hook-spool';
 import { HookFloorStore } from '@/lib/hook-floors';
 import { onTabClosed, onTabClosing } from '@/lib/tab-lifecycle';
-import { capturePaneContent, getAllPanesInfo, getListeningPorts, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid } from '@/lib/tmux';
+import { capturePaneContent, getAllPanesInfo, getListeningPorts, remotePaneScanAnswered, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid } from '@/lib/tmux';
+import { sessionHostOf } from '@/lib/session-host';
 import { getChildPids } from '@/lib/process-utils';
 import { getProvider, getProviderByPanelType } from '@/lib/providers/registry';
 import { detectAnyActiveSession } from '@/lib/providers/session-scan';
@@ -80,12 +81,21 @@ const toAlertProvider = (providerId: string | undefined): TAlertProviderId =>
 
 /**
  * Whether the pane's agent runs. A remote pane has no pid here (ADR-0022): its
- * foreground command, which tmux reports over ssh, is the evidence.
+ * foreground command, which tmux reports over ssh, is the evidence. `null` is
+ * "cannot tell": a remote tab whose host the last scan did not read (a failed
+ * scan, the backoff). No transition may act on it (review r3 B1).
  */
-const agentRunningIn = async (paneInfo: IPaneInfo | undefined, provider: IAgentProvider | null): Promise<boolean> => {
-  if (!paneInfo || !provider) return false;
-  if (paneInfo.host) return provider.matchesProcess(paneInfo.command);
-  if (!paneInfo.pid) return false;
+const agentRunningIn = async (
+  paneInfo: IPaneInfo | undefined,
+  provider: IAgentProvider | null,
+  remoteHost: string | null = null,
+): Promise<boolean | null> => {
+  if (!provider) return false;
+  if (remoteHost) {
+    if (paneInfo?.host) return provider.matchesProcess(paneInfo.command);
+    return remotePaneScanAnswered(remoteHost) ? false : null;
+  }
+  if (!paneInfo || !paneInfo.pid) return false;
   return provider.isAgentRunning(paneInfo.pid, await getChildPids(paneInfo.pid));
 };
 
@@ -364,7 +374,9 @@ export class StatusManager {
 
     const provider = getProviderByPanelType(entry.panelType);
     const paneInfo = (await getAllPanesInfo()).get(entry.tmuxSession);
-    const agentRunning = await agentRunningIn(paneInfo, provider);
+    const agentRunning = await agentRunningIn(paneInfo, provider, await sessionHostOf(entry.tmuxSession));
+    // A remote host not read: the tab stays unknown until a hook or a read pane says (review r3 B1).
+    if (agentRunning === null) return;
 
     if (!agentRunning) {
       this.applyCliState(tabId, entry, 'idle', { silent: true });
@@ -423,7 +435,7 @@ export class StatusManager {
     tab?: ITab,
   ): Promise<{ lastAssistantSnippet: string | null; currentAction: ICurrentAction | null; jsonlPath: string | null }> {
     const empty = { lastAssistantSnippet: null, currentAction: null, jsonlPath: null };
-    if (!(await agentRunningIn(paneInfo, provider)) || !paneInfo || !provider) return empty;
+    if (!(await agentRunningIn(paneInfo, provider, tab?.host ?? null)) || !paneInfo || !provider) return empty;
     // A remote tab's transcript is the local copy its hooks bound (ADR-0022); nothing else is local.
     if (paneInfo.host) {
       const copy = tab ? provider.readJsonlPath(tab) : null;
@@ -702,12 +714,16 @@ export class StatusManager {
         }).catch((err) => log.warn(`model policy check failed: ${err instanceof Error ? err.message : err}`));
         if ((this.codexLifecycleEpoch.get(tab.id)?.epoch ?? 0) !== lifecycleEpoch) continue;
         const paneInfo = panesInfo.get(tab.sessionName);
+        // A remote tab whose host the scan did not read keeps what it showed (review r3 B1).
+        const paneUnread = !!tab.host && !paneInfo && !remotePaneScanAnswered(tab.host);
 
-        const { terminalStatus, listeningPorts } = provider
-          ? { terminalStatus: 'idle' as const, listeningPorts: [] as number[] }
-          : await this.detectTerminalStatus(paneInfo);
-        const currentProcess = paneInfo?.command;
-        const newPaneTitle = paneInfo ? `${paneInfo.command}|${paneInfo.path}` : undefined;
+        const { terminalStatus, listeningPorts } = paneUnread && existing
+          ? { terminalStatus: existing.terminalStatus ?? 'idle', listeningPorts: existing.listeningPorts ?? [] }
+          : provider
+            ? { terminalStatus: 'idle' as const, listeningPorts: [] as number[] }
+            : await this.detectTerminalStatus(paneInfo);
+        const currentProcess = paneUnread && existing ? existing.currentProcess : paneInfo?.command;
+        const newPaneTitle = paneUnread && existing ? existing.paneTitle : paneInfo ? `${paneInfo.command}|${paneInfo.path}` : undefined;
 
         if (!existing) {
           const persisted: TCliState = (tab.cliState as TCliState | undefined) ?? 'idle';
@@ -810,15 +826,21 @@ export class StatusManager {
           }
         }
 
-        let agentRunningCache: boolean | null = null;
-        const checkAgentRunning = async (): Promise<boolean> => {
-          if (agentRunningCache !== null) return agentRunningCache;
-          agentRunningCache = await agentRunningIn(paneInfo, provider);
+        let agentRunningCache: boolean | null | undefined;
+        const agentRunningNow = async (): Promise<boolean | null> => {
+          if (agentRunningCache === undefined) agentRunningCache = await agentRunningIn(paneInfo, provider, tab.host ?? null);
           return agentRunningCache;
         };
+        const checkAgentRunning = async (): Promise<boolean> => (await agentRunningNow()) === true;
 
+        // A remote tab left unknown while its host was not read is resolved once its pane reads again.
+        if (existing.cliState === 'unknown' && tab.host && !paneUnread) {
+          this.resolveUnknown(tab.id).catch((err) => log.warn('resolveUnknown failed: %s', err));
+        }
+
+        // A remote tab whose pane is unread may be mid-turn: no timeout, idle or inactive transition acts on it.
         if (existing.cliState === 'busy' && existing.lastEvent
-            && now - existing.lastEvent.at > BUSY_STUCK_MS) {
+            && now - existing.lastEvent.at > BUSY_STUCK_MS && (await agentRunningNow()) !== null) {
           if (!(await checkAgentRunning())) {
             log.info({ tabId: tab.id }, 'busy stuck — agent process gone, forcing idle');
             this.applyCliState(tab.id, existing, 'idle', { silent: true });
@@ -842,7 +864,7 @@ export class StatusManager {
           if (!inGrace) {
             const title = existing.paneTitle ?? '';
             const titleShellStyle = !!title && SHELL_TITLE_RE.test(title);
-            if ((!title || titleShellStyle) && !(await checkAgentRunning())) {
+            if ((!title || titleShellStyle) && (await agentRunningNow()) === false) {
               log.info({ tabId: tab.id, prevState: existing.cliState }, 'agent process gone — transitioning to inactive');
               this.applyCliState(tab.id, existing, 'inactive', { silent: true });
               this.persistToLayout(existing);

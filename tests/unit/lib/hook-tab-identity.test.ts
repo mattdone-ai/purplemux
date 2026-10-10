@@ -31,7 +31,7 @@ describe('status-hook.sh hook-time identity (story 36)', () => {
     const calls = path.join(dir, 'calls');
     fs.writeFileSync(path.join(bin, 'curl'), [
       '#!/bin/sh',
-      `printf '%s\\n' "$*" >> '${calls}'`,
+      `printf 'ARGS %s HEADERS %s\\n' "$*" "$(cat /dev/fd/3 2>/dev/null | tr '\\n' ' ')" >> '${calls}'`,
       `case "$*" in *api/cli/tab-identity*) printf '%s' '${response}' ;; esac`,
       '',
     ].join('\n'), { mode: 0o755 });
@@ -66,6 +66,8 @@ describe('status-hook.sh hook-time identity (story 36)', () => {
     expect(r.launchShell).toBe('tab-launch|launch-token');
     const ask = r.calls.find((c) => c.includes('api/cli/tab-identity'))!;
     expect(ask).toContain('x-pmux-token: ws-token');
+    // On fd 3, never on curl's command line (review r3).
+    expect(ask.split(' HEADERS ')[0]).not.toContain('ws-token');
     expect(ask).not.toContain('admin-token');
     expect(ask).toContain('{"session":"pt-ws-fOvEfz-pane-a-tab-old1"}');
   });

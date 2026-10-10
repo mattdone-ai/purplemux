@@ -202,6 +202,10 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect((await observeSessionStrict(REMOTE)).state).toBe('unknown');
     replies.fn = () => ({ code: 1, stderr: `can't find session: ${REMOTE}\n` });
     expect((await observeSessionStrict(REMOTE)).state).toBe('absent');
+    replies.fn = () => ({ code: 1, stderr: 'no server running on /tmp/tmux-1000/pmux-mdserver1\n' });
+    expect((await observeSessionStrict(REMOTE)).state).toBe('absent');
+    replies.fn = () => ({ code: 1, stderr: 'error connecting to /tmp/tmux-1000/pmux-mdserver1 (No such file or directory)\n' });
+    expect((await observeSessionStrict(REMOTE)).state).toBe('absent');
     replies.fn = () => ({ code: 255, stderr: 'Connection closed' });
     expect((await observeSessionStrict(REMOTE)).state).toBe('unknown');
   });
@@ -218,7 +222,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(command).toBe(`'sh' '-s' '--' 'pmux-mdserver1' '${REMOTE}' 'tab-remote1' '0' 'mdserver1'`);
     expect(calls.list[0].input).toContain('PMUX_TAB_ID=$tab');
     expect(reap).toEqual({
-      reaper: 'remote', envMarker: 'present',
+      reaper: 'remote', envMarker: 'present', sessionGone: true,
       killed: [{ pid: 500, comm: 'sleep', args: 'sleep 300' }],
       survivors: [{ pid: 501, comm: 'stubborn', args: 'stubborn --x' }],
     });
@@ -244,7 +248,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     fleet.hosts = 'gpu2';
     replies.fn = () => ({ code: 255, stderr: 'ssh: Could not resolve hostname ai-server' });
     const { killSession } = await import('@/lib/tmux');
-    expect(await killSession(REMOTE, { tabId: 'tab-remote1' })).toEqual({ reaper: 'remote', envMarker: 'unknown', killed: [], survivors: [] });
+    expect(await killSession(REMOTE, { tabId: 'tab-remote1' })).toEqual({ reaper: 'remote-skipped', envMarker: 'unknown', killed: [], survivors: [] });
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({ event: 'tab-reap-skipped', host: 'ai-server' }));
   });
 

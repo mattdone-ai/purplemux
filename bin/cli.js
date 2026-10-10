@@ -1314,6 +1314,7 @@ const cmdTabClose = async (args) => {
   for (const p of Array.isArray(body.killed) ? body.killed : []) lines.push(`killed ${p.pid} ${p.comm} ${p.args}`);
   for (const p of Array.isArray(body.survivors) ? body.survivors : []) lines.push(`survivor ${p.pid} ${p.comm} ${p.args}`);
   if (body.reaper === 'unavailable') lines.push('reaper: unavailable (no /proc): only the pane group was signalled');
+  if (body.reaper === 'remote-skipped') lines.push('reaper: skipped (the host is out of remote.hosts and did not answer): nothing on it was reaped');
   if (body.envMarker === 'absent') lines.push('envMarker: absent (a tab created before per-tab identity): only its pane descendants were reaped');
   process.stdout.write(`${lines.join('\n')}\n`);
 };

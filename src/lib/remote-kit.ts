@@ -30,8 +30,10 @@ export const remoteTabEnvRelative = (tabId: string): string => `tabs/${tabId}.en
 
 /**
  * The secrets of a pane, sourced once by its launch command and then deleted:
- * passed through ssh's stdin into a 0600 file, so no token is ever on a remote
- * command line or in tmux's `pane_start_command`.
+ * passed through ssh's stdin into a 0600 file, so the token is never on the
+ * create's command line or in tmux's `pane_start_command`. It then lives only
+ * in the pane's environment; the hook hands it to curl on fd 3 (hook-scripts.ts),
+ * and the CLI sends it in a request header, never in any process's argv.
  */
 export const remoteTabEnvFile = (vars: Record<string, string>): string =>
   Object.entries(vars).map(([k, v]) => `${k}=${shQuote(v)}\n`).join('');
