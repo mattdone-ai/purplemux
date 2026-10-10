@@ -69,6 +69,13 @@ An isolated build of the slice (b) branch on mdserver1 (port 18463, `dangerously
 - Replay: with the tunnel stopped (`curl … /api/health` on ai-server: `000`, exit 7), a prompt typed into the remote pane spooled two events on ai-server; the next drain logged "remote hook spool: 2 taken, 0 dropped from ai-server" and "hook spool drain: 2 applied (0 stale)", and `tab status` then served the turn's `DONE: spooled turn` line.
 - `tab close`: `ok`, `killed 1616530 claude claude --settings /home/mdone/.purplemux-remote/mdserver1/hooks.json …` (no token on the command line); afterwards no tmux server, no Claude process with the kit's settings and no env file on ai-server. The local transcript copy was left behind at that commit; every close path now drops it (unit-tested, not re-run end to end).
 
+### Rerun after review r3, 2026-10-10 (port 18772, same setup)
+- `config set remote.callback-url http://example.com:18772` (admin): `config-invalid` ("… over plain http must name a loopback or tailnet host …"), exit 2.
+- Create as before; `idle`, session id bound from the remote SessionStart hook. A send: `busy`, then `ready-for-review` with `DONE: hostname is ai-server and cliState is "busy".`
+- A second turn whose `sleep 40` the model ran in the background ended on `WAITING: …`: the stop retired the pending turn and the tab stayed `busy` (WAITING, open background work read from the transcript copy).
+- A third turn with a foreground `sleep 120`: the layout held the pending turn (`turn.at`, `turn.runningAt` bound by the prompt-submit acknowledgement through the remote process proof). `tab close` while busy, the session being the only one on `pmux-mdserver1`: `ok`, `killed … claude …`, `killed … bash …`, `killed … sleep 40`. Afterwards on ai-server: `no server running on /tmp/tmux-1000/pmux-mdserver1`, 0 Claude processes with the kit's settings, 0 env files; on mdserver1: 0 transcript copies, no token record for the tab.
+- Token in argv: a 60 s `/proc` scan on ai-server during the turns caught 1 of this server's hook curls (`-H @/dev/fd/3`, no token). A deterministic probe ran the kit's hook against a listener that never answered, with a fake 64-character token: the waiting curl's argv was `curl … -H Content-Type: application/json -H @/dev/fd/3 --data-binary @- http://127.0.0.1:19673/api/status/hook?remote=claude&event=stop&session=…`, 0 of 1 with the token. The same scan saw ai-server's own purplemux hooks (its release, not this change) put its own CLI token in argv in 37 of 38 posts; this change fixes the local hooks too once that host runs it.
+
 ## Hard problems
 | Problem | Slice (a) | Plan |
 |---|---|---|
