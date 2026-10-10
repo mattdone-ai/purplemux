@@ -90,4 +90,43 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
     expect(line).toMatch(/'new-session' .* 'sh -l' ';' 'set-option' '-t' '=pt-ws-a-pane-p-tab-r:' '@pmux-create' 'N0nce'$/);
     expect(script.split('\n').filter((l) => l.includes('@pmux-create'))).toHaveLength(1);
   });
+
+  it.each([
+    ['decimal integer for 8.8.8.8', 'http://134744072:8022'],
+    ['hex integer for 8.8.8.8', 'http://0x08080808:8022'],
+    ['decimal integer for 127.0.0.1', 'http://2130706433:8022'],
+    ['hex integer for 127.0.0.1', 'http://0x7f000001:8022'],
+    ['octal dotted for 127.0.0.1', 'http://0177.0.0.1:8022'],
+    ['octal dotted for a tailnet-looking address', 'http://100.064.1.1:8022'],
+    ['short dotted form', 'http://127.1:8022'],
+    ['a trailing dot on a ts.net name', 'http://mdserver1.tail1234.ts.net.:8022'],
+    ['ts.net as a label, not the suffix', 'http://ts.net.evil.com:8022'],
+    ['userinfo', 'http://user@100.94.44.114:8022'],
+    ['a path', 'http://100.94.44.114:8022/x'],
+    ['a query', 'http://100.94.44.114:8022?a=1'],
+    ['an intranet-style bare name not on the allow-list', 'http://intranet:8022'],
+    ['a public dotted address', 'http://8.8.8.8:8022'],
+    ['an address outside 100.64.0.0/10', 'http://100.128.0.1:8022'],
+    ['a public name', 'http://example.com:8022'],
+    ['not a URL', 'mdserver1:8022'],
+  ])('refuses %s (review r4)', async (_label, url) => {
+    const { callbackUrlRefusal } = await import('@/lib/remote-host');
+    expect(callbackUrlRefusal(url, ['mdserver1'])).not.toBeNull();
+  });
+
+  it.each([
+    'http://localhost:18463', 'http://127.0.0.1:8022', 'http://[::1]:8022', 'http://100.94.44.114:8022',
+    'http://mdserver1.tail1234.ts.net:8022', 'https://pmux.example.com', 'https://pmux.example.com:8443/',
+  ])('accepts %s', async (url) => {
+    const { callbackUrlRefusal } = await import('@/lib/remote-host');
+    expect(callbackUrlRefusal(url)).toBeNull();
+  });
+
+  it('a bare MagicDNS name passes over plain http only once it is on remote.callback-allow-hosts', async () => {
+    const { callbackUrlRefusal, parseCallbackAllowHosts } = await import('@/lib/remote-host');
+    expect(callbackUrlRefusal('http://mdserver1:8022')).toMatch(/remote\.callback-allow-hosts/);
+    expect(callbackUrlRefusal('http://mdserver1:8022', parseCallbackAllowHosts(' mdserver1, 9bad ,x.y'))).toBeNull();
+    expect(callbackUrlRefusal('http://MDSERVER1:8022', ['mdserver1'])).toBeNull();
+    expect(parseCallbackAllowHosts('mdserver1,9bad,x.y,-a')).toEqual(['mdserver1']);
+  });
 });

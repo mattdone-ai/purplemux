@@ -329,11 +329,21 @@ export const closeRemoteTabsFirst = async (
   const reaps = new Map<string, IReapResult | null>();
   if (remote.length === 0) return reaps;
   await assertRemoteHostsAnswer(remote.map((t) => t.sessionName));
-  for (const tab of remote) {
-    reaps.set(tab.sessionName, await killSession(tab.sessionName, { tabId: tab.id }));
-    onClosed?.(tab.sessionName);
+  try {
+    for (const tab of remote) {
+      reaps.set(tab.sessionName, await killSession(tab.sessionName, { tabId: tab.id }));
+      onClosed?.(tab.sessionName);
+    }
+  } catch (err) {
+    await revokeReapedRemoteTokens(remote, reaps);
+    throw err;
   }
   return reaps;
+};
+
+/** A remote tab whose session was reaped keeps no usable token, even when the close is then refused (review r4). */
+const revokeReapedRemoteTokens = async (tabs: readonly ITab[], reaps: ReadonlyMap<string, IReapResult | null>): Promise<void> => {
+  for (const tab of tabs) if (reaps.has(tab.sessionName)) await revokeTabToken(tab.id).catch(() => false);
 };
 
 export const deletePane = async (
@@ -901,33 +911,39 @@ export const closePaneInLayout = async (wsId: string, paneId: string): Promise<I
   const target = before ? findPane(before.root, paneId) : null;
   if (!before || !target || collectPanes(before.root).length <= 1) return null;
   const remoteReaps = await closeRemoteTabsFirst(target.tabs);
-  const result = await withLock(async () => {
-    const filePath = resolveLayoutFile(wsId);
-    const layout = await readLayoutFile(filePath);
-    if (!layout) return null;
+  let result: ILayoutData | null;
+  try {
+    result = await withLock(async () => {
+      const filePath = resolveLayoutFile(wsId);
+      const layout = await readLayoutFile(filePath);
+      if (!layout) return null;
 
-    const pane = findPane(layout.root, paneId);
-    if (!pane) return null;
-    if (collectPanes(layout.root).length <= 1) return null;
+      const pane = findPane(layout.root, paneId);
+      if (!pane) return null;
+      if (collectPanes(layout.root).length <= 1) return null;
 
-    for (const tab of pane.tabs.filter((t) => t.panelType !== 'web-browser')) {
-      const reap = remoteReaps.has(tab.sessionName)
-        ? remoteReaps.get(tab.sessionName) ?? null
-        : await killSession(tab.sessionName, { tabId: tab.id });
-      if (tab.orchestrationActivity?.launch || tab.orchestrationActivity?.turn) await requireAbandonedRuntime(tab.sessionName, reap);
-    }
-    const wasEqualized = isEqualized(layout.root);
-    removePaneWithFocus(layout, paneId);
-    if (wasEqualized) {
-      layout.root = equalizeNode(layout.root);
-    }
-    layout.updatedAt = new Date().toISOString();
-    await writeLayoutFile(layout, filePath);
-    syncWorkspaceDirectories(wsId, layout.root);
-    // A host with no tab left drops out of the pane scans (review r2 nit 3).
-    for (const tab of pane.tabs) forgetSessionHost(tab.sessionName);
-    return layout;
-  });
+      for (const tab of pane.tabs.filter((t) => t.panelType !== 'web-browser')) {
+        const reap = remoteReaps.has(tab.sessionName)
+          ? remoteReaps.get(tab.sessionName) ?? null
+          : await killSession(tab.sessionName, { tabId: tab.id });
+        if (tab.orchestrationActivity?.launch || tab.orchestrationActivity?.turn) await requireAbandonedRuntime(tab.sessionName, reap);
+      }
+      const wasEqualized = isEqualized(layout.root);
+      removePaneWithFocus(layout, paneId);
+      if (wasEqualized) {
+        layout.root = equalizeNode(layout.root);
+      }
+      layout.updatedAt = new Date().toISOString();
+      await writeLayoutFile(layout, filePath);
+      syncWorkspaceDirectories(wsId, layout.root);
+      // A host with no tab left drops out of the pane scans (review r2 nit 3).
+      for (const tab of pane.tabs) forgetSessionHost(tab.sessionName);
+      return layout;
+    });
+  } catch (err) {
+    await revokeReapedRemoteTokens(target.tabs, remoteReaps);
+    throw err;
+  }
 
   return result;
 });

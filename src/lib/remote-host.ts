@@ -29,30 +29,52 @@ export const readRemoteHosts = async (): Promise<string[]> =>
 
 export const REMOTE_CALLBACK_URL_KEY = 'remote.callback-url';
 
-const CALLBACK_URL = /^(https?):\/\/([A-Za-z0-9.-]+)(?::\d{1,5})?$/;
+export const REMOTE_CALLBACK_ALLOW_HOSTS_KEY = 'remote.callback-allow-hosts';
 
-/** A host an http callback may name: loopback, a Tailscale address or name, or a bare (MagicDNS) name. */
-const TAILNET_LOOKING = (host: string): boolean => {
-  if (host === 'localhost' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/\.ts\.net$/i.test(host)) return true;
-  const ip = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-  if (ip) return Number(ip[1]) === 100 && Number(ip[2]) >= 64 && Number(ip[2]) <= 127;
-  return !host.includes('.');
+const URL_SHAPE = /^(https?):\/\/([^/?#@\s]+)\/?$/;
+const AUTHORITY = /^(\[[0-9A-Fa-f:.]+\]|[^:[\]]+)(?::\d{1,5})?$/;
+const BARE_NAME = /^[a-z][a-z0-9-]{0,62}$/;
+
+export const isValidBareHostName = (value: unknown): value is string => typeof value === 'string' && BARE_NAME.test(value);
+
+export const parseCallbackAllowHosts = (raw: string | null | undefined): string[] =>
+  (raw ?? '').split(',').map((h) => h.trim().toLowerCase()).filter(isValidBareHostName);
+
+const isLoopback = (host: string): boolean => host === 'localhost' || host === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+
+const isTailnetAddress = (host: string): boolean => {
+  const ip = host.match(/^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  return !!ip && Number(ip[1]) >= 64 && Number(ip[1]) <= 127;
 };
 
 /**
- * Why a callback URL is refused, or null (review r3 nit 4). A tab's token rides
- * every hook and CLI call to it: plain http only to a loopback or tailnet-looking
- * host (WireGuard carries it there); anything else must be https.
+ * Why a callback URL is refused, or null (review r3 nit 4, r4). A tab's token
+ * rides every hook and CLI call to it. The host is read as `new URL()` reads it
+ * and must be written in that canonical form, so 2130706433, 0x7f000001 or
+ * 0177.0.0.1 cannot pass as 127.0.0.1. Plain http only to loopback,
+ * 100.64.0.0/10, `*.ts.net`, or a bare name on `remote.callback-allow-hosts`
+ * (a MagicDNS name looks like an intranet name, so the admin names it);
+ * anything else must be https.
  */
-export const callbackUrlRefusal = (value: unknown): string | null => {
-  const m = typeof value === 'string' ? value.match(CALLBACK_URL) : null;
-  if (!m) return `${REMOTE_CALLBACK_URL_KEY} must be http(s)://host[:port]`;
-  if (m[1] === 'http' && !TAILNET_LOOKING(m[2])) return `${REMOTE_CALLBACK_URL_KEY} over plain http must name a loopback or tailnet host (100.64.0.0/10, *.ts.net, a bare MagicDNS name); use https otherwise`;
-  return null;
+export const callbackUrlRefusal = (value: unknown, allowHosts: readonly string[] = []): string | null => {
+  const shape = typeof value === 'string' ? value.match(URL_SHAPE) : null;
+  const authority = shape?.[2].match(AUTHORITY);
+  if (!shape || !authority) return `${REMOTE_CALLBACK_URL_KEY} must be http(s)://host[:port], with no user, path or query`;
+  let host: string;
+  try {
+    host = new URL(value as string).hostname;
+  } catch {
+    return `${REMOTE_CALLBACK_URL_KEY} is not a URL`;
+  }
+  if (host !== authority[1].toLowerCase()) return `${REMOTE_CALLBACK_URL_KEY} host must be written in canonical form: ${JSON.stringify(authority[1])} reads as ${JSON.stringify(host)}`;
+  if (host.endsWith('.')) return `${REMOTE_CALLBACK_URL_KEY} host must not end with a dot`;
+  if (shape[1] === 'https') return null;
+  if (isLoopback(host) || isTailnetAddress(host) || /^(?:[a-z0-9-]+\.)+ts\.net$/.test(host)) return null;
+  if (BARE_NAME.test(host)) {
+    return allowHosts.includes(host) ? null : `${REMOTE_CALLBACK_URL_KEY}: the bare name ${host} is allowed over plain http only once an admin lists it in ${REMOTE_CALLBACK_ALLOW_HOSTS_KEY}`;
+  }
+  return `${REMOTE_CALLBACK_URL_KEY} over plain http must name loopback, a 100.64.0.0/10 address, a *.ts.net name or a bare name on ${REMOTE_CALLBACK_ALLOW_HOSTS_KEY}; use https otherwise`;
 };
-
-export const isValidCallbackUrl = (value: unknown): value is string => callbackUrlRefusal(value) === null;
 
 const serverPort = (): string => {
   if (process.env.PORT && /^\d{1,5}$/.test(process.env.PORT)) return process.env.PORT;
@@ -71,9 +93,10 @@ const serverPort = (): string => {
  * name answers on the tailnet). Throws when the fleet config is unreadable.
  */
 export const resolveCallbackUrl = async (): Promise<string> => {
-  const configured = valueOf(await readFleetConfig(), REMOTE_CALLBACK_URL_KEY)?.value;
-  const url = configured ?? `http://${os.hostname()}:${serverPort()}`;
-  const refusal = callbackUrlRefusal(url);
+  const state = await readFleetConfig();
+  const configured = valueOf(state, REMOTE_CALLBACK_URL_KEY)?.value;
+  const url = configured ?? `http://${os.hostname().toLowerCase()}:${serverPort()}`;
+  const refusal = callbackUrlRefusal(url, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
   if (refusal) throw new Error(`${refusal} (${configured === undefined ? 'the default from this hostname' : 'fleet config'}: ${JSON.stringify(url)})`);
   return url;
 };

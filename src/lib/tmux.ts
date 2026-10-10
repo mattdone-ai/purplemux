@@ -628,50 +628,54 @@ const localPanes = async (): Promise<Map<string, IPaneInfo>> => {
 /** After a host fails to answer a pane scan, the scans skip it this long (review r1 nit 2). */
 const REMOTE_SCAN_BACKOFF_MS = 30_000;
 
-const gScan = globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number>; __ptRemoteScanAnswered?: Map<string, boolean> };
+const gScan = globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number> };
 if (!gScan.__ptRemoteScanBackoff) gScan.__ptRemoteScanBackoff = new Map();
-if (!gScan.__ptRemoteScanAnswered) gScan.__ptRemoteScanAnswered = new Map();
 const scanBackoff = gScan.__ptRemoteScanBackoff;
-const scanAnswered = gScan.__ptRemoteScanAnswered;
 
-/**
- * Whether the last pane scan of `host` was answered (review r3 B1). A remote
- * session missing from an answered scan is gone; missing from an unanswered
- * one, or during the backoff, nothing is known about it.
- */
-export const remotePaneScanAnswered = (host: string): boolean => scanAnswered.get(host) === true;
+interface IRemoteScan {
+  panes: Map<string, IPaneInfo>;
+  /** tmux on the host answered (with panes, or with "no server"): a session missing from it is gone. */
+  answered: boolean;
+}
 
 /** A host that does not answer contributes nothing: its tabs read as not running, never as local. */
-const remotePanes = async (host: string): Promise<Map<string, IPaneInfo>> => {
-  if ((scanBackoff.get(host) ?? 0) > Date.now()) return new Map();
+const remotePanes = async (host: string): Promise<IRemoteScan> => {
+  if ((scanBackoff.get(host) ?? 0) > Date.now()) return { panes: new Map(), answered: false };
   try {
     const { stdout } = await runSsh(host, remoteTmuxCommand(['list-panes', '-a', '-F', ALL_PANES_FORMAT]), { timeoutMs: CMD_TIMEOUT });
     scanBackoff.delete(host);
-    scanAnswered.set(host, true);
-    return parsePanes(stdout, host);
+    return { panes: parsePanes(stdout, host), answered: true };
   } catch (err) {
     if (isTmuxAbsence(err)) {
       scanBackoff.delete(host);
-      scanAnswered.set(host, true);
-    } else {
-      scanBackoff.set(host, Date.now() + REMOTE_SCAN_BACKOFF_MS);
-      scanAnswered.set(host, false);
-      log.warn({ host, failure: describeRemoteFailure(err) }, 'remote pane scan failed; host skipped for 30 s');
+      return { panes: new Map(), answered: true };
     }
-    return new Map();
+    scanBackoff.set(host, Date.now() + REMOTE_SCAN_BACKOFF_MS);
+    log.warn({ host, failure: describeRemoteFailure(err) }, 'remote pane scan failed; host skipped for 30 s');
+    return { panes: new Map(), answered: false };
   }
 };
 
-export const getAllPanesInfo = async (): Promise<Map<string, IPaneInfo>> => {
+/**
+ * The pane map, carrying the remote hosts THIS scan read (review r3 B1, r4):
+ * a remote session missing from an answered host is gone; missing from a host
+ * not read (a failure, the backoff) is unknown. Per scan, so two concurrent
+ * scans never read each other's answer.
+ */
+export interface IPaneMap extends Map<string, IPaneInfo> {
+  answeredRemoteHosts?: ReadonlySet<string>;
+}
+
+export const getAllPanesInfo = async (): Promise<IPaneMap> => {
   // Only hosts that own a tab are asked: a registered host with none costs nothing.
-  const [local, ...remote] = await Promise.all([
-    localPanes(),
-    ...(await remoteHostsInUse().catch(() => knownRemoteHosts())).map(remotePanes),
-  ]);
-  for (const panes of remote) {
-    for (const [session, info] of panes) if (!local.has(session)) local.set(session, info);
-  }
-  return local;
+  const hosts = await remoteHostsInUse().catch(() => knownRemoteHosts());
+  const [local, ...remote] = await Promise.all([localPanes(), ...hosts.map(remotePanes)]);
+  const answered = new Set<string>();
+  remote.forEach((scan, i) => {
+    if (scan.answered) answered.add(hosts[i]);
+    for (const [session, info] of scan.panes) if (!local.has(session)) local.set(session, info);
+  });
+  return Object.assign(local, { answeredRemoteHosts: answered });
 };
 
 export const SAFE_SHELLS = new Set(['bash', 'zsh', 'fish', 'sh', 'dash']);

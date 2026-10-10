@@ -5,7 +5,7 @@ import { readLayoutFile, resolveLayoutFile, collectAllTabs, updateTabCliStatus, 
 import { HOOK_REPLAY_WINDOW_MS, HOOK_SPOOL_DIR, type IHookSpoolDrainResult } from '@/lib/hook-spool';
 import { HookFloorStore } from '@/lib/hook-floors';
 import { onTabClosed, onTabClosing } from '@/lib/tab-lifecycle';
-import { capturePaneContent, getAllPanesInfo, getListeningPorts, remotePaneScanAnswered, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid } from '@/lib/tmux';
+import { capturePaneContent, getAllPanesInfo, getListeningPorts, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid } from '@/lib/tmux';
 import { sessionHostOf } from '@/lib/session-host';
 import { getChildPids } from '@/lib/process-utils';
 import { getProvider, getProviderByPanelType } from '@/lib/providers/registry';
@@ -89,11 +89,12 @@ const agentRunningIn = async (
   paneInfo: IPaneInfo | undefined,
   provider: IAgentProvider | null,
   remoteHost: string | null = null,
+  hostAnswered = false,
 ): Promise<boolean | null> => {
   if (!provider) return false;
   if (remoteHost) {
     if (paneInfo?.host) return provider.matchesProcess(paneInfo.command);
-    return remotePaneScanAnswered(remoteHost) ? false : null;
+    return hostAnswered ? false : null;
   }
   if (!paneInfo || !paneInfo.pid) return false;
   return provider.isAgentRunning(paneInfo.pid, await getChildPids(paneInfo.pid));
@@ -373,8 +374,10 @@ export class StatusManager {
     if (!entry || entry.cliState !== 'unknown') return;
 
     const provider = getProviderByPanelType(entry.panelType);
-    const paneInfo = (await getAllPanesInfo()).get(entry.tmuxSession);
-    const agentRunning = await agentRunningIn(paneInfo, provider, await sessionHostOf(entry.tmuxSession));
+    const panes = await getAllPanesInfo();
+    const paneInfo = panes.get(entry.tmuxSession);
+    const remoteHost = await sessionHostOf(entry.tmuxSession);
+    const agentRunning = await agentRunningIn(paneInfo, provider, remoteHost, !!remoteHost && !!panes.answeredRemoteHosts?.has(remoteHost));
     // A remote host not read: the tab stays unknown until a hook or a read pane says (review r3 B1).
     if (agentRunning === null) return;
 
@@ -714,8 +717,9 @@ export class StatusManager {
         }).catch((err) => log.warn(`model policy check failed: ${err instanceof Error ? err.message : err}`));
         if ((this.codexLifecycleEpoch.get(tab.id)?.epoch ?? 0) !== lifecycleEpoch) continue;
         const paneInfo = panesInfo.get(tab.sessionName);
-        // A remote tab whose host the scan did not read keeps what it showed (review r3 B1).
-        const paneUnread = !!tab.host && !paneInfo && !remotePaneScanAnswered(tab.host);
+        // A remote tab whose host this scan did not read keeps what it showed (review r3 B1).
+        const hostAnswered = !!tab.host && !!panesInfo.answeredRemoteHosts?.has(tab.host);
+        const paneUnread = !!tab.host && !paneInfo && !hostAnswered;
 
         const { terminalStatus, listeningPorts } = paneUnread && existing
           ? { terminalStatus: existing.terminalStatus ?? 'idle', listeningPorts: existing.listeningPorts ?? [] }
@@ -828,7 +832,7 @@ export class StatusManager {
 
         let agentRunningCache: boolean | null | undefined;
         const agentRunningNow = async (): Promise<boolean | null> => {
-          if (agentRunningCache === undefined) agentRunningCache = await agentRunningIn(paneInfo, provider, tab.host ?? null);
+          if (agentRunningCache === undefined) agentRunningCache = await agentRunningIn(paneInfo, provider, tab.host ?? null, hostAnswered);
           return agentRunningCache;
         };
         const checkAgentRunning = async (): Promise<boolean> => (await agentRunningNow()) === true;

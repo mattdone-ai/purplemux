@@ -16,7 +16,7 @@ import {
 import { leaseAuthority } from '@/lib/lease-http';
 import { createLogger } from '@/lib/logger';
 import type { IFleetConfigChange, IFleetConfigSetter, IFleetConfigState, IFleetConfigValue } from '@/types/fleet-config';
-import { REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, callbackUrlRefusal, isValidRemoteHostName } from '@/lib/remote-host';
+import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, callbackUrlRefusal, isValidBareHostName, isValidRemoteHostName, parseCallbackAllowHosts } from '@/lib/remote-host';
 
 const log = createLogger('fleet-config');
 
@@ -45,10 +45,14 @@ const setterOf = (caller: ICaller): IFleetConfigSetter => ({
 const ADMIN_ONLY_KEYS = /^remote\./;
 
 /** Values the remote keys must hold, checked at write time so a bad one never reaches a create. */
-const checkRemoteValue = (key: string, value: string): void => {
+const checkRemoteValue = (key: string, value: string, state: IFleetConfigState): void => {
   if (key === REMOTE_CALLBACK_URL_KEY) {
-    const refusal = callbackUrlRefusal(value);
+    const refusal = callbackUrlRefusal(value, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
     if (refusal) throw new FleetConfigError('config-invalid', refusal);
+  }
+  if (key === REMOTE_CALLBACK_ALLOW_HOSTS_KEY) {
+    const bad = value.split(',').map((h) => h.trim()).filter((h) => h && !isValidBareHostName(h));
+    if (bad.length) throw new FleetConfigError('config-invalid', `${REMOTE_CALLBACK_ALLOW_HOSTS_KEY} takes bare lower-case host names (a letter first): ${bad.join(', ')}`);
   }
   if (key === REMOTE_HOSTS_KEY) {
     const bad = value.split(',').map((h) => h.trim()).filter((h) => h && !isValidRemoteHostName(h));
@@ -84,8 +88,10 @@ export const putValue = async (
   const value = checkValue(body.value);
   const expectedVersion = checkExpectedVersion(body.expectedVersion);
   await requireWriter(caller, authority, key);
-  checkRemoteValue(key, value);
-  const { state, change } = await mutateFleetConfig((s) => setValue(s, { key, value, expectedVersion }, setterOf(caller), authority.now()));
+  const { state, change } = await mutateFleetConfig((s) => {
+    checkRemoteValue(key, value, s);
+    return setValue(s, { key, value, expectedVersion }, setterOf(caller), authority.now());
+  });
   if (change) await audit(change, caller);
   const stored = valueOf(state, key)!;
   return { key, version: stored.version, value: stored, changed: change !== null };

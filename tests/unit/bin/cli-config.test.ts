@@ -88,6 +88,10 @@ describe('purplemux config — the installed CLI against the real fleet-config r
         req.query.key = 'remote.callback-url';
         return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
       },
+      '/api/cli/fleet-config/remote.callback-allow-hosts': async (req, res) => {
+        req.query.key = 'remote.callback-allow-hosts';
+        return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
+      },
       '/api/cli/fleet-config/constructor': async (req, res) => {
         req.query.key = 'constructor';
         return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
@@ -132,10 +136,16 @@ describe('purplemux config — the installed CLI against the real fleet-config r
     expect((await cli(['config', 'set', 'remote.hosts', 'ai-server,-oProxyCommand=x'], admin)).code).toBe(2);
     const plain = await cli(['config', 'set', 'remote.callback-url', 'http://example.com:8022'], admin);
     expect(plain.code).toBe(2);
-    expect(plain.stderr).toContain('loopback or tailnet');
-    for (const ok of ['http://100.94.44.114:8022', 'http://mdserver1:8022', 'http://mdserver1.tail1234.ts.net:8022', 'https://pmux.example.com']) {
+    expect(plain.stderr).toContain('use https otherwise');
+    for (const ok of ['http://100.94.44.114:8022', 'http://mdserver1.tail1234.ts.net:8022', 'https://pmux.example.com']) {
       expect((await cli(['config', 'set', 'remote.callback-url', ok], admin)).code, ok).toBe(0);
     }
+    expect((await cli(['config', 'set', 'remote.callback-url', 'http://2130706433:8022'], admin)).code).toBe(2);
+    expect((await cli(['config', 'set', 'remote.callback-url', 'http://mdserver1:8022'], admin)).code).toBe(2);
+    expect((await cli(['config', 'set', 'remote.callback-allow-hosts', 'mdserver1'], orch)).code).toBe(3);
+    expect((await cli(['config', 'set', 'remote.callback-allow-hosts', '0x7f000001'], admin)).code).toBe(2);
+    expect((await cli(['config', 'set', 'remote.callback-allow-hosts', 'mdserver1'], admin)).code).toBe(0);
+    expect((await cli(['config', 'set', 'remote.callback-url', 'http://mdserver1:8022'], admin)).code).toBe(0);
     expect((await cli(['config', 'unset', 'remote.callback-url'], orch)).code).toBe(3);
   });
 

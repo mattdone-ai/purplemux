@@ -53,6 +53,7 @@ vi.mock('@/lib/fleet-config-store', () => ({
   valueOf: (_state: unknown, key: string) => {
     if (key === 'remote.hosts') return fleet.hosts === null ? null : { value: fleet.hosts };
     if (key === 'remote.callback-url') return { value: fleet.callback };
+    if (key === 'remote.callback-allow-hosts') return { value: 'mdserver1' };
     return null;
   },
 }));
@@ -130,6 +131,25 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(await observeRemoteProviderProcess(REMOTE, 'claude')).toEqual({ state: 'absent', reason: 'session gone' });
     replies.fn = () => ({ code: 255, stderr: 'Connection timed out' });
     expect((await observeRemoteProviderProcess(REMOTE, 'claude')).state).toBe('unknown');
+  });
+
+  it('each scan carries the hosts it read: two concurrent scans, one failing, never read each other\'s answer (review r4)', async () => {
+    let n = 0;
+    replies.fn = (cmd) => {
+      if (cmd === 'tmux') return { stdout: '' };
+      n += 1;
+      return n === 1 ? { code: 255, stderr: 'ssh: connect to host ai-server port 22: Connection timed out' } : { stdout: `${REMOTE}\tclaude\t/home/r\t999\t7\n` };
+    };
+    const { getAllPanesInfo } = await import('@/lib/tmux');
+    const [failed, answered] = await Promise.all([getAllPanesInfo(), getAllPanesInfo()]);
+    expect([...(failed.answeredRemoteHosts ?? [])]).toEqual([]);
+    expect(failed.has(REMOTE)).toBe(false);
+    expect([...(answered.answeredRemoteHosts ?? [])]).toEqual(['ai-server']);
+    expect(answered.get(REMOTE)?.host).toBe('ai-server');
+    replies.fn = () => ({ code: 1, stderr: 'no server running on /tmp/tmux-1000/pmux-mdserver1' });
+    scanBackoff()?.clear();
+    const empty = await getAllPanesInfo();
+    expect([...(empty.answeredRemoteHosts ?? [])]).toEqual(['ai-server']);
   });
 
   it('a local session keeps the exact local argv', async () => {

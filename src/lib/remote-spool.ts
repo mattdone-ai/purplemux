@@ -18,7 +18,8 @@ import { remoteHostsInUse, sessionHostOf } from '@/lib/session-host';
  * Bounded (review r3, nits 2 and 6): only hosts that own a tab are asked; a
  * pull moves at most `REMOTE_SPOOL_BATCH` files and `REMOTE_SPOOL_BATCH_BYTES`
  * per host, so a backlog comes over in several drains; a file over
- * `REMOTE_SPOOL_FILE_MAX` is moved to the host's `hook-spool/bad/` and audited;
+ * `REMOTE_SPOOL_FILE_MAX` is moved to the host's `hook-spool/bad/` and audited
+ * (and deleted there after 14 days);
  * a host that fails is skipped for 30 s; and the pull runs beside the local
  * replay, never in front of it.
  */
@@ -33,6 +34,8 @@ export const REMOTE_SPOOL_BATCH_BYTES = 4 * 1024 * 1024;
 /** A hook spools at most a 256 KiB body plus metadata; a larger file is not a hook's. */
 export const REMOTE_SPOOL_FILE_MAX = 512 * 1024;
 const REMOTE_SPOOL_TIMEOUT_MS = 10_000;
+/** The host's `bad/` keeps a quarantined file this many days, then the next pull deletes it. */
+export const REMOTE_SPOOL_BAD_MAX_AGE_DAYS = 14;
 const REMOTE_SPOOL_BACKOFF_MS = 30_000;
 
 /**
@@ -41,6 +44,7 @@ const REMOTE_SPOOL_BACKOFF_MS = 30_000;
  */
 export const remoteSpoolListScript = (): string => `d=${remoteKitPath('hook-spool')}
 [ -d "$d" ] || exit 0
+[ -d "$d/${HOOK_SPOOL_BAD_DIRNAME}" ] && find "$d/${HOOK_SPOOL_BAD_DIRNAME}" -type f -mtime +${REMOTE_SPOOL_BAD_MAX_AGE_DAYS} -delete 2>/dev/null
 n=0; total=0
 for f in "$d"/[0-9]*.json; do
   [ -f "$f" ] || continue

@@ -31,10 +31,12 @@ vi.mock('@/lib/liveness-manager', () => ({
 vi.mock('@/lib/lease-sweeper', () => ({ getLeaseSweeper: () => ({ sweep: vi.fn(async () => []) }), setLeaseAgentStateSource: vi.fn() }));
 vi.mock('@/lib/tmux', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tmux')>()),
-  getAllPanesInfo: vi.fn(async () => (state.pane
-    ? new Map([['pt-ws-1-pane-a-tab-r', { pid: 0, command: state.command, path: '/home/mdone', windowActivity: 0, host: 'ai-server' }]])
-    : new Map())),
-  remotePaneScanAnswered: () => state.answered,
+  getAllPanesInfo: vi.fn(async () => Object.assign(
+    state.pane
+      ? new Map([['pt-ws-1-pane-a-tab-r', { pid: 0, command: state.command, path: '/home/mdone', windowActivity: 0, host: 'ai-server' }]])
+      : new Map(),
+    { answeredRemoteHosts: new Set(state.answered ? ['ai-server'] : []) },
+  )),
   getListeningPorts: tmux.getListeningPorts,
   getChildPids: tmux.getChildPids,
   getPaneTitle: vi.fn(async () => ''),

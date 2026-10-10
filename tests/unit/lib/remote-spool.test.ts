@@ -138,4 +138,15 @@ describe('the remote list script, run for real', () => {
     expect(lines.length).toBeLessThan(10);
     expect(lines.length * 500 * 1024).toBeLessThanOrEqual(4 * 1024 * 1024);
   });
+
+  it('deletes a quarantined file older than 14 days and keeps a newer one', async () => {
+    const bad = path.join(spool(), 'bad');
+    await fs.mkdir(bad, { recursive: true });
+    await fs.writeFile(path.join(bad, 'old.json'), 'x');
+    await fs.writeFile(path.join(bad, 'new.json'), 'y');
+    const old = new Date(Date.now() - 20 * 24 * 3600 * 1000);
+    await fs.utimes(path.join(bad, 'old.json'), old, old);
+    await list();
+    expect(await fs.readdir(bad)).toEqual(['new.json']);
+  });
 });
