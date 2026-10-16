@@ -55,7 +55,7 @@ const setup = async (orchestration: { enabled: boolean; orchestratorTabId: strin
   const internals = manager as unknown as {
     nudgeOrchestrator: (tabId: string, e: ITabStatusEntry, kind: 'stuck', detail?: string) => Promise<void>;
     handleLivenessEvent: (event: TLivenessEvent) => Promise<void>;
-    stuckNudgedTabs: Set<string>;
+    stuckNudgedTabs: Map<string, number>;
   };
   const targets = () => paste.mock.calls.map(([session]) => session.replace('tmux-', ''));
   return { manager, internals, paste, targets };
@@ -296,13 +296,13 @@ describe('human pages for liveness events (story 34, consult ruling A)', () => {
   // wake uncovered, so the skip re-arms it; a page that goes out leaves the latch alone.
   it('a skipped page re-arms the woken tab\'s stuck nudge', async () => {
     const skipped = await withAlerts(undefined, {});
-    skipped.internals.stuckNudgedTabs.add('w');
+    skipped.internals.stuckNudgedTabs.set('w', Date.now());
     await skipped.internals.handleLivenessEvent(bgFailed('self'));
     expect(skipped.alerts).not.toHaveBeenCalled();
     expect(skipped.internals.stuckNudgedTabs.has('w')).toBe(false);
 
     const paged = await withAlerts({ enabled: false, orchestratorTabId: null }, {});
-    paged.internals.stuckNudgedTabs.add('w');
+    paged.internals.stuckNudgedTabs.set('w', Date.now());
     await paged.internals.handleLivenessEvent(bgFailed('self'));
     expect(kinds(paged.alerts)).toEqual(['bg-job-died']);
     expect(paged.internals.stuckNudgedTabs.has('w')).toBe(true);

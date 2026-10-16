@@ -632,8 +632,8 @@ describe('stop classification (ADR-0018)', () => {
     const start = shapes.find((l) => l.includes('"backgroundTaskId": "bshell01"'))!;
     const entry = worker('claude-code', await writeLines('claude/c.jsonl', [start, claudeEnd('Waiting on the gate.')]));
     manager.registerTab('worker', entry);
-    const latch = (manager as unknown as { stuckNudgedTabs: Set<string> }).stuckNudgedTabs;
-    latch.add('worker'); // a stuck nudge fired during the previous wait
+    const latch = (manager as unknown as { stuckNudgedTabs: Map<string, number> }).stuckNudgedTabs;
+    latch.set('worker', Date.now()); // a stuck nudge fired during the previous wait
 
     manager.updateTabFromHook('tmux-worker', 'stop');
     await waitFor(() => expect(entry.turnEnd?.kind).toBe('waiting'));
