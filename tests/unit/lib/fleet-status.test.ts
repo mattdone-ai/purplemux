@@ -178,6 +178,12 @@ describe('fleet status: flags', () => {
     // Exited on purpose after finishing: no flag. Exited on its own question: still a stall.
     expect(flags(dead(60, 'DONE: shipped'))).toEqual([]);
     expect(flags(dead(60, 'BLOCKED: creds'))).toEqual(['stall']);
+    // Crashed mid-turn after a DONE turn: that line belongs to an older stop, so it is no exemption.
+    const crashed = facts({ inactiveSince: NOW - 40 * MIN }, {
+      cliState: 'inactive', lastEvent: { name: 'prompt-submit', at: NOW - 50 * MIN, seq: 21 },
+      turnEnd: turnEnd('turn-marker', NOW - 180 * MIN, { marker: ['DONE: shipped'] }),
+    });
+    expect(flags(crashed)).toEqual(['stall']);
   });
 
   it('a working tab counts from its latest prompt, not from the start of a WAITING chain', () => {

@@ -2667,6 +2667,7 @@ export class StatusManager {
       this.compactStaleTimers.delete(tabId);
     }
     this.stuckNudgedTabs.delete(tabId);
+    this.inactiveSince.delete(tabId);
     this.jobEventAt.delete(tabId);
     // A poll that read the layout before the close must not bring the tab back (L38).
     this.retiredTabs.set(tabId, Date.now() + CLOSED_RETIRE_MS);

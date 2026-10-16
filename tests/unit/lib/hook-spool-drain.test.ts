@@ -882,12 +882,13 @@ describe('drainHookSpool (ADR-0020)', () => {
       path.join(spoolDir(), `${now - 10_000 + i}-1-${i.toString(16).padStart(8, '0')}.json`),
       JSON.stringify({ v: 1, at: now - 10_000 + i, session: 'pt-a', query: '', body: claudePrompt() }),
     )));
+    // Loaded first: on a busy host the module load alone outlasted the drain (2026-10-16, load 17).
+    const { default: health } = await import('@/pages/api/health');
     let applied = 0;
     let done = false;
     const draining = drain(async () => { applied += 1; }, { now }).then(() => { done = true; });
     await new Promise((resolve) => setImmediate(resolve));
 
-    const { default: health } = await import('@/pages/api/health');
     const answer = await new Promise((resolve) => {
       health({} as never, { json: resolve } as never);
     });

@@ -160,7 +160,8 @@ const flagsOf = (
     if (inState !== null && inState >= stallMs) flags.push({ flag: 'stall', reason: `waiting for input for ${formatDuration(inState)}` });
   } else if (state === 'inactive') {
     // An agent exited after it ended on DONE / CHECKPOINTED / READY-TO-MERGE finished on purpose.
-    const finished = !!lastLine && facts.status?.turnEnd?.kind === 'turn-marker' && !QUESTION_LINE.test(lastLine.text);
+    const finished = !!lastLine && !!facts.status && facts.status.turnEnd?.kind === 'turn-marker'
+      && turnEndIsCurrent(facts.status) && !QUESTION_LINE.test(lastLine.text);
     if (!finished && inState !== null && inState >= stallMs) {
       flags.push({ flag: 'stall', reason: `agent not running for ${formatDuration(inState)}` });
     }
