@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildFleetView, FLEET_CONFIG_KEYS, type IFleetDeps } from '@/lib/fleet-status-snapshot';
+import { buildFleetView, FLEET_CONFIG_KEYS, readFleetView, type IFleetDeps } from '@/lib/fleet-status-snapshot';
 import { readComposer } from '@/lib/composer-readiness';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
@@ -38,7 +38,7 @@ beforeEach(() => {
       'tab-idle': status('ready-for-review', { readyForReviewAt: NOW - 40 * MIN }),
       'tab-remote': status('idle'),
     }),
-    serverFacts: (id) => ({ jsonlPath: id === 'tab-busy' ? '/t/busy.jsonl' : null, stallReported: false }),
+    serverFacts: (id) => ({ jsonlPath: id === 'tab-busy' ? '/t/busy.jsonl' : null, stallReportedAt: null }),
     watches: async () => [{ workspaceId: 'ws-1', tabId: 'tab-busy', kind: 'pr', target: 'o/r#1' }],
     liveJobs: async () => [],
     leases: async () => [
@@ -66,6 +66,16 @@ describe('buildFleetView', () => {
     expect(row(view, 'tab-busy')).toMatchObject({ state: 'working', epic: 'lfr', lastActivityAt: NOW - 2 * MIN, providerId: 'claude' });
     expect(row(view, 'tab-idle').epic).toBe('masspay');
     expect(view.errors).toEqual([]);
+  });
+
+  it('also captures a tab WAITING at its prompt, never a tab mid-turn', async () => {
+    deps.agentTabs = async () => [tab('tab-waiting'), tab('tab-busy')];
+    deps.statuses = () => ({
+      'tab-waiting': status('busy', { lastEvent: { name: 'stop', at: NOW - 5 * MIN, seq: 4 }, turnEnd: { kind: 'waiting', at: NOW - 5 * MIN, seq: 4 } }),
+      'tab-busy': status('busy', { lastEvent: { name: 'prompt-submit', at: NOW - MIN, seq: 9 } }),
+    });
+    await buildFleetView(deps, NOW);
+    expect(capture.mock.calls.map(([s]) => s)).toEqual(['pt-ws-1-pane-p-tab-waiting']);
   });
 
   it('captures only local tabs at their prompt, and reads typed text as unsubmitted', async () => {
@@ -139,6 +149,24 @@ describe('buildFleetView', () => {
     deps.config = async (key) => ({ [FLEET_CONFIG_KEYS.stallMinutes]: '10', [FLEET_CONFIG_KEYS.unansweredMinutes]: 'soon' })[key] ?? null;
     const view = await buildFleetView(deps, NOW);
     expect(view.thresholds).toEqual({ stallMinutes: 10, waitingLongMinutes: 120, unansweredMinutes: 30, composerMinutes: 2 });
+  });
+});
+
+describe('readFleetView', () => {
+  it('reads at most once per 5 s; a failed read is not cached', async () => {
+    const g = globalThis as unknown as { __ptFleetViewCache?: unknown };
+    g.__ptFleetViewCache = undefined;
+    const factory = vi.fn(async () => deps);
+    await readFleetView(NOW, factory);
+    await readFleetView(NOW + 4_999, factory);
+    expect(factory).toHaveBeenCalledTimes(1);
+    await readFleetView(NOW + 5_000, factory);
+    expect(factory).toHaveBeenCalledTimes(2);
+    const failing = vi.fn(async (): Promise<IFleetDeps> => { throw new Error('boom'); });
+    await expect(readFleetView(NOW + 20_000, failing)).rejects.toThrow('boom');
+    await readFleetView(NOW + 20_001, factory);
+    expect(factory).toHaveBeenCalledTimes(3);
+    g.__ptFleetViewCache = undefined;
   });
 });
 

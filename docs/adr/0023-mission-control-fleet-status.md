@@ -13,20 +13,22 @@ On 2026-10-16 one workspace ran 18 worker tabs. A brief stayed unsubmitted in th
 
    | Flag | Rule | Key | Default |
    |---|---|---|---|
-   | STALL? | working, and the watchdog sent its `stuck` nudge, or the newest of `lastEvent` and the transcript mtime is N min old (no transcript stamp: the watchdog verdict only) | `fleet-status.stall-minutes` | 30 |
-   | STALL? | idle or ready-for-review with no end line, no live registered job and no armed watch, for N min | same | 30 |
-   | STALL? | needs-input for N min | same | 30 |
+   | STALL? | working or waiting, and the watchdog sent its `stuck` nudge with no activity since it (the nudge latch is once per busy stretch, so a recovered tab is not stalled) | `fleet-status.stall-minutes` | — |
+   | STALL? | working, and the newest of `lastEvent` and the transcript mtime is N min old (no transcript stamp: the watchdog verdict only) | same | 30 |
+   | STALL? | idle or ready-for-review with no end line, no live registered job and no armed watch, for N min; never when the end line is unknown after a restart | same | 30 |
+   | STALL? | needs-input, or the agent not running (`inactive`), for N min | same | 30 |
    | STALL? | composer text for C min | `fleet-status.composer-minutes` | 2 |
    | WAITING-LONG | waiting for M min | `fleet-status.waiting-long-minutes` | 120 |
    | UNANSWERED | an open SM-inbox item with no `humanReview`, K min old | `fleet-status.unanswered-minutes` | 30 |
    | UNANSWERED | the tab is still stopped on a `BLOCKED:` or `NEEDS-DECISION:` end line, K min after it (no prompt since, so no reply) | same | 30 |
 
    An unreadable store raises no flag on a guess: an unknown job or watch list is not "no registered wait", and an unknown SM inbox is shown as "—", never 0.
-4. **Composer time.** The text arrived at the last automated submission (`orchestrationActivity.turn.at`) when that came after the tab's last hook event: it was typed and never taken. Otherwise the time is the first poll that saw the text, kept on `globalThis` and cleared when the composer empties. A server restart restarts that clock. Only local tabs at their prompt are captured (`capturePaneContent`, escapes kept so a dim suggestion reads as empty); a busy or remote pane is never read.
-5. **Who posted an SM-inbox item.** The events route resolves the caller (ADR-0010) and records the opener of each new `attention.opened` in `mission_item_openers`, an unversioned side table in `mission-control.sqlite` (the `portfolio-store` precedent), written with `INSERT OR IGNORE` inside the `applyEvents` transaction. `SCHEMA_VERSION` stays 4, so a release rolled back onto the file still opens it; there is no foreign key an older writer could trip. The opener comes from the credential (`launch` verified; `hook` and `session` asserted), never from the payload. It is advisory: no authorization reads it, and the wire snapshot and event feed do not carry it. An item with no row, or whose opener tab is gone, shows on its workspace's "unattributed" line, so nothing is hidden.
+4. **End lines survive a restart.** The watchdog persisted only markerless stops (`watchdogTurnEnd`, ADR-0018 L49), so after a restart every tab that ended on a line read as "no end line". An end-line stop is now persisted too and restored to a tab that comes back `ready-for-review` or `idle` in the same agent session. It fires nothing: the idle nudge reads only a markerless record, and the marker nudge only a new stop. A tab restored at its prompt with no record has no latest event; the panel reads its end line as unknown and raises no flag on it.
+5. **Composer time.** The text arrived at the last automated submission (`orchestrationActivity.turn.at`) when that came after the tab's last hook event: it was typed and never taken. Otherwise the time is the first poll that saw the text, kept on `globalThis` and cleared when the composer empties. A server restart restarts that clock. Only local tabs at their prompt are captured (`capturePaneContent`, escapes kept so a dim suggestion reads as empty): idle, stopped, or WAITING on their own work at the prompt (ADR-0018 A′), where the inbox and `tab send` still type. A tab mid-turn or a remote pane is never read.
+6. **Who posted an SM-inbox item.** The events route resolves the caller (ADR-0010) and records the opener of each new `attention.opened` in `mission_item_openers`, an unversioned side table in `mission-control.sqlite` (the `portfolio-store` precedent), written with `INSERT OR IGNORE` inside the `applyEvents` transaction. `SCHEMA_VERSION` stays 4, so a release rolled back onto the file still opens it; there is no foreign key an older writer could trip. The opener comes from the credential (`launch` verified; `hook` and `session` asserted), never from the payload. It is advisory: no authorization reads it, and the wire snapshot and event feed do not carry it. An item with no row, or whose opener tab is gone, shows on its workspace's "unattributed" line, so nothing is hidden.
 
 ## What the panel never does
-It never sends input to a tab, never resizes or attaches a pane, never nudges, and never writes to any store. Its one pane access is a capture of a local tab at its prompt.
+It never sends input to a tab, never resizes or attaches a pane, never nudges, and never writes to a tab, a lease, a watch, the inbox or Mission Control. Its one pane access is a capture of a local tab at its prompt. The one write on its path belongs to the shared layout reader: a layout file that does not parse is copied aside to `.json.bak`, as for every other reader of it.
 
 ## Options rejected
 - A schema-5 column for the opener: atomic, but a rollback to a schema-4 release refuses the database and all of Mission Control fails.

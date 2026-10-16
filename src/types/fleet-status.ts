@@ -34,7 +34,7 @@ export interface IFleetWait {
 }
 
 export interface IFleetInbox {
-  /** Open SM-inbox items: candidates and open items that no reviewer has stamped. */
+  /** Open Mission Control items the line holds: candidates, and open items escalated to the human. */
   open: number;
   /** Of those, the items older than the unanswered threshold. */
   unanswered: number;
@@ -57,6 +57,8 @@ export interface IFleetRow {
   lastActivityAt: number | null;
   waits: IFleetWait[];
   lastLine: { text: string; at: number } | null;
+  /** At its prompt after a server restart with no persisted stop: whether it ended on a line is unknown. */
+  endLineUnknown: boolean;
   /** null when the SM inbox could not be read. */
   inbox: IFleetInbox | null;
   flags: IFleetFlag[];
@@ -101,8 +103,8 @@ export interface IFleetTabFacts {
     'cliState' | 'lastEvent' | 'busySince' | 'readyForReviewAt' | 'turnEnd' | 'permissionRequest'> | null;
   /** mtime of the main transcript; null when unknown. */
   transcriptAt: number | null;
-  /** The watchdog sent its `stuck` nudge for the current busy stretch. */
-  stallReported: boolean;
+  /** When the watchdog sent its `stuck` nudge for the current busy stretch; null when it did not. */
+  stallReportedAt: number | null;
   /** Armed watches the tab owns; null when the watch store could not be read. */
   watches: Array<{ kind: string; target: string }> | null;
   /** Live registered `tab bg` jobs; null when the liveness store could not be read. */

@@ -29,7 +29,7 @@ const facts = (over: Partial<IFleetTabFacts> = {}, status: Partial<NonNullable<I
     ...status,
   },
   transcriptAt: NOW - MIN,
-  stallReported: false,
+  stallReportedAt: null,
   watches: [],
   liveJobs: [],
   composer: null,
@@ -133,15 +133,54 @@ describe('fleet status: flags', () => {
   });
 
   it('a working tab with no transcript stamp is judged only on the watchdog verdict', () => {
-    const remote = (stallReported: boolean) => facts({ transcriptAt: null, stallReported }, { lastEvent: { name: 'prompt-submit', at: NOW - 300 * MIN, seq: 1 } });
-    expect(flags(remote(false))).toEqual([]);
-    expect(flags(remote(true))).toEqual(['stall']);
+    const remote = (stallReportedAt: number | null) => facts({ transcriptAt: null, stallReportedAt }, { lastEvent: { name: 'prompt-submit', at: NOW - 300 * MIN, seq: 1 } });
+    expect(flags(remote(null))).toEqual([]);
+    expect(flags(remote(NOW - 10 * MIN))).toEqual(['stall']);
   });
 
-  it('STALL? on a working tab the watchdog reported, even with recent activity', () => {
-    expect(deriveFleetRow(facts({ stallReported: true }), NOW).flags).toEqual([
-      { flag: 'stall', reason: 'the watchdog reported this busy tab as stalled' },
+  it('STALL? on a working tab the watchdog reported, until the tab shows activity after the report', () => {
+    const quietSince = facts({ stallReportedAt: NOW - 4 * MIN, transcriptAt: NOW - 20 * MIN }, { lastEvent: { name: 'prompt-submit', at: NOW - 25 * MIN, seq: 1 } });
+    expect(deriveFleetRow(quietSince, NOW).flags).toEqual([{ flag: 'stall', reason: 'the watchdog reported this tab as stalled 4 min ago' }]);
+    // The latch is once per busy stretch: a tab that recovered (transcript written after it) is not stalled.
+    const recovered = facts({ stallReportedAt: NOW - 60 * MIN, transcriptAt: NOW - MIN });
+    expect(flags(recovered)).toEqual([]);
+  });
+
+  it('STALL? on a waiting tab the watchdog reported, before WAITING-LONG', () => {
+    const waiting = (stallReportedAt: number | null, transcriptAt = NOW - 20 * MIN) => facts({ stallReportedAt, transcriptAt }, {
+      lastEvent: stop(NOW - 20 * MIN), turnEnd: turnEnd('waiting', NOW - 20 * MIN, { openBackgroundTasks: 1 }),
+    });
+    expect(flags(waiting(null))).toEqual([]);
+    expect(flags(waiting(NOW - 2 * MIN))).toEqual(['stall']);
+    expect(flags(waiting(NOW - 2 * MIN, NOW - MIN))).toEqual([]);
+  });
+
+  it('after a restart with no persisted stop, the end line is unknown: no STALL?, never "no end line"', () => {
+    for (const cliState of ['ready-for-review', 'idle'] as const) {
+      const row = deriveFleetRow(facts({}, { cliState, lastEvent: null, readyForReviewAt: NOW - 90 * MIN, turnEnd: null }), NOW);
+      expect(row).toMatchObject({ endLineUnknown: true, lastLine: null, flags: [] });
+    }
+    expect(deriveFleetRow(facts({}, { cliState: 'idle', lastEvent: stop(NOW - 90 * MIN) }), NOW).endLineUnknown).toBe(false);
+  });
+
+  it('STALL? on a tab whose agent is not running, at N min', () => {
+    expect(flags(facts({}, { cliState: 'inactive', lastEvent: stop(NOW - 29 * MIN) }))).toEqual([]);
+    expect(deriveFleetRow(facts({}, { cliState: 'inactive', lastEvent: stop(NOW - 30 * MIN) }), NOW).flags).toEqual([
+      { flag: 'stall', reason: 'agent not running for 30 min' },
     ]);
+  });
+
+  it('a working tab counts from its latest prompt, not from the start of a WAITING chain', () => {
+    const row = deriveFleetRow(facts({}, { busySince: NOW - 90 * MIN, lastEvent: { name: 'prompt-submit', at: NOW - 4 * MIN, seq: 5 } }), NOW);
+    expect(row.since).toBe(NOW - 4 * MIN);
+  });
+
+  it('text left in the composer of a tab WAITING at its prompt is unsubmitted', () => {
+    const row = deriveFleetRow(facts({ composer: { reading: 'text', since: NOW - 3 * MIN } }, {
+      lastEvent: stop(NOW - 30 * MIN), turnEnd: turnEnd('waiting', NOW - 30 * MIN),
+    }), NOW);
+    expect(row.state).toBe('unsubmitted');
+    expect(row.flags.map((f) => f.flag)).toEqual(['stall']);
   });
 
   it('STALL? on an idle tab without an end line or a registered wait, at N min', () => {
@@ -256,7 +295,7 @@ describe('fleet status: helpers', () => {
   it('parses a threshold in (0, 10080] minutes, else the default', () => {
     expect(parseThresholdMinutes('45', 30)).toBe(45);
     expect(parseThresholdMinutes('0.5', 30)).toBe(0.5);
-    for (const bad of [null, undefined, '', '  ', '0', '-3', 'abc', '10081', 'Infinity']) expect(parseThresholdMinutes(bad, 30)).toBe(30);
+    for (const bad of [null, undefined, '', '  ', '0', '-3', 'abc', '10081', 'Infinity', '0x1e', '1e1', '+30']) expect(parseThresholdMinutes(bad, 30)).toBe(30);
   });
 
   it('an empty inbox has no oldest item', () => {

@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { FleetStatusErrorBoundary, FleetStatusView } from '@/components/features/mission-control/fleet-status-panel';
+import { CoordinationErrorBoundary } from '@/components/features/mission-control/coordination-panel';
+import { FleetStatusView, type IFleetFilter } from '@/components/features/mission-control/fleet-status-panel';
 import type { TFleetSection } from '@/types/coordination';
 import type { IFleetRow, IFleetView } from '@/types/fleet-status';
 
@@ -12,15 +13,16 @@ const MIN = 60_000;
 const row = (over: Partial<IFleetRow> = {}): IFleetRow => ({
   workspaceId: 'ws-1', workspaceName: 'Portfolio', tabId: 'tab-a', tabName: 'lfr-cat-regress',
   panelType: 'claude-code', providerId: 'claude', epic: null, state: 'working', rawCliState: 'busy',
-  since: AT - 5 * MIN, lastActivityAt: AT - MIN, waits: [], lastLine: null,
+  since: AT - 5 * MIN, lastActivityAt: AT - MIN, waits: [], lastLine: null, endLineUnknown: false,
   inbox: { open: 0, unanswered: 0, oldestAt: null }, flags: [], ...over,
 });
 const view = (over: Partial<IFleetView> = {}): IFleetView => ({
   at: AT, thresholds: { stallMinutes: 30, waitingLongMinutes: 120, unansweredMinutes: 30, composerMinutes: 2 },
   rows: [], unattributed: [], errors: [], ...over,
 });
-const render = (fleet: TFleetSection | undefined, { error = null as string | null, loading = false } = {}) =>
-  renderToStaticMarkup(<FleetStatusView fleet={fleet} error={error} loading={loading} onRetry={() => {}} />);
+const FLAGGED_ONLY: IFleetFilter = { showAll: false, workspace: null };
+const render = (fleet: TFleetSection | undefined, { error = null as string | null, loading = false, filter = FLAGGED_ONLY } = {}) =>
+  renderToStaticMarkup(<FleetStatusView fleet={fleet} error={error} loading={loading} onRetry={() => {}} filter={filter} onFilter={() => {}} />);
 const ok = (v: IFleetView): TFleetSection => ({ ok: true, view: v });
 
 describe('fleet status panel', () => {
@@ -48,7 +50,7 @@ describe('fleet status panel', () => {
   it('empty: no agent tabs', () => {
     const html = render(ok(view()));
     expect(html).toContain('data-state="empty"');
-    expect(html).toContain('0 flagged of 0 agent tabs');
+    expect(html).toContain('0 flagged · 0 agent tabs');
   });
 
   it('no flags: flagged-only view says so and offers every tab', () => {
@@ -74,7 +76,7 @@ describe('fleet status panel', () => {
         { flag: 'unanswered', reason: '1 SM-inbox item(s) unanswered; oldest open 41 min' },
       ],
     })] })));
-    expect(html).toContain('1 flagged of 1 agent tabs');
+    expect(html).toContain('1 flagged · 1 agent tabs');
     expect(html).toMatch(/data-flag="stall"[^>]*>STALL\?</);
     expect(html).toMatch(/data-flag="unanswered"[^>]*>UNANSWERED</);
     expect(html).toContain('text not submitted 2 h 30 min');
@@ -126,14 +128,44 @@ describe('fleet status panel', () => {
     })));
     expect(html).toContain('data-fleet-unattributed="ws-1"');
     expect(html).toContain('SM inbox 3 open · oldest 1 h 10 min');
-    expect(html).toContain('1 flagged of 1 agent tabs');
+    expect(html).toContain('1 flagged · 1 agent tabs');
   });
 
-  it('partial read errors are named above the rows; a failed refresh keeps the last view', () => {
+  it('partial read errors are named above the rows; a failed refresh keeps the last view and offers Retry', () => {
     const html = render(ok(view({ rows: [row()], errors: [{ scope: 'watches', error: 'watches.json is malformed' }] })), { error: 'timeout' });
     expect(html).toContain('Could not read watches: watches.json is malformed');
-    expect(html).toContain('Last refresh failed: timeout');
+    expect(html).toMatch(/data-state="refresh-error".*Last refresh failed: timeout.*>Retry</);
     expect(html).toContain('data-fleet-view=""');
+  });
+
+  it('the filter is controlled from outside: "Show all" lists every row and survives a new snapshot', () => {
+    const rows = [row(), row({ tabId: 'tab-b', tabName: 'ix-api' })];
+    const shown = { showAll: true, workspace: null };
+    for (const at of [AT, AT + 15_000]) {
+      const html = render(ok(view({ at, rows })), { filter: shown });
+      expect(html).toContain('data-fleet-row="tab-a"');
+      expect(html).toContain('data-fleet-row="tab-b"');
+      expect(html).toContain('Flagged only');
+    }
+    const one = render(ok(view({ rows: [...rows, row({ workspaceId: 'ws-2', workspaceName: 'Billing', tabId: 'tab-z' })] })), { filter: { showAll: true, workspace: 'ws-2' } });
+    expect(one).toContain('data-fleet-row="tab-z"');
+    expect(one).not.toContain('data-fleet-row="tab-a"');
+  });
+
+  it('after a restart an unknown end line reads as unknown, never "no end line"', () => {
+    const html = render(ok(view({ rows: [row({ state: 'ready-for-review', endLineUnknown: true, since: AT - 90 * MIN })] })), { filter: { showAll: true, workspace: null } });
+    expect(html).toContain('idle, end line unknown after a restart 1 h 30 min');
+    expect(html).toContain('last line unknown');
+    expect(html).not.toContain('idle, no end line');
+  });
+
+  it('with no agent tabs, an unattributed SM-inbox line still shows', () => {
+    const html = render(ok(view({
+      unattributed: [{ workspaceId: 'ws-1', workspaceName: 'Portfolio', inbox: { open: 1, unanswered: 1, oldestAt: AT - 40 * MIN }, flags: [{ flag: 'unanswered', reason: 'r' }] }],
+    })));
+    expect(html).toContain('No agent tabs in any workspace.');
+    expect(html).toContain('data-fleet-unattributed="ws-1"');
+    expect(html).toContain('1 flagged · 0 agent tabs');
   });
 
   it('several workspaces get a filter with their flagged counts', () => {
@@ -142,7 +174,9 @@ describe('fleet status panel', () => {
     expect(html).toMatch(/Billing<span[^>]*>1</);
   });
 
-  it('the error boundary renders children when nothing failed', () => {
-    expect(renderToStaticMarkup(<FleetStatusErrorBoundary><p>child</p></FleetStatusErrorBoundary>)).toBe('<p>child</p>');
+  it('the shared error boundary names this panel when it fails', () => {
+    const boundary = new CoordinationErrorBoundary({ children: <p>child</p>, label: 'Fleet status' });
+    boundary.state = { error: 'Invalid time value' };
+    expect(renderToStaticMarkup(<>{boundary.render()}</>)).toContain('Fleet status failed to render: Invalid time value');
   });
 });

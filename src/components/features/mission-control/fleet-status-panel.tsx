@@ -1,4 +1,4 @@
-import { Component, useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatDuration } from '@/lib/fleet-status';
@@ -89,7 +89,8 @@ const FleetRow = ({ row, now }: { row: IFleetRow; now: number }) => (
     </div>
     <div className="flex min-w-0 flex-wrap gap-x-2 text-muted-foreground">
       <span className="text-foreground" title={stateTitle(row)} data-state-label="">
-        {label(STATE_LABEL, row.state)} {row.since === null ? '' : formatDuration(now - row.since)}
+        {row.endLineUnknown ? 'idle, end line unknown after a restart' : label(STATE_LABEL, row.state)}{' '}
+        {row.since === null ? '' : formatDuration(now - row.since)}
       </span>
       {row.waits.length > 0 && <span className="min-w-0 break-words">on {row.waits.map(waitText).join(', ')}</span>}
       <span>last activity {ago(now, row.lastActivityAt)} ago</span>
@@ -100,7 +101,7 @@ const FleetRow = ({ row, now }: { row: IFleetRow; now: number }) => (
         <span className="block truncate font-mono" title={row.lastLine.text} data-last-line="">
           {truncate(row.lastLine.text)} <span className="font-sans">· {ago(now, row.lastLine.at)} ago</span>
         </span>
-      ) : <span data-last-line="none">last line —</span>}
+      ) : <span data-last-line={row.endLineUnknown ? 'unknown' : 'none'}>last line {row.endLineUnknown ? 'unknown' : '—'}</span>}
     </div>
     {row.flags.length > 0 && (
       <ul>
@@ -128,9 +129,17 @@ const thresholdsText = (view: IFleetView): string => {
   return `STALL? after ${t.stallMinutes} min (composer text after ${t.composerMinutes} min) · WAITING-LONG after ${t.waitingLongMinutes} min · UNANSWERED after ${t.unansweredMinutes} min`;
 };
 
-const FleetView = ({ view }: { view: IFleetView }) => {
-  const [showAll, setShowAll] = useState(false);
-  const [workspace, setWorkspace] = useState<string | null>(null);
+export interface IFleetFilter {
+  showAll: boolean;
+  workspace: string | null;
+}
+
+/**
+ * The filter lives above the panel's error boundary, which is keyed on each poll: kept inside,
+ * every 15 s refresh would drop "Show all" and the workspace choice.
+ */
+const FleetView = ({ view, filter, onFilter }: { view: IFleetView; filter: IFleetFilter; onFilter: (next: IFleetFilter) => void }) => {
+  const { showAll, workspace } = filter;
   const now = view.at;
   const inScope = view.rows.filter((row) => workspace === null || row.workspaceId === workspace);
   const flagged = inScope.filter((row) => row.flags.length > 0);
@@ -147,47 +156,53 @@ const FleetView = ({ view }: { view: IFleetView }) => {
       {view.rows.length === 0 ? (
         <p className="text-muted-foreground" data-state="empty">No agent tabs in any workspace.</p>
       ) : (
-        <>
-          <div className="flex max-w-full flex-wrap items-center gap-1">
-            {workspaces.length > 1 && (
-              <div className="flex max-w-full gap-1 overflow-x-auto pb-1">
-                <Button type="button" size="sm" variant={workspace === null ? 'secondary' : 'ghost'} onClick={() => setWorkspace(null)} className="shrink-0">
-                  All
+        <div className="flex max-w-full flex-wrap items-center gap-1">
+          {workspaces.length > 1 && (
+            <div className="flex max-w-full gap-1 overflow-x-auto pb-1">
+              <Button type="button" size="sm" variant={workspace === null ? 'secondary' : 'ghost'} onClick={() => onFilter({ ...filter, workspace: null })} className="shrink-0">
+                All
+              </Button>
+              {workspaces.map(([id, name]) => (
+                <Button key={id} type="button" size="sm" variant={workspace === id ? 'secondary' : 'ghost'} onClick={() => onFilter({ ...filter, workspace: id })} className="shrink-0">
+                  {name}
+                  <span className="tabular-nums text-muted-foreground">{view.rows.filter((r) => r.workspaceId === id && r.flags.length > 0).length}</span>
                 </Button>
-                {workspaces.map(([id, name]) => (
-                  <Button key={id} type="button" size="sm" variant={workspace === id ? 'secondary' : 'ghost'} onClick={() => setWorkspace(id)} className="shrink-0">
-                    {name}
-                    <span className="tabular-nums text-muted-foreground">{view.rows.filter((r) => r.workspaceId === id && r.flags.length > 0).length}</span>
-                  </Button>
-                ))}
-              </div>
-            )}
-            <Button type="button" size="sm" variant="ghost" onClick={() => setShowAll((v) => !v)} className="shrink-0" data-toggle="show-all">
-              {showAll ? 'Flagged only' : `Show all ${inScope.length} tabs`}
-            </Button>
-          </div>
-          {rows.length === 0 && unattributed.length === 0 ? (
-            <p className="text-muted-foreground" data-state="no-flags">
-              No flags: every agent tab is working, waiting on registered work, or ended with a line.
-            </p>
-          ) : (
-            <ul data-state="rows">
-              {unattributed.map((line) => <UnattributedRow key={line.workspaceId} line={line} now={now} />)}
-              {rows.map((row) => <FleetRow key={`${row.workspaceId}/${row.tabId}`} row={row} now={now} />)}
-            </ul>
+              ))}
+            </div>
           )}
-        </>
+          <Button type="button" size="sm" variant="ghost" onClick={() => onFilter({ ...filter, showAll: !showAll })} className="shrink-0" data-toggle="show-all">
+            {showAll ? 'Flagged only' : `Show all ${inScope.length} tabs`}
+          </Button>
+        </div>
+      )}
+      {rows.length === 0 && unattributed.length === 0 ? (
+        view.rows.length > 0 && (
+          <p className="text-muted-foreground" data-state="no-flags">
+            No flags: every agent tab is working, waiting on registered work, or ended with a line.
+          </p>
+        )
+      ) : (
+        <ul data-state="rows">
+          {unattributed.map((line) => <UnattributedRow key={line.workspaceId} line={line} now={now} />)}
+          {rows.map((row) => <FleetRow key={`${row.workspaceId}/${row.tabId}`} row={row} now={now} />)}
+        </ul>
       )}
     </div>
   );
 };
 
-export const FleetStatusView = ({ fleet, error, loading, onRetry }: {
+const RetryButton = ({ onRetry }: { onRetry: () => void }) => (
+  <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+);
+
+export const FleetStatusView = ({ fleet, error, loading, onRetry, filter, onFilter }: {
   /** undefined: no snapshot yet, or a server older than the panel. */
   fleet: TFleetSection | undefined;
   error: string | null;
   loading: boolean;
   onRetry: () => void;
+  filter: IFleetFilter;
+  onFilter: (next: IFleetFilter) => void;
 }) => {
   let body: ReactNode;
   if (fleet === undefined) {
@@ -195,7 +210,7 @@ export const FleetStatusView = ({ fleet, error, loading, onRetry }: {
       ? (
         <div className="space-y-2" data-state="error">
           <p className="text-destructive">Fleet status unavailable: {error}</p>
-          <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+          <RetryButton onRetry={onRetry} />
         </div>
       )
       : loading
@@ -205,24 +220,31 @@ export const FleetStatusView = ({ fleet, error, loading, onRetry }: {
     body = (
       <div className="space-y-2" data-state="error">
         <p className="text-destructive">Fleet status could not be read: {fleet.error}</p>
-        <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry</Button>
+        <RetryButton onRetry={onRetry} />
       </div>
     );
   } else {
     body = (
       <>
-        {error && <p className="text-destructive" data-state="refresh-error">Last refresh failed: {error}</p>}
-        <FleetView view={fleet.view} />
+        {error && (
+          <div className="flex flex-wrap items-center gap-2" data-state="refresh-error">
+            <p className="text-destructive">Last refresh failed: {error}</p>
+            <RetryButton onRetry={onRetry} />
+          </div>
+        )}
+        <FleetView view={fleet.view} filter={filter} onFilter={onFilter} />
       </>
     );
   }
-  const flaggedCount = fleet?.ok ? fleet.view.rows.filter((r) => r.flags.length > 0).length + fleet.view.unattributed.filter((u) => u.flags.length > 0).length : null;
+  const flagged = fleet?.ok
+    ? fleet.view.rows.filter((r) => r.flags.length > 0).length + fleet.view.unattributed.filter((u) => u.flags.length > 0).length
+    : null;
   return (
     <Card className="border-foreground/10 shadow-none" data-fleet-panel="">
       <CardContent className="space-y-2 p-4 text-xs sm:p-5">
-        {flaggedCount !== null && fleet?.ok && (
-          <p className="font-medium" data-flagged-count={flaggedCount}>
-            {flaggedCount} flagged of {fleet.view.rows.length} agent tabs
+        {flagged !== null && fleet?.ok && (
+          <p className="font-medium" data-flagged-count={flagged}>
+            {flagged} flagged · {fleet.view.rows.length} agent tabs
           </p>
         )}
         {body}
@@ -230,28 +252,3 @@ export const FleetStatusView = ({ fleet, error, loading, onRetry }: {
     </Card>
   );
 };
-
-/** A render failure blanks this panel only, never the Mission Control page. */
-export class FleetStatusErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
-  state: { error: string | null } = { error: null };
-
-  static getDerivedStateFromError(err: unknown): { error: string } {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-
-  componentDidCatch(err: unknown) {
-    console.error('[fleet status panel] render failed:', err);
-  }
-
-  render() {
-    if (this.state.error === null) return this.props.children;
-    return (
-      <Card className="border-foreground/10 shadow-none">
-        <CardContent className="space-y-2 p-4 text-xs">
-          <p className="text-destructive" data-state="render-error">Fleet status failed to render: {this.state.error}</p>
-          <button type="button" className="underline" onClick={() => this.setState({ error: null })}>Retry</button>
-        </CardContent>
-      </Card>
-    );
-  }
-}

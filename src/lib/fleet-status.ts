@@ -31,8 +31,6 @@ const maxStamp = (values: Array<number | null | undefined>): number | null => {
   return finite.length > 0 ? Math.max(...finite) : null;
 };
 
-const KNOWN_CLI_STATES = new Set(['idle', 'busy', 'inactive', 'ready-for-review', 'needs-input', 'cancelled', 'unknown']);
-
 type TStatus = NonNullable<IFleetTabFacts['status']>;
 
 /** The stop the tab's turnEnd classifies is still its latest event (ADR-0018). */
@@ -40,6 +38,14 @@ const turnEndIsCurrent = (status: TStatus): boolean => !!status.turnEnd
   && status.lastEvent?.name === 'stop'
   && status.turnEnd.seq !== undefined
   && status.turnEnd.seq === status.lastEvent.seq;
+
+/**
+ * The tab sits at its prompt: idle, stopped, or WAITING on its own registered work at an empty
+ * composer (ADR-0018 ruling A′), where the inbox and `tab send` may still type into it.
+ */
+export const isAtPrompt = (status: TStatus | null): boolean => !!status && (
+  status.cliState === 'idle' || status.cliState === 'ready-for-review' || status.cliState === 'cancelled'
+  || (status.cliState === 'busy' && status.turnEnd?.kind === 'waiting' && turnEndIsCurrent(status)));
 
 const lastLineOf = (status: TStatus | null): IFleetRow['lastLine'] => {
   const marker = status?.turnEnd?.marker;
@@ -66,12 +72,12 @@ const stateOf = (facts: IFleetTabFacts): IStateResult => {
   if (!status) return { state: 'unknown', since: null };
   const lastAt = status.lastEvent?.at ?? null;
   if (status.permissionRequest || status.cliState === 'needs-input') return { state: 'needs-input', since: lastAt };
-  const atPrompt = status.cliState === 'idle' || status.cliState === 'ready-for-review' || status.cliState === 'cancelled';
-  if (atPrompt && facts.composer?.reading === 'text') return { state: 'unsubmitted', since: facts.composer.since };
+  if (isAtPrompt(status) && facts.composer?.reading === 'text') return { state: 'unsubmitted', since: facts.composer.since };
   switch (status.cliState) {
     case 'busy':
       if (status.turnEnd?.kind === 'waiting' && turnEndIsCurrent(status)) return { state: 'waiting', since: status.turnEnd.at };
-      return { state: 'working', since: status.busySince ?? lastAt };
+      // busySince spans a whole chain of WAITING turns; a later prompt starts the current one.
+      return { state: 'working', since: maxStamp([status.busySince, status.lastEvent?.name === 'prompt-submit' ? lastAt : null]) ?? lastAt };
     case 'ready-for-review':
     case 'idle':
     case 'cancelled':
@@ -108,6 +114,16 @@ const FLAG_ORDER: Record<TFleetFlag, number> = { stall: 0, unanswered: 1, 'waiti
 
 const QUESTION_LINE = /^[*_`\s]*(BLOCKED|NEEDS-DECISION):/;
 
+/**
+ * The watchdog's `stuck` verdict holds until the tab shows activity after it: the latch it
+ * sets is once per busy stretch, so a tab that recovered must not keep reading as stalled.
+ */
+const watchdogStall = (facts: IFleetTabFacts, lastActivityAt: number | null, now: number): IFleetFlag | null => {
+  const at = facts.stallReportedAt;
+  if (at === null || (lastActivityAt !== null && lastActivityAt > at)) return null;
+  return { flag: 'stall', reason: `the watchdog reported this tab as stalled ${formatDuration(now - at)} ago` };
+};
+
 const flagsOf = (
   facts: IFleetTabFacts,
   { state, since }: IStateResult,
@@ -125,13 +141,14 @@ const flagsOf = (
     // Hook events alone go quiet through a long tool call: without a transcript
     // stamp (a remote tab, an unread file) only the watchdog's own verdict counts.
     const quiet = lastActivityAt === null || facts.transcriptAt === null ? null : now - lastActivityAt;
-    if (facts.stallReported) flags.push({ flag: 'stall', reason: 'the watchdog reported this busy tab as stalled' });
+    const verdict = watchdogStall(facts, lastActivityAt, now);
+    if (verdict) flags.push(verdict);
     else if (quiet !== null && quiet >= stallMs) flags.push({ flag: 'stall', reason: `busy with no activity for ${formatDuration(quiet)}` });
   } else if (state === 'unsubmitted') {
     if (inState !== null && inState >= t.composerMinutes * MINUTE_MS) {
       flags.push({ flag: 'stall', reason: `text left unsubmitted in the composer for ${formatDuration(inState)}` });
     }
-  } else if (state === 'idle' || state === 'ready-for-review') {
+  } else if ((state === 'idle' || state === 'ready-for-review') && !endLineUnknown(facts)) {
     // An unreadable liveness store is not proof that no job runs: no flag on a guess.
     const noRegisteredWait = facts.liveJobs !== null && facts.liveJobs.length === 0
       && facts.watches !== null && facts.watches.length === 0;
@@ -140,7 +157,11 @@ const flagsOf = (
     }
   } else if (state === 'needs-input') {
     if (inState !== null && inState >= stallMs) flags.push({ flag: 'stall', reason: `waiting for input for ${formatDuration(inState)}` });
+  } else if (state === 'inactive') {
+    if (inState !== null && inState >= stallMs) flags.push({ flag: 'stall', reason: `agent not running for ${formatDuration(inState)}` });
   } else if (state === 'waiting') {
+    const verdict = watchdogStall(facts, lastActivityAt, now);
+    if (verdict) flags.push(verdict);
     if (inState !== null && inState >= t.waitingLongMinutes * MINUTE_MS) {
       const on = waits.map((w) => w.kind === 'background' ? `${w.label} background task(s)` : `${w.kind} ${w.label}`).join(', ');
       flags.push({ flag: 'waiting-long', reason: `waiting ${formatDuration(inState)}${on ? ` on ${on}` : ''}` });
@@ -158,6 +179,13 @@ const flagsOf = (
   return flags.sort((a, b) => FLAG_ORDER[a.flag] - FLAG_ORDER[b.flag]);
 };
 
+/**
+ * A tab restored at its prompt by a server restart without a persisted stop has no latest
+ * event: whether it ended on a line is unknown, which is not "no end line".
+ */
+const endLineUnknown = (facts: IFleetTabFacts): boolean => !!facts.status && !facts.status.lastEvent
+  && (facts.status.cliState === 'idle' || facts.status.cliState === 'ready-for-review' || facts.status.cliState === 'cancelled');
+
 export const deriveFleetRow = (facts: IFleetTabFacts, now: number, thresholds: IFleetThresholds = DEFAULT_FLEET_THRESHOLDS): IFleetRow => {
   const status = facts.status;
   const result = stateOf(facts);
@@ -174,11 +202,12 @@ export const deriveFleetRow = (facts: IFleetTabFacts, now: number, thresholds: I
     providerId: facts.providerId,
     epic: facts.epic,
     state: result.state,
-    rawCliState: status ? (KNOWN_CLI_STATES.has(status.cliState) ? status.cliState : String(status.cliState)) : null,
+    rawCliState: status ? String(status.cliState) : null,
     since: result.since,
     lastActivityAt,
     waits,
     lastLine,
+    endLineUnknown: endLineUnknown(facts),
     inbox,
     flags: flagsOf(facts, result, lastLine, waits, inbox, lastActivityAt, now, thresholds),
   };
@@ -193,9 +222,9 @@ export const sortFleetRows = (rows: IFleetRow[]): IFleetRow[] => [...rows].sort(
   return a.workspaceName.localeCompare(b.workspaceName) || a.tabName.localeCompare(b.tabName) || a.tabId.localeCompare(b.tabId);
 });
 
-/** A fleet-config value in minutes: a finite number in (0, 10080], else the default. */
+/** A fleet-config value in minutes: a plain decimal in (0, 10080] (the `turn-end.ts` grammar), else the default. */
 export const parseThresholdMinutes = (raw: string | null | undefined, fallback: number): number => {
-  if (raw === null || raw === undefined || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 && value <= 10_080 ? value : fallback;
+  if (raw === null || raw === undefined || !/^\d+(\.\d+)?$/.test(raw.trim())) return fallback;
+  const value = Number(raw.trim());
+  return value > 0 && value <= 10_080 ? value : fallback;
 };

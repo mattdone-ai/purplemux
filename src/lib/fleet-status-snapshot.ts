@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import {
-  DEFAULT_FLEET_THRESHOLDS, deriveFleetRow, inboxOf, parseThresholdMinutes, sortFleetRows, unansweredFlag,
+  DEFAULT_FLEET_THRESHOLDS, deriveFleetRow, inboxOf, isAtPrompt, parseThresholdMinutes, sortFleetRows, unansweredFlag,
 } from '@/lib/fleet-status';
 import { readComposer } from '@/lib/composer-readiness';
 import type { IMissionOpenItemOpener } from '@/lib/mission-control-store';
@@ -26,7 +26,7 @@ export interface IFleetDeps {
   /** The agent tabs of a workspace's layout; null when the layout cannot be read. */
   agentTabs: (workspaceId: string) => Promise<ITab[] | null>;
   statuses: () => Record<string, IClientTabStatusEntry>;
-  serverFacts: (tabId: string) => { jsonlPath: string | null; stallReported: boolean } | null;
+  serverFacts: (tabId: string) => { jsonlPath: string | null; stallReportedAt: number | null } | null;
   watches: () => Promise<Array<{ workspaceId: string; tabId: string; kind: string; target: string }>>;
   liveJobs: (tabId: string) => Promise<Array<{ pid: number; label?: string }>>;
   leases: () => Promise<ILease[]>;
@@ -43,8 +43,6 @@ export const FLEET_CONFIG_KEYS: Record<keyof IFleetThresholds, string> = {
   unansweredMinutes: 'fleet-status.unanswered-minutes',
   composerMinutes: 'fleet-status.composer-minutes',
 };
-
-const AT_PROMPT = new Set(['idle', 'ready-for-review', 'cancelled']);
 
 const g = globalThis as unknown as {
   __ptFleetComposerSeen?: Map<string, number>;
@@ -120,6 +118,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
   const facts: IFleetTabFacts[] = [];
   const liveTabKeys = new Set<string>();
   let jobsFailed = false;
+  let layoutFailed = false;
 
   await Promise.all(workspaces.map(async (workspace) => {
     const tabs = await deps.agentTabs(workspace.id).catch((err) => {
@@ -127,7 +126,10 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
       return undefined;
     });
     if (tabs === null) errors.push({ scope: workspace.name, error: 'workspace layout could not be read' });
-    if (!tabs) return;
+    if (!tabs) {
+      layoutFailed = true;
+      return;
+    }
     await Promise.all(tabs.map(async (tab) => {
       const key = `${workspace.id}/${tab.id}`;
       liveTabKeys.add(key);
@@ -140,7 +142,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
         }),
         server?.jsonlPath ? deps.mtime(server.jsonlPath).catch(() => null) : Promise.resolve(null),
         // Only a tab at its prompt has a composer worth reading, and a remote pane is not captured from here.
-        status && AT_PROMPT.has(status.cliState) && !tab.host
+        status && isAtPrompt(status) && !tab.host
           ? deps.capture(tab.sessionName).catch(() => null).then((captured) => {
             const reading = readComposer(tab.panelType, captured);
             return { reading, since: composerSince(tab, status, reading, now) };
@@ -158,7 +160,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
         epic: epics.get(key) ?? null,
         status,
         transcriptAt,
-        stallReported: server?.stallReported ?? false,
+        stallReportedAt: server?.stallReportedAt ?? null,
         watches: watches.ok
           ? watches.value.filter((w) => w.workspaceId === workspace.id && w.tabId === tab.id).map((w) => ({ kind: w.kind, target: w.target }))
           : null,
@@ -172,6 +174,11 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
       });
     }));
   }));
+  // A closed tab's composer memory goes with it; an unread layout proves no tab closed.
+  if (!layoutFailed) {
+    const seenTabIds = new Set(facts.map((f) => f.tabId));
+    for (const tabId of composerSeen.keys()) if (!seenTabIds.has(tabId)) composerSeen.delete(tabId);
+  }
   if (jobsFailed) errors.push({ scope: 'jobs', error: 'registered jobs could not be read for some tabs' });
 
   // An item whose opener is unknown, or whose opener tab is gone, still shows: on its workspace's line.
@@ -239,10 +246,10 @@ const realDeps = async (): Promise<IFleetDeps> => {
 };
 
 /** The fleet view, read at most once per 5 s however many viewers poll. */
-export const readFleetView = async (now = Date.now()): Promise<IFleetView> => {
+export const readFleetView = async (now = Date.now(), deps: () => Promise<IFleetDeps> = realDeps): Promise<IFleetView> => {
   const cached = g.__ptFleetViewCache;
   if (cached && now - cached.at < CACHE_MS) return cached.view;
-  const view = realDeps().then((deps) => buildFleetView(deps, now));
+  const view = deps().then((resolved) => buildFleetView(resolved, now));
   g.__ptFleetViewCache = { at: now, view };
   view.catch(() => {
     if (g.__ptFleetViewCache?.view === view) g.__ptFleetViewCache = undefined;

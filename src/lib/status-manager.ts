@@ -206,7 +206,8 @@ export class StatusManager {
   private automatedPrompts: AutomatedPromptDispatcher;
   private cacheCodexRateLimits: typeof cacheCodexRateLimitsFromJsonl;
   private updateAgentState: typeof updateTabAgentState;
-  private stuckNudgedTabs = new Set<string>();
+  /** Tab → when its once-per-busy-stretch `stuck` nudge went out (the fleet panel reads the time, ADR-0023). */
+  private stuckNudgedTabs = new Map<string, number>();
   private transcriptFallbackLogged = new Set<string>();
   /** When the poll first saw each tab `inactive` (the pane-probe clock). */
   private inactiveSeenAt = new Map<string, number>();
@@ -855,7 +856,7 @@ export class StatusManager {
           // A registered job that died speaks first: its completion event, not a stall (L49, tab-peo88o).
           if (!this.stuckNudgedTabs.has(tab.id) && !(await this.reportDeadJobs(tab.id))
               && await this.looksStalled(tab.id, existing, now)) {
-            this.stuckNudgedTabs.add(tab.id);
+            this.stuckNudgedTabs.set(tab.id, now);
             this.nudgeOrchestrator(tab.id, existing, 'stuck').catch((err) => {
               log.warn(`stuck nudge failed: ${err instanceof Error ? err.message : err}`);
             });
@@ -1340,10 +1341,10 @@ export class StatusManager {
   }
 
   /** The server-only facts the fleet status panel reads (ADR-0023): read only, no side effect. */
-  fleetFacts(tabId: string): { jsonlPath: string | null; stallReported: boolean } | null {
+  fleetFacts(tabId: string): { jsonlPath: string | null; stallReportedAt: number | null } | null {
     const entry = this.tabs.get(tabId);
     if (!entry) return null;
-    return { jsonlPath: entry.jsonlPath ?? null, stallReported: this.stuckNudgedTabs.has(tabId) };
+    return { jsonlPath: entry.jsonlPath ?? null, stallReportedAt: this.stuckNudgedTabs.get(tabId) ?? null };
   }
 
   getAllForClient(): Record<string, IClientTabStatusEntry> {
@@ -2000,9 +2001,12 @@ export class StatusManager {
     await this.nudgeOrchestrator(tabId, entry, 'long-wait', `${hours} h on ${named}`, `long-wait:${seq}`);
   }
 
-  /** The stop record the idle nudge is derived from survives a restart (finding 2). */
+  /**
+   * The stop record the idle nudge is derived from survives a restart (finding 2). An end-line
+   * stop survives too, so the tab still reads as ended on its line after a restart (ADR-0023).
+   */
   private persistTurnEnd(entry: ITabStatusEntry): void {
-    const record = entry.turnEnd?.kind === 'ready-for-review'
+    const record = entry.turnEnd?.kind === 'ready-for-review' || entry.turnEnd?.kind === 'turn-marker'
       ? { ...entry.turnEnd, agentSessionId: entry.agentSessionId ?? null }
       : null;
     updateTabWatchdogTurnEnd(entry.tmuxSession, record).catch((err) => {
@@ -2020,7 +2024,12 @@ export class StatusManager {
   private applyRestoredStop(tab: ITab, entry: ITabStatusEntry): void {
     const record = tab.watchdogTurnEnd;
     if (!record) return;
-    const usable = entry.cliState === 'ready-for-review' && record.kind === 'ready-for-review'
+    // An end-line stop also comes back to a tab dismissed to idle; it fires no nudge (the idle
+    // nudge reads only a `ready-for-review` record, and the marker nudge only a new stop).
+    const kindFits = record.kind === 'ready-for-review'
+      ? entry.cliState === 'ready-for-review'
+      : record.kind === 'turn-marker' && (entry.cliState === 'ready-for-review' || entry.cliState === 'idle');
+    const usable = kindFits
       && Number.isSafeInteger(record.seq) && Number.isFinite(record.at)
       && (record.agentSessionId ?? null) === (entry.agentSessionId ?? null);
     if (!usable) {

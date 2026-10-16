@@ -118,7 +118,9 @@ When the user selects an option on a permission prompt, Claude resumes work but 
 Mission Control's fleet status panel reads the same entries server-side (`getAllForClient()` plus `fleetFacts(tabId)`, which
 returns the transcript path and whether the watchdog's `stuck` nudge went out for the current busy stretch). It refines
 `busy` into `working` and `waiting` (the `turnEnd` of the latest stop), and `ready-for-review` / `idle` into `ended` when
-that stop carried an end line. It changes no state.
+that stop carried an end line. It changes no state. To keep that true across a restart, `persistTurnEnd` writes an
+end-line (`turn-marker`) stop to `ITab.watchdogTurnEnd` as well as a markerless one, and `applyRestoredStop` gives it
+back to a tab restored `ready-for-review` or `idle` in the same agent session; it sends no nudge.
 
 ### Session View (`TSessionView`)
 

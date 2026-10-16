@@ -1,6 +1,6 @@
-import { Component, type ReactNode } from 'react';
+import { Component, useState, type ReactNode } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
-import { FleetStatusErrorBoundary, FleetStatusView } from '@/components/features/mission-control/fleet-status-panel';
+import { FleetStatusView, type IFleetFilter } from '@/components/features/mission-control/fleet-status-panel';
 import useCoordination from '@/hooks/use-coordination';
 import { hostWarnings } from '@/lib/host-warnings';
 import { cn } from '@/lib/utils';
@@ -215,7 +215,7 @@ export const CoordinationPanelView = ({ snapshot, error, loading }: { snapshot: 
 };
 
 /** A render failure blanks this panel only, never the Mission Control page (which has no boundary of its own). */
-export class CoordinationErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
+export class CoordinationErrorBoundary extends Component<{ children: ReactNode; label?: string }, { error: string | null }> {
   state: { error: string | null } = { error: null };
 
   static getDerivedStateFromError(err: unknown): { error: string } {
@@ -223,7 +223,7 @@ export class CoordinationErrorBoundary extends Component<{ children: ReactNode }
   }
 
   componentDidCatch(err: unknown) {
-    console.error('[coordination panel] render failed:', err);
+    console.error(`[${(this.props.label ?? 'Coordination panel').toLowerCase()}] render failed:`, err);
   }
 
   render() {
@@ -231,7 +231,7 @@ export class CoordinationErrorBoundary extends Component<{ children: ReactNode }
     return (
       <Card className="border-foreground/10 shadow-none">
         <CardContent className="space-y-2 p-4 text-xs">
-          <p className="text-destructive" data-state="render-error">Coordination panel failed to render: {this.state.error}</p>
+          <p className="text-destructive" data-state="render-error">{this.props.label ?? 'Coordination panel'} failed to render: {this.state.error}</p>
           <button type="button" className="underline" onClick={() => this.setState({ error: null })}>Retry</button>
         </CardContent>
       </Card>
@@ -241,21 +241,29 @@ export class CoordinationErrorBoundary extends Component<{ children: ReactNode }
 
 const CoordinationPanel = () => {
   const { snapshot, error, loading, refresh } = useCoordination();
+  const [fleetFilter, setFleetFilter] = useState<IFleetFilter>({ showAll: false, workspace: null });
   return (
     <>
-    <section className="space-y-3" aria-labelledby="fleet-status-heading">
-      <h2 id="fleet-status-heading" className="text-sm font-semibold">Fleet status</h2>
-      <FleetStatusErrorBoundary key={snapshot?.at ?? 'none'}>
-        <FleetStatusView fleet={snapshot?.fleet} error={error} loading={loading} onRetry={() => { void refresh(); }} />
-      </FleetStatusErrorBoundary>
-    </section>
-    <section className="space-y-3" aria-labelledby="coordination-heading">
-      <h2 id="coordination-heading" className="text-sm font-semibold">Coordination</h2>
-      {/* Keyed on the snapshot: a new poll clears a render error without a Retry click. */}
-      <CoordinationErrorBoundary key={snapshot?.at ?? 'none'}>
-        <CoordinationPanelView snapshot={snapshot} error={error} loading={loading} />
-      </CoordinationErrorBoundary>
-    </section>
+      <section className="space-y-3" aria-labelledby="fleet-status-heading">
+        <h2 id="fleet-status-heading" className="text-sm font-semibold">Fleet status</h2>
+        <CoordinationErrorBoundary key={snapshot?.at ?? 'none'} label="Fleet status">
+          <FleetStatusView
+            fleet={snapshot?.fleet}
+            error={error}
+            loading={loading}
+            onRetry={() => { void refresh(); }}
+            filter={fleetFilter}
+            onFilter={setFleetFilter}
+          />
+        </CoordinationErrorBoundary>
+      </section>
+      <section className="space-y-3" aria-labelledby="coordination-heading">
+        <h2 id="coordination-heading" className="text-sm font-semibold">Coordination</h2>
+        {/* Keyed on the snapshot: a new poll clears a render error without a Retry click. */}
+        <CoordinationErrorBoundary key={snapshot?.at ?? 'none'}>
+          <CoordinationPanelView snapshot={snapshot} error={error} loading={loading} />
+        </CoordinationErrorBoundary>
+      </section>
     </>
   );
 };
