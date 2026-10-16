@@ -94,7 +94,7 @@ describe('watchdogTurnEnd persists through the real layout file (review r2 nit 4
     });
   });
 
-  it('an end-line stop survives a restart too (ADR-0023): restored to a ready-for-review or idle tab, dropped for a busy one', async () => {
+  it('an end-line stop survives a restart too (ADR-0023): restored to a ready-for-review tab or one dismissed to idle after it, dropped otherwise', async () => {
     // The first test's layout content cache would skip this identical write.
     resetStores();
     const store = await import('@/lib/layout-store');
@@ -120,12 +120,19 @@ describe('watchdogTurnEnd persists through the real layout file (review r2 nit 4
     const { StatusManager: Rebuilt } = await import('@/lib/status-manager');
     const restore = (tab: ITab, e: ITabStatusEntry) =>
       (new Rebuilt() as unknown as { applyRestoredStop: (t: ITab, x: ITabStatusEntry) => void }).applyRestoredStop(tab, e);
-    for (const cliState of ['ready-for-review', 'idle'] as const) {
-      const restored = { ...entryFor('sess-1'), cliState };
-      restore(persisted, restored);
-      expect(restored.turnEnd).toMatchObject({ kind: 'turn-marker', seq: 9, marker: ['NEEDS-DECISION: q-1'] });
-      expect(restored.lastEvent).toEqual({ name: 'stop', at: 1_790_000_000_000, seq: 9 });
-    }
+    const rfr = { ...entryFor('sess-1'), cliState: 'ready-for-review' as const };
+    restore(persisted, rfr);
+    expect(rfr.turnEnd).toMatchObject({ kind: 'turn-marker', seq: 9, marker: ['NEEDS-DECISION: q-1'] });
+    expect(rfr.lastEvent).toEqual({ name: 'stop', at: 1_790_000_000_000, seq: 9 });
+    // Idle and dismissed after the stop: the line still stands.
+    const dismissed = { ...entryFor('sess-1'), cliState: 'idle' as const };
+    restore({ ...persisted, dismissedAt: 1_790_000_060_000 }, dismissed);
+    expect(dismissed.turnEnd).toMatchObject({ kind: 'turn-marker', seq: 9 });
+    // Idle with no dismiss since the stop: prompted then interrupted, so the line is stale.
+    const interrupted = { ...entryFor('sess-1'), cliState: 'idle' as const };
+    restore({ ...persisted, dismissedAt: null }, interrupted);
+    expect(interrupted.turnEnd ?? null).toBeNull();
+    expect(interrupted.lastEvent).toBeNull();
     const busy = { ...entryFor('sess-1'), cliState: 'unknown' as const };
     restore(persisted, busy);
     expect(busy.turnEnd ?? null).toBeNull();

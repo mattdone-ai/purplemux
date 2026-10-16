@@ -105,6 +105,8 @@ export interface IFleetTabFacts {
   transcriptAt: number | null;
   /** When the watchdog sent its `stuck` nudge for the current busy stretch; null when it did not. */
   stallReportedAt: number | null;
+  /** When the agent was last seen to stop running (`inactive`); null when not inactive or not observed. */
+  inactiveSince: number | null;
   /** Armed watches the tab owns; null when the watch store could not be read. */
   watches: Array<{ kind: string; target: string }> | null;
   /** Live registered `tab bg` jobs; null when the liveness store could not be read. */

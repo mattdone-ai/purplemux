@@ -30,6 +30,7 @@ const facts = (over: Partial<IFleetTabFacts> = {}, status: Partial<NonNullable<I
   },
   transcriptAt: NOW - MIN,
   stallReportedAt: null,
+  inactiveSince: null,
   watches: [],
   liveJobs: [],
   composer: null,
@@ -161,13 +162,22 @@ describe('fleet status: flags', () => {
       expect(row).toMatchObject({ endLineUnknown: true, lastLine: null, flags: [] });
     }
     expect(deriveFleetRow(facts({}, { cliState: 'idle', lastEvent: stop(NOW - 90 * MIN) }), NOW).endLineUnknown).toBe(false);
+    // Text in the composer is the state that matters; the label is not "end line unknown".
+    const typed = deriveFleetRow(facts({ composer: { reading: 'text', since: NOW - 5 * MIN } }, { cliState: 'idle', lastEvent: null }), NOW);
+    expect(typed).toMatchObject({ state: 'unsubmitted', endLineUnknown: false });
   });
 
-  it('STALL? on a tab whose agent is not running, at N min', () => {
-    expect(flags(facts({}, { cliState: 'inactive', lastEvent: stop(NOW - 29 * MIN) }))).toEqual([]);
-    expect(deriveFleetRow(facts({}, { cliState: 'inactive', lastEvent: stop(NOW - 30 * MIN) }), NOW).flags).toEqual([
-      { flag: 'stall', reason: 'agent not running for 30 min' },
-    ]);
+  it('STALL? on a tab whose agent stopped running N min ago, timed from the transition, not the last event', () => {
+    const dead = (min: number | null, marker?: string) => facts({ inactiveSince: min === null ? null : NOW - min * MIN }, {
+      cliState: 'inactive', lastEvent: stop(NOW - 180 * MIN),
+      turnEnd: marker ? turnEnd('turn-marker', NOW - 180 * MIN, { marker: [marker] }) : null,
+    });
+    expect(flags(dead(1))).toEqual([]);
+    expect(deriveFleetRow(dead(30), NOW).flags).toEqual([{ flag: 'stall', reason: 'agent not running for 30 min' }]);
+    expect(flags(dead(null))).toEqual([]);
+    // Exited on purpose after finishing: no flag. Exited on its own question: still a stall.
+    expect(flags(dead(60, 'DONE: shipped'))).toEqual([]);
+    expect(flags(dead(60, 'BLOCKED: creds'))).toEqual(['stall']);
   });
 
   it('a working tab counts from its latest prompt, not from the start of a WAITING chain', () => {

@@ -38,7 +38,7 @@ beforeEach(() => {
       'tab-idle': status('ready-for-review', { readyForReviewAt: NOW - 40 * MIN }),
       'tab-remote': status('idle'),
     }),
-    serverFacts: (id) => ({ jsonlPath: id === 'tab-busy' ? '/t/busy.jsonl' : null, stallReportedAt: null }),
+    serverFacts: (id) => ({ jsonlPath: id === 'tab-busy' ? '/t/busy.jsonl' : null, stallReportedAt: null, inactiveSince: null }),
     watches: async () => [{ workspaceId: 'ws-1', tabId: 'tab-busy', kind: 'pr', target: 'o/r#1' }],
     liveJobs: async () => [],
     leases: async () => [

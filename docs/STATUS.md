@@ -120,7 +120,8 @@ returns the transcript path and whether the watchdog's `stuck` nudge went out fo
 `busy` into `working` and `waiting` (the `turnEnd` of the latest stop), and `ready-for-review` / `idle` into `ended` when
 that stop carried an end line. It changes no state. To keep that true across a restart, `persistTurnEnd` writes an
 end-line (`turn-marker`) stop to `ITab.watchdogTurnEnd` as well as a markerless one, and `applyRestoredStop` gives it
-back to a tab restored `ready-for-review` or `idle` in the same agent session; it sends no nudge.
+back to a tab restored `ready-for-review`, or `idle` when its `dismissedAt` is newer than the stop, in the same agent
+session; it sends no nudge.
 
 ### Session View (`TSessionView`)
 

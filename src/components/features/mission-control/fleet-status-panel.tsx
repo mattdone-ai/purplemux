@@ -139,7 +139,9 @@ export interface IFleetFilter {
  * every 15 s refresh would drop "Show all" and the workspace choice.
  */
 const FleetView = ({ view, filter, onFilter }: { view: IFleetView; filter: IFleetFilter; onFilter: (next: IFleetFilter) => void }) => {
-  const { showAll, workspace } = filter;
+  const { showAll } = filter;
+  // A kept filter can name a workspace this poll has no rows for (deleted, or its layout unread).
+  const workspace = filter.workspace !== null && view.rows.some((row) => row.workspaceId === filter.workspace) ? filter.workspace : null;
   const now = view.at;
   const inScope = view.rows.filter((row) => workspace === null || row.workspaceId === workspace);
   const flagged = inScope.filter((row) => row.flags.length > 0);

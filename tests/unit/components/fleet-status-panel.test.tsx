@@ -150,6 +150,10 @@ describe('fleet status panel', () => {
     const one = render(ok(view({ rows: [...rows, row({ workspaceId: 'ws-2', workspaceName: 'Billing', tabId: 'tab-z' })] })), { filter: { showAll: true, workspace: 'ws-2' } });
     expect(one).toContain('data-fleet-row="tab-z"');
     expect(one).not.toContain('data-fleet-row="tab-a"');
+    // A kept filter naming a workspace with no rows this poll falls back to every workspace.
+    const gone = render(ok(view({ rows: [row({ flags: [{ flag: 'stall', reason: 'x' }] })] })), { filter: { showAll: false, workspace: 'ws-deleted' } });
+    expect(gone).toContain('data-fleet-row="tab-a"');
+    expect(gone).not.toContain('data-state="no-flags"');
   });
 
   it('after a restart an unknown end line reads as unknown, never "no end line"', () => {

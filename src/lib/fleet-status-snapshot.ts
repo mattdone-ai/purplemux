@@ -26,7 +26,7 @@ export interface IFleetDeps {
   /** The agent tabs of a workspace's layout; null when the layout cannot be read. */
   agentTabs: (workspaceId: string) => Promise<ITab[] | null>;
   statuses: () => Record<string, IClientTabStatusEntry>;
-  serverFacts: (tabId: string) => { jsonlPath: string | null; stallReportedAt: number | null } | null;
+  serverFacts: (tabId: string) => { jsonlPath: string | null; stallReportedAt: number | null; inactiveSince: number | null } | null;
   watches: () => Promise<Array<{ workspaceId: string; tabId: string; kind: string; target: string }>>;
   liveJobs: (tabId: string) => Promise<Array<{ pid: number; label?: string }>>;
   leases: () => Promise<ILease[]>;
@@ -161,6 +161,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
         status,
         transcriptAt,
         stallReportedAt: server?.stallReportedAt ?? null,
+        inactiveSince: server?.inactiveSince ?? null,
         watches: watches.ok
           ? watches.value.filter((w) => w.workspaceId === workspace.id && w.tabId === tab.id).map((w) => ({ kind: w.kind, target: w.target }))
           : null,

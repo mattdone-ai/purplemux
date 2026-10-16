@@ -87,7 +87,8 @@ const stateOf = (facts: IFleetTabFacts): IStateResult => {
       }
       return { state: 'idle', since: lastAt };
     case 'inactive':
-      return { state: 'inactive', since: lastAt };
+      // The move to inactive leaves lastEvent alone: only the observed transition dates it.
+      return { state: 'inactive', since: facts.inactiveSince };
     default:
       return { state: 'unknown', since: lastAt };
   }
@@ -158,7 +159,11 @@ const flagsOf = (
   } else if (state === 'needs-input') {
     if (inState !== null && inState >= stallMs) flags.push({ flag: 'stall', reason: `waiting for input for ${formatDuration(inState)}` });
   } else if (state === 'inactive') {
-    if (inState !== null && inState >= stallMs) flags.push({ flag: 'stall', reason: `agent not running for ${formatDuration(inState)}` });
+    // An agent exited after it ended on DONE / CHECKPOINTED / READY-TO-MERGE finished on purpose.
+    const finished = !!lastLine && facts.status?.turnEnd?.kind === 'turn-marker' && !QUESTION_LINE.test(lastLine.text);
+    if (!finished && inState !== null && inState >= stallMs) {
+      flags.push({ flag: 'stall', reason: `agent not running for ${formatDuration(inState)}` });
+    }
   } else if (state === 'waiting') {
     const verdict = watchdogStall(facts, lastActivityAt, now);
     if (verdict) flags.push(verdict);
@@ -207,7 +212,7 @@ export const deriveFleetRow = (facts: IFleetTabFacts, now: number, thresholds: I
     lastActivityAt,
     waits,
     lastLine,
-    endLineUnknown: endLineUnknown(facts),
+    endLineUnknown: (result.state === 'idle' || result.state === 'ready-for-review') && endLineUnknown(facts),
     inbox,
     flags: flagsOf(facts, result, lastLine, waits, inbox, lastActivityAt, now, thresholds),
   };
