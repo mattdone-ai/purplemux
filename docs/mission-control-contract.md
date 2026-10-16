@@ -83,3 +83,18 @@ error }`, so an unreadable store shows its error and never blanks the others. It
   unknown keys ignored). The server runs it every 5 minutes with a 10 s timeout (the config is re-read each
   run) and validates it with zod. The panel shows the values and the run stamp, marks them stale after 15
   minutes, shows a failing command's or a validation error's text, and says "not configured" without one.
+
+## Fleet status (ADR-0023)
+
+`GET /api/mission-control/coordination` adds a `fleet` section, `{ ok: true, view: IFleetView } | { ok: false, error }`
+(`src/types/fleet-status.ts`), absent from an older server. One row per agent tab: state, time in that state, registered
+waits, the last end line, the SM-inbox items the tab opened, and the STALL? / WAITING-LONG / UNANSWERED flags (UNANSWERED
+also marks a tab still stopped on a `BLOCKED:` or `NEEDS-DECISION:` line). Thresholds
+are fleet config minutes: `fleet-status.stall-minutes` (30), `fleet-status.waiting-long-minutes` (120),
+`fleet-status.unanswered-minutes` (30), `fleet-status.composer-minutes` (2). The panel is read only.
+
+**Opener attribution (advisory).** The CLI events route records who opened each new `attention.opened` in the unversioned
+side table `mission_item_openers`, inside the same transaction. The opener comes from the server-resolved caller
+credential (ADR-0010), never from the payload: `launch` is verified, `hook` and `session` are asserted. It is not
+authorization, and `IMissionSnapshot` and the event feed do not carry it. A missing row means unattributed. The
+trust-boundary sentence above still holds for a workspace-token caller; a launch tab token does name its tab.

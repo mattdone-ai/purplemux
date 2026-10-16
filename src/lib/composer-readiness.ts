@@ -1,6 +1,7 @@
 import { parsePermissionOptions } from '@/lib/permission-prompt';
 import { renderPaneResult } from '@/lib/pane-suggestions';
 import type { IClientTabStatusEntry } from '@/types/status';
+import type { TComposerReading } from '@/types/fleet-status';
 import type { TPanelType } from '@/types/terminal';
 
 // The checks an unattended sender runs before typing into an agent's
@@ -10,14 +11,16 @@ import type { TPanelType } from '@/types/terminal';
 
 const tail = (content: string, lines = 24): string => content.split('\n').slice(-lines).join('\n');
 
+const composerMarker = (panelType: TPanelType | undefined): string | null => (panelType === 'codex-cli'
+  ? '›'
+  : panelType === 'claude-code'
+    ? '❯'
+    : panelType === 'grok-cli'
+      ? '[›❯>]'
+      : null);
+
 export const hasEmptyAgentComposer = (panelType: TPanelType | undefined, content: string): boolean => {
-  const marker = panelType === 'codex-cli'
-    ? '›'
-    : panelType === 'claude-code'
-      ? '❯'
-      : panelType === 'grok-cli'
-        ? '[›❯>]'
-        : null;
+  const marker = composerMarker(panelType);
   if (!marker) return false;
   const composerLines = tail(content, 12).split('\n');
   const composerPattern = new RegExp(`^[ \\t]*${marker}([ \\t\\u00a0].*)?$`);
@@ -47,6 +50,29 @@ export const paneShowsEmptyComposer = (panelType: TPanelType | undefined, conten
   const plain = withoutSuggestions(panelType, content);
   if (parsePermissionOptions(tail(plain)).options.length > 0) return false;
   return hasEmptyAgentComposer(panelType, plain);
+};
+
+/** How far up a fleet read looks for the composer line: a typed multi-line brief wraps far above 12 lines. */
+const COMPOSER_SCAN_LINES = 60;
+
+/**
+ * The composer as the fleet status panel reports it (ADR-0023): `empty`,
+ * `text` (something typed and not submitted), or `unreadable` (no composer
+ * line, or an option list is open). Read only; the capture is the caller's.
+ */
+export const readComposer = (panelType: TPanelType | undefined, captured: string | null): TComposerReading => {
+  if (!captured) return 'unreadable';
+  const plain = withoutSuggestions(panelType, captured);
+  if (parsePermissionOptions(tail(plain)).options.length > 0) return 'unreadable';
+  const marker = composerMarker(panelType);
+  if (!marker) return 'unreadable';
+  const composerPattern = new RegExp(`^[ \\t]*${marker}([ \\t\\u00a0].*)?$`);
+  const lines = tail(plain, COMPOSER_SCAN_LINES).split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index].match(composerPattern);
+    if (match) return (match[1] ?? '').trim() === '' ? 'empty' : 'text';
+  }
+  return 'unreadable';
 };
 
 export type TComposerReadiness = { ok: true } | { ok: false; reason: string };

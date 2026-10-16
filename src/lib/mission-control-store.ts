@@ -88,6 +88,24 @@ export interface IMissionApplyEventsResult {
 export interface IMissionEventAuthority {
   resolvedIdentity: TMissionIdentity | null;
   configuredOrchestratorTabId: string | null;
+  /** The server-resolved caller tab of an `attention.opened` (ADR-0023); advisory, never authorization. */
+  opener?: IMissionItemOpener | null;
+}
+
+export type TMissionOpenerIdentity = 'launch' | 'hook' | 'session';
+
+export interface IMissionItemOpener {
+  tabId: string;
+  identity: TMissionOpenerIdentity;
+}
+
+/** An open workspace item with the tab that opened it, when one is recorded (ADR-0023). */
+export interface IMissionOpenItemOpener {
+  workspaceId: string;
+  itemId: string;
+  createdAt: number;
+  reviewed: boolean;
+  opener: IMissionItemOpener | null;
 }
 
 export interface IMissionRebindInput {
@@ -349,7 +367,23 @@ export class MissionControlStore {
     this.database.pragma('busy_timeout = 5000');
     this.database.pragma('synchronous = FULL');
     this.migrate();
+    this.ensureOpenerTable();
   }
+
+  /**
+   * Opener attribution (ADR-0023) lives in an unversioned side table, so a
+   * schema-4 binary rolled back onto this file still opens it. No foreign key:
+   * an older writer never trips over a constraint it does not know.
+   */
+  private ensureOpenerTable = (): void => {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS mission_item_openers (
+        item_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, tab_id TEXT NOT NULL,
+        identity TEXT NOT NULL, event_id TEXT NOT NULL, opened_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mission_item_openers_tab_idx ON mission_item_openers(workspace_id, tab_id);
+    `);
+  };
 
   close = (): void => {
     this.database.close();
@@ -620,6 +654,25 @@ export class MissionControlStore {
     return { schemaVersion: 1, events, cursor: events.at(-1)?.seq ?? after, hasMore };
   };
 
+  /** Every open workspace item (candidate or open) with its recorded opener, if any (ADR-0023). */
+  openItemOpeners = (): IMissionOpenItemOpener[] => {
+    const rows = this.database.prepare(`SELECT a.id AS item_id, a.workspace_id, a.created_at,
+        a.human_review_json IS NOT NULL AS reviewed, o.tab_id, o.identity
+      FROM attention_items a LEFT JOIN mission_item_openers o ON o.item_id = a.id
+      WHERE a.state IN ('candidate','open') ORDER BY a.created_at, a.id`).all() as Array<{
+        item_id: string; workspace_id: string; created_at: number; reviewed: number; tab_id: string | null; identity: string | null;
+      }>;
+    return rows.map((row) => ({
+      workspaceId: row.workspace_id,
+      itemId: row.item_id,
+      createdAt: row.created_at,
+      reviewed: row.reviewed === 1,
+      opener: row.tab_id && (row.identity === 'launch' || row.identity === 'hook' || row.identity === 'session')
+        ? { tabId: row.tab_id, identity: row.identity }
+        : null,
+    }));
+  };
+
   humanInboxPolicy = (workspaceId: string): IMissionHumanInboxPolicy => {
     const legacyReviewPending = Number((this.database.prepare(`SELECT COUNT(*) AS count
       FROM attention_items WHERE workspace_id=? AND state='candidate' AND candidate_reason='legacy-review'`)
@@ -793,6 +846,11 @@ export class MissionControlStore {
         VALUES (?,?,?,1,?,?,?,NULL,NULL,?,?,NULL,?,?)`)
         .run(itemId, event.workspaceId, event.runId, state, toJson(question), toJson({ source: 'agent', sourceId: event.eventId, observedAt: event.producerAt, confidence: 'confirmed' }), now, now,
           humanReview ? toJson(humanReview) : null, candidateReason);
+      if (authority.opener) {
+        this.database.prepare(`INSERT OR IGNORE INTO mission_item_openers
+          (item_id,workspace_id,tab_id,identity,event_id,opened_at) VALUES (?,?,?,?,?,?)`)
+          .run(itemId, event.workspaceId, authority.opener.tabId, authority.opener.identity, event.eventId, now);
+      }
       this.confirmBootstrap(run.id, now);
       return this.insertEvent(event, itemId, 1, now, requestHash,
         this.attentionEventPayload(event.payload, state, candidateReason, humanReview));

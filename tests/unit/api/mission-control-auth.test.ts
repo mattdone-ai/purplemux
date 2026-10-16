@@ -202,6 +202,7 @@ describe('Mission Control agent authorization', () => {
     expect(authorities.get('event-review')).toEqual({
       resolvedIdentity: { tabId: 'tab-a', providerId: 'codex', sessionId: 'session-a', runtimeGeneration: 'runtime-a' },
       configuredOrchestratorTabId: 'tab-a',
+      opener: null,
     });
     expect(state.body).toMatchObject({ humanInboxPolicy: { version: 1, legacyReviewPending: 0 } });
   });

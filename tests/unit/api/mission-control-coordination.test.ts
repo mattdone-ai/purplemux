@@ -11,6 +11,7 @@ const m = vi.hoisted(() => ({
   refusal: null as string | null,
   grants: [] as unknown[],
   inbox: vi.fn(),
+  fleet: vi.fn(),
 }));
 
 vi.mock('@/lib/auth', async (importOriginal) => ({
@@ -31,6 +32,7 @@ vi.mock('@/lib/grant-store', () => ({
   isActive: (g: { revokedAt: number | null; expiresAt: number }, now: number) => g.revokedAt === null && g.expiresAt > now,
 }));
 vi.mock('@/lib/inbox-store', () => ({ readInboxState: m.inbox }));
+vi.mock('@/lib/fleet-status-snapshot', () => ({ readFleetView: m.fleet }));
 vi.mock('@/lib/host-metrics', () => ({ readHostMetrics: vi.fn(async () => ({ available: false, reason: 'test host' })) }));
 
 const call = async (headers: Record<string, string>) => {
@@ -53,6 +55,7 @@ describe('GET /api/mission-control/coordination', () => {
     m.refusal = null;
     m.grants = [{ id: 'g-1', revokedAt: null, expiresAt: Date.now() + 1000 }, { id: 'g-2', revokedAt: 1, expiresAt: Date.now() + 1000 }];
     m.inbox.mockResolvedValue({ items: [{ id: 'i-1', state: 'held' }, { id: 'i-2', state: 'queued' }] });
+    m.fleet.mockResolvedValue({ at: 1, thresholds: { stallMinutes: 30, waitingLongMinutes: 120, unansweredMinutes: 30, composerMinutes: 2 }, rows: [], unattributed: [], errors: [] });
   });
 
   it('refuses a valid CLI token without a human session (401) and reads no store', async () => {
@@ -65,6 +68,21 @@ describe('GET /api/mission-control/coordination', () => {
     expect(m.notes).not.toHaveBeenCalled();
     expect(m.watches).not.toHaveBeenCalled();
     expect(m.inbox).not.toHaveBeenCalled();
+    expect(m.fleet).not.toHaveBeenCalled();
+  });
+
+  it('serves the fleet view (ADR-0023) as its own section', async () => {
+    const r = await call({ cookie: 'session-token=good-session' });
+    expect(r.status).toBe(200);
+    expect(r.body.fleet).toEqual({ ok: true, view: expect.objectContaining({ rows: [], unattributed: [], errors: [] }) });
+  });
+
+  it('a failing fleet read shows its error and the other sections still render', async () => {
+    m.fleet.mockRejectedValue(new Error('workspaces.json unreadable'));
+    const r = await call({ cookie: 'session-token=good-session' });
+    expect(r.status).toBe(200);
+    expect(r.body.fleet).toEqual({ ok: false, error: 'workspaces.json unreadable' });
+    expect(r.body.leases.ok).toBe(true);
   });
 
   it('serves every section to a human: closed lease kept, open notes with age, active grants, held deliveries', async () => {

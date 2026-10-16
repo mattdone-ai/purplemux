@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
+import { FleetStatusErrorBoundary, FleetStatusView } from '@/components/features/mission-control/fleet-status-panel';
 import useCoordination from '@/hooks/use-coordination';
 import { hostWarnings } from '@/lib/host-warnings';
 import { cn } from '@/lib/utils';
@@ -239,8 +240,15 @@ export class CoordinationErrorBoundary extends Component<{ children: ReactNode }
 }
 
 const CoordinationPanel = () => {
-  const { snapshot, error, loading } = useCoordination();
+  const { snapshot, error, loading, refresh } = useCoordination();
   return (
+    <>
+    <section className="space-y-3" aria-labelledby="fleet-status-heading">
+      <h2 id="fleet-status-heading" className="text-sm font-semibold">Fleet status</h2>
+      <FleetStatusErrorBoundary key={snapshot?.at ?? 'none'}>
+        <FleetStatusView fleet={snapshot?.fleet} error={error} loading={loading} onRetry={() => { void refresh(); }} />
+      </FleetStatusErrorBoundary>
+    </section>
     <section className="space-y-3" aria-labelledby="coordination-heading">
       <h2 id="coordination-heading" className="text-sm font-semibold">Coordination</h2>
       {/* Keyed on the snapshot: a new poll clears a render error without a Retry click. */}
@@ -248,6 +256,7 @@ const CoordinationPanel = () => {
         <CoordinationPanelView snapshot={snapshot} error={error} loading={loading} />
       </CoordinationErrorBoundary>
     </section>
+    </>
   );
 };
 

@@ -47,7 +47,7 @@ const useCoordination = () => {
     };
   }, [refresh]);
 
-  return { snapshot, error, loading };
+  return { snapshot, error, loading, refresh };
 };
 
 export default useCoordination;

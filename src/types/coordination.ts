@@ -1,3 +1,4 @@
+import type { IFleetView } from '@/types/fleet-status';
 import type { IGrant } from '@/types/grant';
 import type { IInboxItem } from '@/types/inbox';
 import type { ILeaseView } from '@/types/lease';
@@ -98,4 +99,8 @@ export interface ICoordinationSnapshot {
   orchestrators: TSection<IOrchestratorPresenceIssue>;
   host: THostMetrics;
   signals: THostSignals;
+  /** The fleet status panel (ADR-0023). Absent from a server older than it. */
+  fleet?: TFleetSection;
 }
+
+export type TFleetSection = { ok: true; view: IFleetView } | { ok: false; error: string };

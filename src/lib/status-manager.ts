@@ -1339,6 +1339,13 @@ export class StatusManager {
     });
   }
 
+  /** The server-only facts the fleet status panel reads (ADR-0023): read only, no side effect. */
+  fleetFacts(tabId: string): { jsonlPath: string | null; stallReported: boolean } | null {
+    const entry = this.tabs.get(tabId);
+    if (!entry) return null;
+    return { jsonlPath: entry.jsonlPath ?? null, stallReported: this.stuckNudgedTabs.has(tabId) };
+  }
+
   getAllForClient(): Record<string, IClientTabStatusEntry> {
     const result: Record<string, IClientTabStatusEntry> = {};
     for (const [tabId, entry] of this.tabs) {

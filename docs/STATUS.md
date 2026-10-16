@@ -113,6 +113,13 @@ When the user selects an option on a permission prompt, Claude resumes work but 
 | `inactive` | `idle` | None |
 | `cancelled` | (component-specific) | — |
 
+### Fleet status (ADR-0023)
+
+Mission Control's fleet status panel reads the same entries server-side (`getAllForClient()` plus `fleetFacts(tabId)`, which
+returns the transcript path and whether the watchdog's `stuck` nudge went out for the current busy stretch). It refines
+`busy` into `working` and `waiting` (the `turnEnd` of the latest stop), and `ready-for-review` / `idle` into `ended` when
+that stop carried an end line. It changes no state.
+
 ### Session View (`TSessionView`)
 
 Stored directly in the tab state (not derived). Decides which screen the Claude panel shows.
