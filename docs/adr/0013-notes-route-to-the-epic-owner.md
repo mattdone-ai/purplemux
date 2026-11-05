@@ -30,6 +30,13 @@ Option 4.
 - Bounds and retention (B-2): subject ≤ 120 characters with control and format characters removed; body ≤ 16 KiB UTF-8 (exit 2); acked notes are pruned 14 days after the ack; a note unacked or undeliverable 14 days after creation becomes `expired` (one notice to a live sender) and is pruned 14 days later.
 - Store: `~/.purplemux/notes.json`, one process-wide lock. A malformed file is refused, not read as empty (the next write would erase it). Lock order is notes → inbox, never the reverse.
 
+## Amendment: the `acked` sender event (2026-11-05, epic `harness-flow-loop-2`, story 06, D17)
+At 05:42Z on 2026-11-04 a GO sat about 20 min in the ack comment of n-vaIIdwqlw9: nothing told the sender that the note was acked. Ruling R-06 delivers the comment to the sender and scans none of its words.
+- An ack with a non-empty comment queues one `acked` notice to the sender's own tab: `[purplemux note n-…] acked by <ws>/<tab> at <time> with a comment — purplemux note show n-…`. A tab-less acker reads `<ws>/workspace`.
+- The comment is the acker's text, so it is never typed (ADR-0012). The sender reads it as `ackComment` with `note show`. An earlier shape typed the clipped comment; the architect consult rejected it for the reason review r1 (H4) rejected a sanitised subject.
+- The notice is queued when the sender's tab is live or its state is unknown. The inbox refuses an unresolved target and drops the item only when it sees the tab gone. Nothing is sent to a closed tab, to a sender with no tab, to the tab that acked its own note, for an empty comment, or for a repeated ack. There is no fallback to an epic holder or an orchestrator: an epic holder in another workspace cannot `note show` the note, and one orchestrator would receive every gone worker's acks.
+- The paste preflight passes an `acked` notice only while the note is `acked` and the item still targets `note.from`. A failure to queue the notice never fails the ack.
+
 ## Consequences
 - A note's stored `state: "delivered"` means its notice was routed. Since 2026-10-08 a response reports the stored value only after the notice reached a composer. Before that it reports `pending`, or `held` while the inbox holds the notice (`n-xVHNr3aVfm` read `delivered` while its notice was held). `ack`, `--open` and the paste preflight still read the stored value. `receipt.routingStatus` makes that explicit; only `deliveredAt` / `receipt.composerDeliveredAt` means the notice reached a composer. The receipt projects only this note's inbox item state, refusal, held reason, and delivery time, never the recipient's general inbox.
 - The drive guard is untouched: a note never uses the drive path, and nothing a sender writes is typed into another workspace's tab.
