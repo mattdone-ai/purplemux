@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { createLogger } from '@/lib/logger';
+import { isMissionControlError } from '@/lib/mission-control-errors';
 import type { IMissionItemOpener, IMissionOpenRunBinding } from '@/lib/mission-control-store';
 import { NEEDS_DECISION_EVENT_PREFIX } from '@/lib/mission-control-validation';
 import { buildNeedsDecisionQuestion, isNeedsDecisionLine, needsDecisionAsks } from '@/lib/needs-decision';
@@ -10,13 +11,20 @@ import { buildNeedsDecisionQuestion, isNeedsDecisionLine, needsDecisionAsks } fr
 
 const log = createLogger('needs-decision');
 
-/** One item id per line key for 24 h (story 36 review r1, finding 1); in memory, so a restart may mint one more. */
+/** One item id per line key for 24 h (story 36 review r1, finding 1); in memory, and the store answers a miss (#521). */
 export const NEEDS_DECISION_ID_WINDOW_MS = 24 * 60 * 60_000;
 const NEEDS_DECISION_ID_MEMORY = 2_000;
 const g = globalThis as unknown as { __ptNeedsDecisionItemIds?: Map<string, { itemId: string; at: number }> };
 const rememberedIds = (): Map<string, { itemId: string; at: number }> => {
   if (!g.__ptNeedsDecisionItemIds) g.__ptNeedsDecisionItemIds = new Map();
   return g.__ptNeedsDecisionItemIds;
+};
+/** The line key's id from now; the newest entry goes last, and the oldest leaves past the cap. */
+const rememberId = (lineKey: string, itemId: string, at: number): void => {
+  const ids = rememberedIds();
+  ids.delete(lineKey);
+  ids.set(lineKey, { itemId, at });
+  while (ids.size > NEEDS_DECISION_ID_MEMORY) ids.delete(ids.keys().next().value!);
 };
 
 export interface INeedsDecisionStop {
@@ -86,18 +94,20 @@ export const needsDecisionItemId = (
 
 /**
  * The line's id for this stop (review r1, finding 1): the id first minted for the line key within 24 h, unless an item
- * of that id has closed (answered, resolved, cancelled: the same line then asks anew); otherwise this stop's own id,
- * remembered. So every not-opened outcome names the id a later open takes, and a second open meets the same id.
- * `closed` reports an item of that id that exists and is no longer open; a failing read counts as not closed.
+ * of that id has closed (answered, resolved, cancelled: the same line then asks anew). Where the memory has no such id
+ * (a restart empties it, #521), the newest still-open `nd-<lineKey>` item in the store gives it; with none, this
+ * stop's own id. The id is remembered, so every not-opened outcome names the id a later open takes, and a second open
+ * meets the same id. `closed` reports an item of that id that exists and is no longer open; `openIds` lists the open
+ * items with an id prefix, oldest first. A failing read counts as not closed, or as no open item.
  */
 export const stableNeedsDecisionItemId = (
   stop: Pick<INeedsDecisionStop, 'workspaceId' | 'tabId' | 'line' | 'stopSeq' | 'stopAt'>,
   now: number,
   closed: (itemId: string) => boolean,
+  openIds: (prefix: string) => readonly string[] = () => [],
 ): { itemId: string; lineKey: string } => {
   const fresh = needsDecisionItemId(stop);
-  const ids = rememberedIds();
-  const held = ids.get(fresh.lineKey);
+  const held = rememberedIds().get(fresh.lineKey);
   if (held && now - held.at < NEEDS_DECISION_ID_WINDOW_MS) {
     let isClosed = false;
     try {
@@ -107,10 +117,15 @@ export const stableNeedsDecisionItemId = (
     }
     if (!isClosed) return { itemId: held.itemId, lineKey: fresh.lineKey };
   }
-  ids.delete(fresh.lineKey);
-  ids.set(fresh.lineKey, { itemId: fresh.itemId, at: now });
-  while (ids.size > NEEDS_DECISION_ID_MEMORY) ids.delete(ids.keys().next().value!);
-  return fresh;
+  let open: string | undefined;
+  try {
+    open = openIds(`nd-${fresh.lineKey}`).at(-1);
+  } catch {
+    open = undefined;
+  }
+  const itemId = open ?? fresh.itemId;
+  rememberId(fresh.lineKey, itemId, now);
+  return { itemId, lineKey: fresh.lineKey };
 };
 
 const OPEN_STATES = new Set(['candidate', 'open']);
@@ -125,7 +140,7 @@ export const openNeedsDecisionItem = async (deps: INeedsDecisionDeps, stop: INee
   const { itemId, lineKey } = stableNeedsDecisionItemId(stop, deps.now(), (id) => {
     const state = deps.itemState(id);
     return state !== null && !OPEN_STATES.has(state);
-  });
+  }, (prefix) => deps.openItemsWithIdPrefix(stop.workspaceId, prefix));
   try {
     return await openItem(deps, stop, itemId, lineKey);
   } catch (err) {
@@ -137,7 +152,7 @@ export const openNeedsDecisionItem = async (deps: INeedsDecisionDeps, stop: INee
 
 const openItem = async (deps: INeedsDecisionDeps, stop: INeedsDecisionStop, itemId: string, lineKey: string): Promise<TNeedsDecisionOutcome> => {
   // The same question, still open from any opener: the worker's repeat, or the orchestrator's item from the note.
-  const [same] = deps.openItemsWithIdPrefix(stop.workspaceId, `nd-${lineKey}`);
+  const same = deps.openItemsWithIdPrefix(stop.workspaceId, `nd-${lineKey}`).at(-1);
   if (same) return { opened: false, reason: 'already-open', itemId: same };
   const asked = deps.itemsOpenedByTab(stop.workspaceId, stop.tabId, stop.turnStartedAt);
   if (asked.length) return { opened: false, reason: 'asked-this-turn', itemId: asked[0] };
@@ -173,6 +188,14 @@ const openItem = async (deps: INeedsDecisionDeps, stop: INeedsDecisionStop, item
   try {
     await deps.apply(stop.workspaceId, [event], { tabId: stop.tabId, identity: 'hook' }, { serverPrefix: NEEDS_DECISION_EVENT_PREFIX });
   } catch (err) {
+    // Another opener took the line between the dedupe above and this write (#521 review r1, 1): the store's typed
+    // refusal names the open item, so the line has its item and the owner was told; the line keeps that id.
+    const open = isMissionControlError(err) && err.code === 'already-open' ? err.current?.id : undefined;
+    if (open) {
+      rememberId(lineKey, open, deps.now());
+      log.info({ workspaceId: stop.workspaceId, tabId: stop.tabId, itemId, open }, 'NEEDS-DECISION item already open from another opener');
+      return { opened: false, reason: 'already-open', itemId: open };
+    }
     const detail = err instanceof Error ? err.message : String(err);
     log.warn({ workspaceId: stop.workspaceId, tabId: stop.tabId, itemId }, `NEEDS-DECISION item not opened: ${detail}`);
     return { opened: false, reason: 'refused', itemId, detail };

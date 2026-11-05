@@ -13,6 +13,8 @@ export type TMissionErrorCode =
   | 'forbidden'
   | 'not-found'
   | 'conflict'
+  /** A second open item for one NEEDS-DECISION line (`nd-<lineKey>`, ADR-0041 §2): `current` is the open one. */
+  | 'already-open'
   | 'storage-unavailable';
 
 const MISSION_CONTROL_ERROR_BRAND = Symbol.for('purplemux.mission-control-error');
@@ -23,6 +25,7 @@ const ERROR_STATUS: Record<TMissionErrorCode, number> = {
   forbidden: 403,
   'not-found': 404,
   conflict: 409,
+  'already-open': 409,
   'storage-unavailable': 503,
 };
 

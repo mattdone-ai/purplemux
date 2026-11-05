@@ -22,6 +22,14 @@ vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => status }));
 vi.mock('@/lib/cli-token', () => ({ verifyCliToken: vi.fn(() => true) }));
 vi.mock('@/lib/access-filter', () => ({ isRequestAllowed: vi.fn(() => true) }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await Promise.all([
+  import('@/pages/api/status/hook'),
+  import('@/lib/hook-dispatch'),
+]);
+
 const response = () => ({
   status: vi.fn().mockReturnThis(),
   json: vi.fn().mockReturnThis(),

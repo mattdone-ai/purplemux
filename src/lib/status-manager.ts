@@ -34,6 +34,14 @@ import type { ITab, IWorkspace, TPanelType } from '@/types/terminal';
 import type { TCliState, TStartupPrompt } from '@/types/timeline';
 import type { IStartupPromptReading, ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
 import { addStandup, readAllLatestStandups, readLatestStandupEvidence } from '@/lib/standup-store';
+import {
+  STANDUP_DUE_CONFIG_KEY,
+  STANDUP_DUE_DEFAULT_MS,
+  STANDUP_DUE_KIND,
+  buildStandupDueLine,
+  parseStandupDueMinutes,
+  standupDueBucketMs,
+} from '@/lib/standup';
 import { buildNudgeMessage, buildHeartbeatMessage, nudgeKindForTransition, MAX_NUDGE_HISTORY, KICKOFF_FALLBACK_DELAY_MS, ORCH_IDLE_HEARTBEAT_MS, ORCH_MAX_HEARTBEATS } from '@/lib/orchestration';
 import { getSignalEngine } from '@/lib/signal-engine';
 import {
@@ -287,6 +295,13 @@ export class StatusManager {
   // tool call. Cached with a short TTL and refreshed off the hot path.
   private tabScopeCache = new Map<string, { scope?: string[]; cwd?: string; at: number }>();
   private orchKeeper = new Map<string, { idleSince: number | null; beats: number; lastBeatAt: number; stallAlerted: boolean }>();
+  /**
+   * Story hfl2-10: per workspace, the standup the due line counted from (its `at`, or the run's start) and the due
+   * bucket last routed for it. In memory: a server restart can repeat the line once for the current bucket.
+   */
+  private standupDueSent = new Map<string, { base: number; bucket: number }>();
+  /** Story hfl2-10: when this server first saw the workspace orchestrated; a run with no standup counts from it. */
+  private orchRunSeenAt = new Map<string, number>();
   /** Identical nudges within 60 s are dropped and counted (L49). */
   private nudgeDedupe = new NudgeDeduper();
   /** Turn-marker nudges a tab's `reportOn` withheld since the server started (ADR-0025). */
@@ -1489,18 +1504,28 @@ export class StatusManager {
     if (!workspaceData) return;
     const workspaces = workspaceData.workspaces;
     const now = Date.now();
+    let standupDueMs: number | null = null;
+    const dueMs = async () => (standupDueMs ??= await this.readStandupDueMs());
     for (const ws of workspaces) {
       const orch = ws.orchestration;
-      if (!orch?.enabled || !orch.orchestratorTabId) { this.orchKeeper.delete(ws.id); continue; }
-      if (this.standups.get(ws.id)?.state === 'awaiting-human') { this.orchKeeper.delete(ws.id); continue; }
+      if (!orch?.enabled || !orch.orchestratorTabId) {
+        this.orchKeeper.delete(ws.id);
+        this.orchRunSeenAt.delete(ws.id);
+        this.standupDueSent.delete(ws.id);
+        continue;
+      }
+      if (!this.orchRunSeenAt.has(ws.id)) this.orchRunSeenAt.set(ws.id, now);
       const entry = this.tabs.get(orch.orchestratorTabId);
-      if (!entry) { this.orchKeeper.delete(ws.id); continue; }
-
-      const state = this.orchKeeper.get(ws.id) ?? { idleSince: null, beats: 0, lastBeatAt: 0, stallAlerted: false };
       const workersActive = [...this.tabs.entries()].some(([id, t]) =>
         id !== orch.orchestratorTabId && t.workspaceId === ws.id
         && isAgentPanelType(t.panelType)
         && (t.cliState === 'busy' || t.cliState === 'needs-input' || t.cliState === 'ready-for-review'));
+      // Story hfl2-10 (CARRY): an orchestrator with live workers is never heartbeaten, so the due line is its wake.
+      if (entry && workersActive) await this.announceStandupDue(ws.id, orch.orchestratorTabId, now, await dueMs());
+      if (this.standups.get(ws.id)?.state === 'awaiting-human') { this.orchKeeper.delete(ws.id); continue; }
+      if (!entry) { this.orchKeeper.delete(ws.id); continue; }
+
+      const state = this.orchKeeper.get(ws.id) ?? { idleSince: null, beats: 0, lastBeatAt: 0, stallAlerted: false };
 
       // busy = working; needs-input = waiting on the HUMAN (the alert already fired) — do not nag.
       if (entry.cliState === 'busy' || entry.cliState === 'needs-input' || workersActive) {
@@ -1536,6 +1561,8 @@ export class StatusManager {
       const idleMinutes = Math.round((now - state.idleSince) / 60_000);
       const message = buildHeartbeatMessage(idleMinutes, ws.id);
       const beats = state.beats + 1;
+      // The heartbeat's 160-character digest line would cut a line appended to it: the due line rides as its own row.
+      await this.announceStandupDue(ws.id, orch.orchestratorTabId, now, await dueMs());
       const { delivered } = await this.sendNudge(ws.id, orch.orchestratorTabId, orch.orchestratorTabId, entry.tabName, 'heartbeat', message, { beat: beats });
       // Last heartbeat of the episode: the orchestrator slept through every
       // nudge purplemux can send, so the human is the only one left to ask.
@@ -1548,6 +1575,43 @@ export class StatusManager {
       }
       log.info({ workspaceId: ws.id, beats, delivered }, 'orchestrator heartbeat');
     }
+  }
+
+  /** Fleet config `standup.dueMin` (ADR-0019), read once per keeper pass; the default on any problem. */
+  private async readStandupDueMs(): Promise<number> {
+    let fleet: Awaited<ReturnType<typeof readFleetConfig>> | null = null;
+    try {
+      fleet = await readFleetConfig();
+    } catch (err) {
+      log.warn(`fleet config unreadable; the standup due age stays at its default: ${err instanceof Error ? err.message : err}`);
+    }
+    return this.fleetDurationMs(fleet, STANDUP_DUE_CONFIG_KEY, parseStandupDueMinutes, STANDUP_DUE_DEFAULT_MS);
+  }
+
+  /**
+   * Story hfl2-10 (AC 1, AC 2; CARRY): when the workspace's newest standup is older than the due age (a workspace with
+   * none counts from the run's start), route the due line to the orchestrator once per due bucket (45, 90, 180 ...
+   * min). The line is a held digest row that makes the orchestrator's digest due at once (ADR-0035 §3), so it reaches
+   * the orchestrator at its next prompt, with every held event, in one wake. It replaces a due line still held.
+   */
+  private async announceStandupDue(workspaceId: string, orchestratorTabId: string, now: number, dueMs: number): Promise<void> {
+    const lastPostedAt = this.standups.get(workspaceId)?.at ?? null;
+    const base = lastPostedAt ?? this.orchRunSeenAt.get(workspaceId) ?? now;
+    const bucket = standupDueBucketMs(now - base, dueMs);
+    if (bucket === null) return;
+    const sent = this.standupDueSent.get(workspaceId);
+    if (sent && sent.base === base && sent.bucket >= bucket) return;
+    // Claimed before any await: a concurrent keeper pass cannot route the same bucket twice.
+    this.standupDueSent.set(workspaceId, { base, bucket });
+    this.tabEvents.retireKind(workspaceId, orchestratorTabId, STANDUP_DUE_KIND);
+    const routed = await this.tabEvents.route({
+      workspaceId,
+      tabId: orchestratorTabId,
+      kind: STANDUP_DUE_KIND,
+      text: buildStandupDueLine(workspaceId, now - base, lastPostedAt),
+      class: classifyWake(STANDUP_DUE_KIND),
+    });
+    log.info({ workspaceId, orchestratorTabId, bucketMin: Math.round(bucket / 60_000), delivered: routed.delivered, seq: routed.seq }, 'standup due line routed');
   }
 
   private async runOrchestratorPresence(): Promise<void> {
@@ -1996,6 +2060,14 @@ export class StatusManager {
     const current = this.standups.get(standup.workspaceId);
     if (current && current.at > standup.at) return;
     this.standups.set(standup.workspaceId, standup);
+    this.standupDueSent.delete(standup.workspaceId);
+    // A due line still held would now be false (story hfl2-10).
+    void getWorkspaceByIdCached(standup.workspaceId).then((ws) => {
+      const orchestratorTabId = ws?.orchestration?.orchestratorTabId;
+      if (orchestratorTabId) this.tabEvents.retireKind(standup.workspaceId, orchestratorTabId, STANDUP_DUE_KIND);
+    }).catch((err) => {
+      log.warn(`held standup due line not retired: ${err instanceof Error ? err.message : err}`);
+    });
     await addStandup(standup).catch((err) => {
       log.warn(`standup persist failed: ${err instanceof Error ? err.message : err}`);
     });
@@ -2900,16 +2972,21 @@ export class StatusManager {
     const nudge = forwarded && turnEnd.kind === 'turn-marker'
       ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}`, ...(decision.target ? { target: decision.target } : {}) }
       : null;
-    // The note reached a tab only if this nudge goes out to a target (review r1, finding 4).
-    const askerHeard = decision.asker?.ifUnheard && nudge !== null
+    const toTarget = decision.asker?.ifUnheard && nudge !== null
       && (decision.target !== undefined || await this.hasEscalationTarget(tabId, entry));
     if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
+    // A tab already ready-for-review that ends on the same marker again sends no second nudge: the repeat filter.
+    const repeat = entry.cliState === 'ready-for-review' && previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
+      && previous.marker?.join('\n') === turnEnd.lines.join('\n');
+    const sent = repeat ? null : nudge;
+    // The note reached a tab only if the nudge that survives the repeat filter goes out to a target (review r1,
+    // finding 4; #521): a held-back repeat carries no note, so the asker hears it itself.
+    const askerHeard = toTarget && sent !== null;
     if (entry.cliState !== 'ready-for-review') {
       this.applyCliState(tabId, entry, 'ready-for-review', { nudge });
       this.persistToLayout(entry);
-    } else if (nudge && !(previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
-      && previous.marker?.join('\n') === turnEnd.lines.join('\n'))) {
-      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail, undefined, decision.target).catch((err) => {
+    } else if (sent) {
+      this.nudgeOrchestrator(tabId, entry, sent.kind, sent.detail, undefined, decision.target).catch((err) => {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }

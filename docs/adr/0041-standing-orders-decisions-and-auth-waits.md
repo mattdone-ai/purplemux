@@ -95,7 +95,7 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
   `<tab name or id> · <workspace name or id>: <the line without the marker and the class tag, whitespace collapsed>`
   cut at 400 code points at a word, with a trailing `…` (story 36; 100 code points before it, with no mark, cut the
   options mid-word); it carries the tab and workspace, so a tap opens the tab. One push per workspace, tab and
-  normalized line in 24 h, kept in memory (at most 2,000 keys, oldest evicted; a restart may send one more). The
+  normalized line in 24 h, kept in memory (at most 2,000 keys, oldest evicted; a restart may send one more push). The
   dispatch is never awaited. The note says what the server did, never what the owner received:
   `[no MC item (<reason>): owner push dispatched, delivery not confirmed]`, or
   `[no MC item (<reason>): owner push for this line already dispatched at <UTC ISO time>]`. Not the inbox: an inbox
@@ -109,8 +109,9 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     normalized line) and gives that id to every stop of the line for 24 h from then, unless an item of that id has
     closed (answered, resolved, cancelled), when the line asks anew under the stop's own id. So "its id would be <id>"
     is true: a later server open, or the orchestrator's open from the (i) note, takes that id, and a second open meets
-    the same id (`already-open`). In memory, at most 2,000 keys; a restart may mint one more. The id shape above is
-    unchanged; only its second half is now the first stop's.
+    the same id (`already-open`). In memory, at most 2,000 keys; after a restart the store gives the id back (story 03
+    amendment of epic `harness-flow-loop-2`, below). The id shape above is unchanged; only its second half is now the
+    first stop's.
   - **The line key ignores a quoted id.** `nd-<32 hex>`, bare or in `()`/`[]`, is removed before the line is
     normalized, so an asker that quotes its item id in the repeat keeps the key and finds the same item.
   - **The notice.** After the stop is recorded, the asking tab gets one urgent event of wake kind `mission`. For every
@@ -125,7 +126,7 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     open for the owner`), so it can name the item. When that nudge goes out, the target holds the note and the asker is
     told nothing itself.
   - **Once a day per line, notice and id.** Keyed by line key, notice kind (not opened / item) and id, 24 h, in memory
-    like the push (at most 2,000 keys; a restart may send one more). The line the tab repeats while it waits never wakes
+    like the push (at most 2,000 keys; a restart may send one more notice). The line the tab repeats while it waits never wakes
     it in a loop, while the open that follows a not-opened stop is still told; a repeat after the open sends nothing new.
   - **The (ii) push is unchanged, and it means "no item opened".** It goes out only when no item opened, so it never
     carries an `itemId`, and the phone opens the tab for it (an `nd-` id on a `needs-decision` alert would open that
@@ -149,6 +150,28 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     is `[no MC item: the NEEDS-DECISION line holds no question mark, so the server opened nothing and told no one]`, and
     an asker that the note does not reach gets `[needs-decision] item-not-opened: no-question. …`.
   - A line that holds two markers is no end line at all (ADR-0018, story 09 amendment), so it never reaches the opener.
+
+- **Amendment (story 03 of epic `harness-flow-loop-2`, 2026-11-05; NomuPay/engineering#521, ruling R-03): one open item
+  per line, after a restart too.** The id memory above is in memory only. After a restart a miss minted a fresh id, so
+  the orchestrator could act on an (i) note from before the restart and open the old id while the server opened the
+  new one: two items for one question. The word `already-open` was true only of the server's own check.
+  - **The store answers a miss.** When the memory holds no open id for the line key (a restart, the 24 h window, or a
+    closed item), the opener reads the store's still-open items with the prefix `nd-<lineKey>` (`openItemsWithIdPrefix`)
+    and takes the newest; with none, the stop's own id. The opener remembers the id it takes. A failing read counts as
+    no open item. The opener's own dedupe also names the newest open item.
+  - **The store refuses a second open item for one line.** An `attention.opened` whose item id starts with
+    `nd-<16 hex>` is refused while another item of that prefix in the same workspace is candidate or open, from any
+    opener (server, orchestrator or worker). The response is HTTP 409 with the body
+    `{"error": "an item for this NEEDS-DECISION line is already open: <open item id>", "code": "already-open", "current": <the open item>}`.
+    The same id again stays the 409 `conflict` `attention item already exists`. Once the open item is answered,
+    resolved or cancelled, an `nd-` id of that line opens again.
+  - **A racing open is `already-open`, not `refused` (review r1).** If another opener takes the line between the
+    opener's dedupe and its own write, the opener reads the typed refusal: the outcome is `already-open` with the open
+    item's id (`current.id`), and the line keeps that id. So no "open it yourself" note and no (ii) push go out for an
+    item that is open. Every other refusal stays `refused`.
+  - **The asker hears a note that the repeat filter held back.** A tab already `ready-for-review` that ends on the same
+    marker again sends no second nudge. The note of that stop then reaches no tab, so the asker gets it itself (the
+    notice above): "the note rides the nudge" means the nudge that survives the repeat filter.
 
 ### 3. Auth waits
 - Watch kind `auth`, target `aws-sso:<profile>`, until `signed-in`, interval 60 s by default; CLI

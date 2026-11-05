@@ -48,6 +48,20 @@ const cli = async (args: string[], env: Record<string, string>): Promise<IResult
   }
 };
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await Promise.all([
+  import('@/lib/tab-token'),
+  import('@/lib/cli-token'),
+  import('@/lib/tab-lifecycle'),
+  import('@/lib/watch-manager'),
+  import('@/lib/watch-store'),
+  import('@/pages/api/cli/watches/index'),
+  import('@/pages/api/cli/watches/[id]'),
+  loadLeaseRoutes(),
+]);
+
 describe('purplemux watch — the installed CLI against the real watch routes (ADR-0015)', { timeout: 60_000 }, () => {
   let server: { port: number; close: () => Promise<void> };
   let tabA: Record<string, string>;
@@ -134,6 +148,9 @@ describe('purplemux watch — the installed CLI against the real watch routes (A
       lines = (await inbox()).filter((l) => l.targetTabId === 'tab-b');
     }
     expect(lines.map((l) => l.line)).toEqual([`[purplemux watch ${watch.id}] merge:x/y is free — watch cleared`]);
+    // The pass queues the notice inside its watch-store mutation and writes the list without the watch after it:
+    // await that mutation (the lock tail) so the list read sees its write (int-pmx r1, 05 r4 read it in between).
+    await (globalThis as unknown as Record<string, Promise<void> | undefined>).__ptWatchLock;
     expect(JSON.parse((await cli(['watch', 'list', '--json'], tabB)).stdout).watches).toEqual([]);
   });
 

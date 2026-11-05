@@ -11,6 +11,11 @@ const callerFreeEnv = (): NodeJS.ProcessEnv => ({
   NODE_ENV: process.env.NODE_ENV,
 });
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await import('@/lib/mission-control-runtime');
+
 const run = promisify(execFile);
 const cli = path.resolve('bin/cli.js');
 const servers: ReturnType<typeof createServer>[] = [];

@@ -36,6 +36,11 @@ vi.mock('@/lib/providers/codex/managed-launch', () => managed);
 const hosts = vi.hoisted(() => ({ remote: new Set<string>() }));
 vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (hosts.remote.has(s) ? 'ai-server' : null) }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await import('@/lib/timeline-server');
+
 describe('timeline resume agent launch config', () => {
   beforeEach(() => {
     vi.clearAllMocks();

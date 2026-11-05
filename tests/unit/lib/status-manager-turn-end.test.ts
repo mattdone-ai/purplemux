@@ -463,6 +463,48 @@ describe('stop classification (ADR-0018)', () => {
       expect(told[1]).toBe(`[needs-decision] [MC item ${ID} opened for the owner by the server: do not open another] Name this id while you wait; the owner's answer arrives through Mission Control.`);
     });
 
+    // #521 review r1, 1: an already-open outcome (also from a racing open the store refused) means the owner was told.
+    it('already-open with no orchestrator: no owner push and no "open it yourself" note; the asker learns the open item', async () => {
+      noOrchestrator();
+      needsDecision.open.mockResolvedValueOnce({ opened: false, reason: 'already-open', itemId: ID });
+      const { manager, paste } = await managerWithPaste();
+      const line = 'NEEDS-DECISION: Ship it?';
+      manager.registerTab('worker', worker('claude-code', await writeLines('claude/nd521b.jsonl', [claudeEnd(`Ok.\n\n${line}`)])));
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+      await settle();
+      expect(pushes()).toEqual([]);
+      expect(sentTo(paste, 'tmux-root')).toEqual([]);
+      expect(sentTo(paste, 'tmux-worker')).toEqual([
+        `[needs-decision] [MC item ${ID} already open for the owner: do not open another] Name this id while you wait; the owner's answer arrives through Mission Control.`]);
+    });
+
+    // #521 AC 3: the repeat filter holds back a second nudge of the same marker, and with it the changed note.
+    it('a tab already ready-for-review that ends on the same marker again: the repeat filter holds the nudge, so the asker hears the changed note', async () => {
+      needsDecision.open
+        .mockResolvedValueOnce({ opened: false, reason: 'no-orchestrator-run', itemId: ID, detail: 'root' })
+        .mockResolvedValueOnce({ opened: true, itemId: ID, runId: 'run-a' });
+      const { manager, paste } = await managerWithPaste();
+      const line = 'NEEDS-DECISION: Ship it?';
+      const entry = worker('claude-code', await writeLines('claude/nd521.jsonl', [claudeEnd(`Ok.\n\n${line}`)]));
+      manager.registerTab('worker', entry);
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(sentTo(paste, 'tmux-root')).toHaveLength(1));
+      expect(sentTo(paste, 'tmux-root')[0]).toContain(`[no MC item (no-orchestrator-run): open it yourself: resume or start your Mission Control run, then open item ${ID}`);
+      await waitFor(() => expect(sentTo(paste, 'tmux-worker')).toHaveLength(1));
+      expect(entry.cliState).toBe('ready-for-review');
+      // A second stop of the same marker, no prompt between: the item opened now, and the nudge is a repeat.
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(needsDecision.open).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(sentTo(paste, 'tmux-worker')).toHaveLength(2));
+      await settle();
+      expect(sentTo(paste, 'tmux-root')).toHaveLength(1);
+      expect(sentTo(paste, 'tmux-worker')[1]).toBe(
+        `[needs-decision] [MC item ${ID} opened for the owner by the server: do not open another] Name this id while you wait; the owner's answer arrives through Mission Control.`);
+      needsDecision.open.mockReset();
+      needsDecision.open.mockImplementation(async () => ({ opened: true, itemId: ID, runId: 'run-a' }));
+    });
+
     it('D1 (d): the same line again inside 24 h tells the asker nothing new; after 24 h it is told again', async () => {
       askerIsOrchestrator();
       needsDecision.open.mockResolvedValue({ opened: false, reason: 'no-orchestrator-run', itemId: ID, detail: 'worker' });

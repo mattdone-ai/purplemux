@@ -94,6 +94,18 @@ const auditLines = async (): Promise<Array<Record<string, unknown>>> => {
   return raw.split('\n').filter(Boolean).map((line) => JSON.parse(line));
 };
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await Promise.all([
+  import('@/lib/tab-token'),
+  import('@/lib/cli-token'),
+  import('@/lib/layout-tree'),
+  import('@/pages/api/cli/tabs'),
+  import('@/pages/api/cli/workspaces/[workspaceId]/tab-count'),
+  import('@/pages/api/layout/pane/[paneId]/tabs/index'),
+]);
+
 describe('POST /api/cli/tabs: the WIP cap (ADR-0027)', () => {
   let create: THandler;
   let tabCount: THandler;
