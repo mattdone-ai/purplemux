@@ -132,6 +132,24 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     item; the server sends none). Its body is `needsDecisionPushDetail` (`needs-decision.ts`), exported so the phone's
     fixtures are built by the server's own function.
 
+- **Amendment (story 09 of epic `harness-flow-loop-2`, 2026-11-05; defect D28): who may open an owner item.** v2-scope, a
+  tab with a `reportsTo`, ended on a line that only quoted the marker, the server opened an owner item from it, and the
+  owner asked "why am I getting this?".
+  - **A tab with a `reportsTo` asks that tab, never the owner (SO-6).** Its `NEEDS-DECISION:` line opens no item and
+    sends no owner push. The nudge goes, whatever its `reportOn`, to its `reportsTo` while that is a live agent tab not
+    halted by a usage limit, else to a live, un-halted orchestrator, with the note `[no owner item: this tab reports to
+    <tab>, so its NEEDS-DECISION is answered by you[, the orchestrator (<tab> cannot take it)], never sent to the owner
+    (SO-6); answer it, or ask the owner on your own end line]`.
+  - **A question never vanishes (review r1).** When neither can take it (the `reportsTo` is gone or halted, and no live
+    orchestrator exists), the line takes today's path: the owner item opens (or the (i)/(ii) fallback runs), and the
+    item's context and human reason state `reports-to target unavailable: <tab> is gone or halted, and no live
+    orchestrator can take it`. Only then does a `reportsTo` tab's question reach the owner.
+  - **No question, no item.** The opener refuses a line whose text after `NEEDS-DECISION:` holds no `?` (or `？`):
+    outcome `no-question`, logged with the line. There is no owner push and no "open it yourself" note; the nudge note
+    is `[no MC item: the NEEDS-DECISION line holds no question mark, so the server opened nothing and told no one]`, and
+    an asker that the note does not reach gets `[needs-decision] item-not-opened: no-question. …`.
+  - A line that holds two markers is no end line at all (ADR-0018, story 09 amendment), so it never reaches the opener.
+
 ### 3. Auth waits
 - Watch kind `auth`, target `aws-sso:<profile>`, until `signed-in`, interval 60 s by default; CLI
   `purplemux wait add --auth PROFILE [--item LEDGER_ITEM_KEY]`. It runs in the local lane with lease watches.

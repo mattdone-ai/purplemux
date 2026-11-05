@@ -251,6 +251,27 @@ describe('the server opens the item (story 14 AC 4)', () => {
     expect(await openNeedsDecisionItem(deps, stop({ line: 'DONE: fine' }))).toEqual({ opened: false, reason: 'not-needs-decision' });
   });
 
+  it('states the fallback reason in the item when a reportsTo tab\'s question reaches the owner (D28 review r1, 1)', async () => {
+    startRun();
+    const reason = 'reports-to target unavailable: tab-lead is gone or halted, and no live orchestrator can take it';
+    expect(await openNeedsDecisionItem(await needsDecisionDeps(), stop({ fallbackReason: reason }))).toMatchObject({ opened: true });
+    const [item] = items() as unknown as Array<Record<string, unknown>>;
+    expect(JSON.stringify(item)).toContain(`It reached you because ${reason}.`);
+    expect(JSON.stringify(item)).toContain(`hfl-14 ended its turn with NEEDS-DECISION and no tab can take it (${reason}): the owner decides it.`);
+  });
+
+  it('refuses a line with no question mark after the marker: no item, no id remembered (D28 v2 addendum)', async () => {
+    startRun();
+    const deps = await needsDecisionDeps();
+    const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it.';
+    expect(await openNeedsDecisionItem(deps, stop({ line: D28 }))).toEqual({ opened: false, reason: 'no-question' });
+    expect(await openNeedsDecisionItem(deps, stop({ line: 'NEEDS-DECISION: [scope] pick one (a) keep (b) revert' }))).toEqual({ opened: false, reason: 'no-question' });
+    // A full-width question mark after the marker counts too.
+    expect(await openNeedsDecisionItem(deps, stop({ line: 'NEEDS-DECISION: ship？' }))).toMatchObject({ opened: true });
+    expect(items()).toHaveLength(1);
+    expect((globalThis as { __ptNeedsDecisionItemIds?: Map<string, unknown> }).__ptNeedsDecisionItemIds?.size).toBe(1);
+  });
+
   it('an answered question reopens after a restart resets the stop seq (confirm D1)', async () => {
     startRun();
     const deps = await needsDecisionDeps();
@@ -390,6 +411,11 @@ describe('the asking tab\'s notice (story 36, D1)', () => {
       .toBe(`[needs-decision] [MC item ${ID} opened for the owner by the server: do not open another] Name this id while you wait; the owner's answer arrives through Mission Control.`);
     expect(needsDecisionAskerNotice({ kind: 'not-opened', reason: 'no-orchestrator', itemId: ID, fate: 'owner push dispatched, delivery not confirmed', askerIsOrchestrator: false }))
       .toBe(`[needs-decision] item-not-opened: no-orchestrator. Your NEEDS-DECISION line opened no Mission Control item; owner push dispatched, delivery not confirmed. Its id would be ${ID}.`);
+  });
+
+  it('tells a line with no question that nothing opened (D28)', () => {
+    expect(needsDecisionAskerNotice({ kind: 'no-question' })).toBe(
+      '[needs-decision] item-not-opened: no-question. Your NEEDS-DECISION line holds no question mark after the marker, so the server opened no Mission Control item and told no one. If you need a decision, end on one line: NEEDS-DECISION: <question>? (a) <option> (b) <option>.');
   });
 
   it('collapses a refusal detail to one line of at most 200 chars, and tells an orchestrator how to open the item itself', () => {

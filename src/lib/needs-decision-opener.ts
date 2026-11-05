@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { createLogger } from '@/lib/logger';
 import type { IMissionItemOpener, IMissionOpenRunBinding } from '@/lib/mission-control-store';
 import { NEEDS_DECISION_EVENT_PREFIX } from '@/lib/mission-control-validation';
-import { buildNeedsDecisionQuestion, isNeedsDecisionLine } from '@/lib/needs-decision';
+import { buildNeedsDecisionQuestion, isNeedsDecisionLine, needsDecisionAsks } from '@/lib/needs-decision';
 
 // The server's NEEDS-DECISION producer (ADR-0041; story 14 AC 4). The item opens human-visible in one
 // event: `attention.opened` carrying the workspace orchestrator's human review, on the orchestrator's
@@ -33,6 +33,8 @@ export interface INeedsDecisionStop {
   stopAt: number;
   /** When the turn began: an item the tab opened since then means it already asked. */
   turnStartedAt: number;
+  /** Why a tab that should not ask the owner does (D28 review r1, 1: `reports-to target unavailable: …`); in the item. */
+  fallbackReason?: string;
 }
 
 /** A NEEDS-DECISION stop that opened no item: the fallback of ADR-0041 §2 takes over. */
@@ -42,6 +44,8 @@ export type TNeedsDecisionOutcome =
   | { opened: true; itemId: string; runId: string }
   | { opened: false; reason: 'already-open' | 'asked-this-turn'; itemId: string }
   | { opened: false; reason: 'not-needs-decision' }
+  /** The line asks nothing: no `?` after the marker (D28). No item, no push, no orchestrator note to open one. */
+  | { opened: false; reason: 'no-question' }
   /** `itemId` is the id the server would have used: the orchestrator is told to open that one (confirm C4, F1 (i)). */
   | { opened: false; reason: TNeedsDecisionNoItemReason; itemId: string; detail?: string };
 
@@ -114,6 +118,10 @@ const OPEN_STATES = new Set(['candidate', 'open']);
 /** Never throws: a failing dependency is the `error` outcome, so the stop always takes a path (confirm D2, C4). */
 export const openNeedsDecisionItem = async (deps: INeedsDecisionDeps, stop: INeedsDecisionStop): Promise<TNeedsDecisionOutcome> => {
   if (!isNeedsDecisionLine(stop.line)) return { opened: false, reason: 'not-needs-decision' };
+  if (!needsDecisionAsks(stop.line)) {
+    log.warn({ workspaceId: stop.workspaceId, tabId: stop.tabId, line: stop.line }, 'NEEDS-DECISION refused: the line holds no question mark, so no item opens');
+    return { opened: false, reason: 'no-question' };
+  }
   const { itemId, lineKey } = stableNeedsDecisionItemId(stop, deps.now(), (id) => {
     const state = deps.itemState(id);
     return state !== null && !OPEN_STATES.has(state);
@@ -149,10 +157,14 @@ const openItem = async (deps: INeedsDecisionDeps, stop: INeedsDecisionStop, item
     bindingGeneration: run.binding.generation,
     payload: {
       itemId,
-      ...buildNeedsDecisionQuestion({ line: stop.line, complete: stop.lineComplete, workspaceId: stop.workspaceId, tabId: stop.tabId, tabName: stop.tabName }),
+      ...buildNeedsDecisionQuestion({
+        line: stop.line, complete: stop.lineComplete, workspaceId: stop.workspaceId, tabId: stop.tabId, tabName: stop.tabName, fallbackReason: stop.fallbackReason,
+      }),
       humanReview: {
         humanNeed: 'decision',
-        humanReason: `${name} ended its turn with NEEDS-DECISION: only the owner decides it.`,
+        humanReason: stop.fallbackReason
+          ? `${name} ended its turn with NEEDS-DECISION and no tab can take it (${stop.fallbackReason}): the owner decides it.`
+          : `${name} ended its turn with NEEDS-DECISION: only the owner decides it.`,
         handling: 'Opened by the purplemux server from the end line (ADR-0041); the orchestrator relays the answer.',
         reviewerTabId: orchestratorTabId,
       },
@@ -172,11 +184,16 @@ const openItem = async (deps: INeedsDecisionDeps, stop: INeedsDecisionStop, item
 /** What the asking tab itself is told of its line (story 36, D1); `fate` says what the server did instead. */
 export type TNeedsDecisionAskerNotice =
   | { kind: 'item'; state: 'opened' | 'already-open'; itemId: string }
+  /** The line holds no `?`: the server opened nothing and told no one (D28). */
+  | { kind: 'no-question' }
   | { kind: 'not-opened'; reason: TNeedsDecisionNoItemReason; itemId: string; detail?: string; fate: string; askerIsOrchestrator: boolean };
 
 const NOTICE_DETAIL_MAX = 200;
 
 export const needsDecisionAskerNotice = (notice: TNeedsDecisionAskerNotice): string => {
+  if (notice.kind === 'no-question') {
+    return '[needs-decision] item-not-opened: no-question. Your NEEDS-DECISION line holds no question mark after the marker, so the server opened no Mission Control item and told no one. If you need a decision, end on one line: NEEDS-DECISION: <question>? (a) <option> (b) <option>.';
+  }
   if (notice.kind === 'item') {
     const state = notice.state === 'opened' ? 'opened for the owner by the server' : 'already open for the owner';
     return `[needs-decision] [MC item ${notice.itemId} ${state}: do not open another] Name this id while you wait; the owner's answer arrives through Mission Control.`;

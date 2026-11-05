@@ -74,38 +74,102 @@ export interface ITurnEndInput {
   armedWatches: number;
 }
 
-// Markdown emphasis or a quote around the marker does not hide it.
-const bare = (line: string): string => line.trim().replace(/^[>*_`\s]+/, '').replace(/[*_`\s]+$/, '');
+// Markdown emphasis, a quote, or a list prefix (`- `, `+ `, `1. `, `2) `) around the marker does not hide it (review r1, 3).
+const bare = (line: string): string =>
+  line.trim().replace(/^(?:[>*_`\s]|[-+](?=\s)|\d+[.)](?=\s))+/, '').replace(/[*_`\s]+$/, '');
 
 const clip = (line: string): string =>
   line.length > MAX_MARKER_LINE_CHARS ? `${line.slice(0, MAX_MARKER_LINE_CHARS)}…` : line;
 
+// A second marker inside an end line, at the start or after a character that cannot be part of a marker word
+// (D28: "NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: …" opened an owner item).
+const INNER_MARKER = new RegExp(`(?:^|[^A-Za-z0-9_-])(${TURN_MARKER_NAMES.join('|')}):`, 'g');
+const NEEDS_DECISION = 'NEEDS-DECISION:';
+
+const startMarker = (line: string): string | null => TURN_MARKERS.find((marker) => line.startsWith(marker)) ?? null;
+
 /**
- * The marker lines a turn ended on, or null. The LAST non-empty line must start
- * with a marker; `READY-TO-MERGE:` lines directly above it ride along (one per
- * PR, then `DONE:` — worker contract rule 10), at most five.
+ * True when the line starts with a marker, names one more marker after it, and one of the two is `NEEDS-DECISION:`
+ * (the D28 shape: a question quoted beside another verdict asks nothing). Any other pair keeps the FIRST marker:
+ * `DONE: … READY-TO-MERGE: PR #12` is a DONE (review r1, 2).
  */
-export const extractTurnMarker = (tail: string | null | undefined): string[] | null => {
-  if (!tail) return null;
-  const lines = tail.split('\n').map(bare).filter(Boolean);
-  const last = lines.at(-1);
-  if (!last || !TURN_MARKERS.some((marker) => last.startsWith(marker))) return null;
-  const above: string[] = [];
-  for (let i = lines.length - 2; i >= 0 && above.length < MAX_READY_TO_MERGE_LINES; i--) {
-    if (!lines[i].startsWith(READY_TO_MERGE)) break;
-    above.unshift(lines[i]);
-  }
-  if (last.startsWith(READY_TO_MERGE) && above.length === MAX_READY_TO_MERGE_LINES) above.shift();
-  return [...above, last].map(clip);
+const holdsTwoMarkers = (line: string): boolean => {
+  const marker = startMarker(line);
+  if (marker === null) return false;
+  const inner = [...line.slice(marker.length).matchAll(INNER_MARKER)].map((match) => `${match[1]}:`);
+  return inner.length > 0 && (marker === NEEDS_DECISION || inner.includes(NEEDS_DECISION));
 };
 
 /**
- * The last non-empty line of the tail, unclipped (ADR-0041: a NEEDS-DECISION question is built from all of it).
- * The tail is the END of the message, so a line that starts inside it is whole; `complete` is false only when the
- * line runs from the first character of a tail cut at TURN_TAIL_CHARS, where its start may be missing.
+ * What a turn's tail ends on, unclipped:
+ * - `marker`: the end line and the `READY-TO-MERGE:` lines that ride along above it. `complete` is false only when the
+ *   end line runs from the first character of a tail cut at TURN_TAIL_CHARS, where its start may be missing.
+ * - `refused`: the end line starts with a marker and holds a second one, one of the two `NEEDS-DECISION:` (D28). It
+ *   counts as no marker; the caller logs it.
+ * - null: no end line.
+ *
+ * The end line is the last non-empty line when that starts with a marker (ADR-0018). Otherwise it is the last
+ * paragraph (the lines after the last blank line) joined by one space, when the paragraph's FIRST line starts with a
+ * marker (R-09: a wrapped DONE line); `READY-TO-MERGE:` lines that open the paragraph ride along and the join starts at
+ * the marker line after them. An earlier paragraph is never read, and no marker inside a line counts.
+ */
+export type TTurnEndRead =
+  | { kind: 'marker'; lines: string[]; complete: boolean }
+  | { kind: 'refused'; reason: 'two-markers'; line: string }
+  | null;
+
+export const readTurnEnd = (tail: string | null | undefined): TTurnEndRead => {
+  if (!tail) return null;
+  const raw = tail.split('\n').map(bare);
+  let lastIndex = raw.length - 1;
+  while (lastIndex >= 0 && !raw[lastIndex]) lastIndex--;
+  if (lastIndex < 0) return null;
+  const cut = tail.length >= TURN_TAIL_CHARS;
+  let end: string;
+  let endIndex = lastIndex;
+  if (startMarker(raw[lastIndex])) {
+    end = raw[lastIndex];
+  } else {
+    let first = lastIndex;
+    while (first > 0 && raw[first - 1]) first--;
+    // A paragraph that starts at the first character of a cut tail may lack its start: its first line is unknown.
+    if (first === lastIndex || !startMarker(raw[first]) || (first === 0 && cut)) return null;
+    // READY-TO-MERGE lines that open the paragraph ride along; the end line is the marker line after them.
+    let start = first;
+    while (start < lastIndex && raw[start].startsWith(READY_TO_MERGE) && startMarker(raw[start + 1])) start++;
+    end = raw.slice(start, lastIndex + 1).join(' ');
+    endIndex = start;
+  }
+  if (holdsTwoMarkers(end)) return { kind: 'refused', reason: 'two-markers', line: end };
+  const above: string[] = [];
+  for (let i = endIndex - 1; i >= 0 && above.length < MAX_READY_TO_MERGE_LINES; i--) {
+    if (!raw[i]) continue;
+    if (!raw[i].startsWith(READY_TO_MERGE) || holdsTwoMarkers(raw[i])) break;
+    above.unshift(raw[i]);
+  }
+  if (end.startsWith(READY_TO_MERGE) && above.length === MAX_READY_TO_MERGE_LINES) above.shift();
+  return { kind: 'marker', lines: [...above, end], complete: endIndex > 0 || !cut };
+};
+
+/**
+ * The marker lines a turn ended on, each clipped at 300 chars, or null (`readTurnEnd`). `READY-TO-MERGE:` lines
+ * directly above the end line ride along (one per PR, then `DONE:` — worker contract rule 10), at most five.
+ */
+export const extractTurnMarker = (tail: string | null | undefined): string[] | null => {
+  const read = readTurnEnd(tail);
+  return read?.kind === 'marker' ? read.lines.map(clip) : null;
+};
+
+/**
+ * The turn's end line, unclipped (ADR-0041: a NEEDS-DECISION question is built from all of it): the marker end line
+ * of `readTurnEnd`, joined when it wrapped, else the last non-empty line. The tail is the END of the message, so a line
+ * that starts inside it is whole; `complete` is false only when the line runs from the first character of a tail cut
+ * at TURN_TAIL_CHARS, where its start may be missing.
  */
 export const lastTurnLine = (tail: string | null | undefined): { line: string; complete: boolean } | null => {
   if (!tail) return null;
+  const read = readTurnEnd(tail);
+  if (read?.kind === 'marker') return { line: read.lines.at(-1)!, complete: read.complete };
   const lines = tail.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = bare(lines[i]);
