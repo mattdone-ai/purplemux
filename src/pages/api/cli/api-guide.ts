@@ -780,6 +780,15 @@ Keys in use:
   watchdog.wait-backstop-hours
                Hours (0, 168], decimals allowed, a tab may wait on a live registered job or armed
                watch before its one "has been WAITING" nudge. Unset or invalid means 4.
+  standup.dueMin
+               Minutes [0, 1440], decimals allowed, the workspace's newest standup may age (a
+               workspace with none counts from the run's start) before the orchestrator hears
+               "standup due: last posted <N> min ago (purplemux standup report -w <WS>)". The
+               line goes once per due bucket (N, 2N, 4N ... min) while the orchestrator has a
+               busy, needs-input or ready-for-review worker, or with its idle heartbeat. It
+               makes the orchestrator's digest due at once, at its next prompt (ADR-0035 §3).
+               0 turns it off; unset or invalid means 45. Admin token only (exit 3 forbidden
+               for a tab).
   fleet-status.stall-minutes  fleet-status.waiting-long-minutes  fleet-status.unanswered-minutes
   fleet-status.composer-minutes
                The fleet flag thresholds (ADR-0023), in minutes (0, 10080], decimals allowed:
