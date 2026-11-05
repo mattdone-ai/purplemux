@@ -16,6 +16,11 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, default: { ...actual, homedir: () => mockHome.value }, homedir: () => mockHome.value };
 });
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await import('@/lib/spend/spend-index');
+
 const DAY = 86_400_000;
 const utc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const D2 = utc(Date.now() - 2 * DAY);

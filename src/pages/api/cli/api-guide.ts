@@ -683,7 +683,11 @@ body are never typed. Every note view carries fromLabel, the same server-made wo
 before the line is delivered, the note re-routes. One reminder reaches the recipient 30 min after
 the line reached its composer, and one notice reaches the sender's tab (if live) at 60 min; no
 more. A note unacked or undeliverable for 14 days expires (one notice to a live sender); acked and
-expired notes are pruned 14 days later. At turn start, run \`note list --open --to-me\`.
+expired notes are pruned 14 days later. An ack with a comment sends the sender's tab one fixed line,
+"[purplemux note n-…] acked by <ws>/<tab> at <time> with a comment — purplemux note show n-…": the
+comment is never typed, and the sender reads it as ackComment with note show. The line is queued
+when the sender's tab is live or its state is unknown; nothing goes to a closed tab, to a sender with
+no tab, or for an ack with no comment. At turn start, run \`note list --open --to-me\`.
 
 A routed note reads state "pending" while its notice waits in the inbox, "held" while the inbox
 holds it, and "delivered" only after the notice reached a composer (deliveredAt, also
@@ -712,6 +716,8 @@ GET /api/cli/notes/<id>
 POST /api/cli/notes/<id>/ack
   Same-workspace notes: the recipient workspace. Cross-workspace and legacy unknown-source notes:
   the verified currently routed recipient coordinator. Body: { "comment"? (≤ 500) }.
+  A non-empty comment queues one "acked … with a comment" line to the sender's tab (above); the
+  comment itself is pulled with note show.
   Response: { "note" } in state "acked". 404 note-not-found (exit 7); 403 forbidden (exit 3),
   also for a note that is not delivered.
 

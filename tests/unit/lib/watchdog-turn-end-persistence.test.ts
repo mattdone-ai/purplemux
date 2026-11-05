@@ -10,6 +10,14 @@ import type { ILayoutData, ITab } from '@/types/terminal';
 // under the test process's own HOME, which the story 31 setup points at a
 // temporary root (tests/setup/isolated-home.ts), never the live ~/.purplemux.
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await Promise.all([
+  import('@/lib/layout-store'),
+  import('@/lib/status-manager'),
+]);
+
 const wsId = `ws-persist${Math.random().toString(36).slice(2, 8)}`;
 const paneId = 'pane-p1';
 const tabId = 'tab-t1';

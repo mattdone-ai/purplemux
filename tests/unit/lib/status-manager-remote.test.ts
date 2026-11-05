@@ -52,6 +52,14 @@ vi.mock('@/lib/session-host', async (importOriginal) => ({
   sessionHostOf: async (s: string) => (s === 'pt-ws-1-pane-a-tab-r' ? 'ai-server' : null),
 }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await Promise.all([
+  import('@/lib/providers'),
+  import('@/lib/status-manager'),
+]);
+
 describe('status of a remote terminal tab (ADR-0022 §11)', () => {
   beforeEach(() => {
     vi.resetModules();
