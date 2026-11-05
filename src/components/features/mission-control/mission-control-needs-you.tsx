@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { AlertCircle, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import MissionControlAnswerCard, { MissionControlAutoAnswerCard } from '@/components/features/mission-control/mission-control-answer-card';
+import MissionControlAnswerCard, { FollowedByNote, MissionControlAutoAnswerCard } from '@/components/features/mission-control/mission-control-answer-card';
 import { AnswersByClassStrip } from '@/components/features/mission-control/attention-class-view';
 import { ATTENTION_CLASS_KEYS, ATTENTION_CLASS_LABELS, attentionClassKey } from '@/lib/attention-class';
 import type { TAttentionClassKey } from '@/lib/attention-class';
@@ -152,9 +152,11 @@ const FocusNotice = ({ snapshot, focusItemId, open }: { snapshot: IMissionSnapsh
   if (open) return null;
   const item = snapshot.items.find((candidate) => candidate.id === focusItemId);
   return (
-    <p role="status" className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground" data-focus-missing={focusItemId}>
-      {item ? `"${item.title}" no longer needs an answer here (${itemStateWords(item.state)}).` : `Item ${focusItemId} is not in this Mission Control snapshot.`}
-    </p>
+    <div role="status" className="space-y-1 rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground" data-focus-missing={focusItemId}>
+      <p>{item ? `"${item.title}" no longer needs an answer here (${itemStateWords(item.state)}).` : `Item ${focusItemId} is not in this Mission Control snapshot.`}</p>
+      {/* An earlier item that a follow-up resolved links to the item that asks again (ADR-0037 amendment D2). */}
+      {item && <FollowedByNote item={item} />}
+    </div>
   );
 };
 

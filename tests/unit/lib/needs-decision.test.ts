@@ -523,6 +523,21 @@ describe('the server opens the item (story 14 AC 4)', () => {
       .toEqual({ opened: false, reason: 'already-open', itemId: (opened as { itemId: string }).itemId });
   });
 
+  it('a NEEDS-DECISION line never sets followsUp, even when it names an answered item (ADR-0037 amendment D2)', async () => {
+    startRun();
+    const first = await openNeedsDecisionItem(await needsDecisionDeps(), stop());
+    if (!first.opened) throw new Error('first item did not open');
+    const [asked] = items();
+    store.submitAnswer(asked.id, { submissionId: 's-nd', expectedRevision: asked.revision, optionIds: ['a'], text: '', actionCompleted: false }, 'owner');
+    const outcome = await openNeedsDecisionItem(await needsDecisionDeps(),
+      stop({ stopSeq: 8, stopAt: 2_000, turnStartedAt: Date.now() + 10, line: `NEEDS-DECISION: follow up ${asked.id}: is the export still in scope? (a) yes (b) no` }));
+    expect(outcome).toMatchObject({ opened: true });
+    const opened = store.snapshot([], 'ws-a').recentEvents.filter((event) => event.type === 'attention.opened');
+    expect(opened).toHaveLength(2);
+    for (const event of opened) expect(event.payload).not.toHaveProperty('followsUp');
+    expect(items().find((entry) => entry.id === asked.id)).toMatchObject({ state: 'answered', followedBy: null });
+  });
+
   it('a producer cannot take the server opener\'s event namespace', async () => {
     startRun();
     const { applyMissionEventBatch } = await import('@/lib/mission-control-events');

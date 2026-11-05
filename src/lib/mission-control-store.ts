@@ -20,6 +20,10 @@ import type {
   IMissionEvent,
   IMissionEventsResponse,
   IMissionEvidence,
+  IMissionFollowedBy,
+  IMissionFollowedUp,
+  IMissionFollowsUp,
+  IMissionFollowUpRefusal,
   IMissionHumanInboxPolicy,
   IMissionQuestion,
   IMissionQuestionChanges,
@@ -32,6 +36,7 @@ import type {
   TMissionProducerEvent,
   TMissionCandidateReason,
   TMissionHumanReview,
+  TMissionHumanReviewInput,
   TMissionItemState,
   TMissionRebindCause,
   TSoProposalState,
@@ -50,6 +55,7 @@ import {
   diffMissionQuestions,
   mergeMissionChanges,
   questionLint,
+  selectedOptionLabels,
   type TMissionStoredQuestion,
 } from '@/lib/mission-question-format';
 import {
@@ -59,7 +65,7 @@ import {
   autoAnswerSubmissionId,
   type IAutoAnswerRule,
 } from '@/lib/mission-control-auto-answer';
-import { needsDecisionLinePrefix, SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX } from '@/lib/mission-control-validation';
+import { FOLLOW_UP_EVENT_PREFIX, needsDecisionLinePrefix, SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX } from '@/lib/mission-control-validation';
 
 const DEFAULT_DB_PATH = path.join(os.homedir(), '.purplemux', 'mission-control.sqlite');
 const SCHEMA_VERSION = 4;
@@ -114,6 +120,28 @@ export interface IMissionApplyEventsResult {
   events: IMissionEvent[];
   cursor: number;
   replayed: boolean;
+  /** The answer that the batch's one follow-up acknowledged (ADR-0037 amendment D2, rule 4); absent when none. */
+  followedUp?: IMissionFollowedUp;
+  /** A batch with two or more follow-ups carries them here instead of `followedUp` (consult ruling, story hfl2-01). */
+  followedUps?: IMissionFollowedUp[];
+}
+
+/** What a follow-up names and carries, for the store's check (ADR-0037 amendment D2, edge cases). */
+export interface IMissionFollowUpInput {
+  workspaceId: string;
+  runId: string;
+  /** The new item's id. */
+  itemId: string;
+  /** The earlier item's id: the target. */
+  followsUp: string;
+  humanReview: Pick<TMissionHumanReviewInput, 'humanNeed'> | null | undefined;
+}
+
+interface ILinkRow {
+  item_id: string;
+  follows_up_item_id: string;
+  workspace_id: string;
+  at: number;
 }
 
 export interface IMissionEventAuthority {
@@ -405,12 +433,44 @@ export interface IMissionSoProposalOutcome {
   decidedAt: number;
 }
 
+interface IMissionItemLinks {
+  followsUp: IMissionFollowsUp | null;
+  followedBy: IMissionFollowedBy | null;
+}
+
+const NO_LINKS: IMissionItemLinks = { followsUp: null, followedBy: null };
+
+const questionTitle = (questionJson: string): string =>
+  String((JSON.parse(questionJson) as { title?: unknown }).title ?? '');
+
+/** The labels of the selected options, read from the answered (frozen) question; an id it lacks never reaches a face. */
+const optionLabelsOf = (questionJson: string, optionIds: readonly string[]): string[] =>
+  selectedOptionLabels((JSON.parse(questionJson) as { options?: Array<{ id: string; label: string }> }).options ?? [], optionIds);
+
+const followsUpView = (target: IItemRow, answer: IAnswerRow | undefined): IMissionFollowsUp => {
+  const request = answer ? JSON.parse(answer.request_json) as IMissionAnswerRequest : null;
+  return {
+    itemId: target.id,
+    title: questionTitle(target.question_json),
+    answer: answer && request
+      ? { optionIds: request.optionIds, optionLabels: optionLabelsOf(target.question_json, request.optionIds), text: request.text, at: answer.created_at }
+      : null,
+  };
+};
+
+const followedByView = (follower: IItemRow): IMissionFollowedBy => ({
+  itemId: follower.id,
+  title: questionTitle(follower.question_json),
+  state: follower.state,
+});
+
 const itemFromRow = (
   row: IItemRow,
   autoAnswer: IMissionAutoAnswer | null = null,
   changes: IMissionQuestionChanges | null = null,
   suggestions: IMissionAnswerSuggestion[] = [],
   proposal: IMissionSoProposalView | null = null,
+  links: IMissionItemLinks = NO_LINKS,
 ): IMissionAttentionItem => {
   const { evidence: evidenceLinks, ...question } = JSON.parse(row.question_json) as TMissionStoredQuestion;
   return {
@@ -433,6 +493,8 @@ const itemFromRow = (
     defaultOptionId: question.defaultOptionId ?? null,
     autoAnswer,
     proposal,
+    followsUp: links.followsUp,
+    followedBy: links.followedBy,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -522,6 +584,7 @@ export class MissionControlStore {
     this.ensureChangesTable();
     this.ensureSuggestionTable();
     this.ensureSoProposalTable();
+    this.ensureLinkTable();
   }
 
   /**
@@ -540,6 +603,18 @@ export class MissionControlStore {
     // A table made before `reason_code` (story 02 r1) gains it; a column add is all a side table ever needs.
     const columns = (this.database.prepare('PRAGMA table_info(mission_so_proposals)').all() as Array<{ name: string }>).map((c) => c.name);
     if (!columns.includes('reason_code')) this.database.exec('ALTER TABLE mission_so_proposals ADD COLUMN reason_code TEXT');
+  };
+
+  /**
+   * Follow-up links (ADR-0037 amendment D2): an unversioned side table like the openers, so a release that ignores it
+   * still opens the file. The primary key gives an item at most one predecessor; the unique column, at most one follower.
+   */
+  private ensureLinkTable = (): void => {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS mission_item_links (
+        item_id TEXT PRIMARY KEY, follows_up_item_id TEXT UNIQUE NOT NULL, workspace_id TEXT NOT NULL, at INTEGER NOT NULL
+      );
+    `);
   };
 
   /**
@@ -739,8 +814,24 @@ export class MissionControlStore {
   private proposalRow = (itemId: string): ISoProposalRow | undefined =>
     this.database.prepare('SELECT * FROM mission_so_proposals WHERE item_id = ?').get(itemId) as ISoProposalRow | undefined;
 
+  private answerRow = (answerId: string | null): IAnswerRow | undefined =>
+    answerId === null ? undefined : this.database.prepare('SELECT * FROM answers WHERE id = ?').get(answerId) as IAnswerRow | undefined;
+
+  /** One step back and one step forward along the item's follow-up chain (ADR-0037 amendment D2, rule 5). */
+  private linksOf = (itemId: string): IMissionItemLinks => {
+    const back = this.database.prepare('SELECT * FROM mission_item_links WHERE item_id = ?').get(itemId) as ILinkRow | undefined;
+    const forward = this.database.prepare('SELECT * FROM mission_item_links WHERE follows_up_item_id = ?').get(itemId) as ILinkRow | undefined;
+    const target = back ? this.itemRow(back.follows_up_item_id) : undefined;
+    const follower = forward ? this.itemRow(forward.item_id) : undefined;
+    return {
+      followsUp: target ? followsUpView(target, this.answerRow(target.answer_id)) : null,
+      followedBy: follower ? followedByView(follower) : null,
+    };
+  };
+
   private item = (row: IItemRow): IMissionAttentionItem =>
-    itemFromRow(row, this.autoAnswerOf(row.id), this.changesOf(row.id), this.suggestionsOf(row.id), soProposalView(this.proposalRow(row.id)));
+    itemFromRow(row, this.autoAnswerOf(row.id), this.changesOf(row.id), this.suggestionsOf(row.id), soProposalView(this.proposalRow(row.id)),
+      this.linksOf(row.id));
 
   private insertEvent = (
     event: TMissionProducerEvent,
@@ -786,12 +877,14 @@ export class MissionControlStore {
       }
       const proposalByItem = new Map((this.database.prepare(`SELECT * FROM mission_so_proposals${where}`).all(...args) as ISoProposalRow[])
         .map((row) => [row.item_id, soProposalView(row)]));
-      const items = (this.database.prepare(`SELECT * FROM attention_items${where} ORDER BY updated_at DESC`).all(...args) as IItemRow[])
-        .map((row) => itemFromRow(row, autoAnswerByItem.get(row.id) ?? null, changesByItem.get(row.id) ?? null, suggestionsByItem.get(row.id) ?? [],
-          proposalByItem.get(row.id) ?? null));
+      const itemRows = this.database.prepare(`SELECT * FROM attention_items${where} ORDER BY updated_at DESC`).all(...args) as IItemRow[];
+      const answerRows = this.database.prepare(`SELECT * FROM answers${where} ORDER BY created_at DESC`).all(...args) as IAnswerRow[];
+      const linksByItem = this.snapshotLinks(itemRows, answerRows, workspaceId);
+      const items = itemRows.map((row) => itemFromRow(row, autoAnswerByItem.get(row.id) ?? null, changesByItem.get(row.id) ?? null,
+        suggestionsByItem.get(row.id) ?? [], proposalByItem.get(row.id) ?? null, linksByItem.get(row.id) ?? NO_LINKS));
       const answersByClass = this.answersByClass(generatedAt, workspaceId);
       const autoAnswered = this.autoAnswered(generatedAt, workspaceId);
-      const answers = (this.database.prepare(`SELECT * FROM answers${where} ORDER BY created_at DESC`).all(...args) as IAnswerRow[]).map(answerFromRow);
+      const answers = answerRows.map(answerFromRow);
       const deliveries = (this.database.prepare(`SELECT * FROM deliveries${where} ORDER BY updated_at DESC`).all(...args) as IDeliveryRow[]).map(deliveryFromRow);
       const eventWhere = workspaceId ? 'WHERE workspace_id = ?' : '';
       const recentEvents = (this.database.prepare(`SELECT * FROM events ${eventWhere} ORDER BY seq DESC LIMIT 100`).all(...args) as IEventRow[]).reverse().map(eventFromRow);
@@ -895,6 +988,32 @@ export class MissionControlStore {
       };
     });
     return read();
+  };
+
+  /**
+   * Every item's links in one read (ADR-0037 amendment D2, rule 5). A link joins two items of one workspace, so the
+   * snapshot's own rows hold both ends; a row outside them (a link that an older writer left) reads as no link.
+   */
+  private snapshotLinks = (itemRows: IItemRow[], answerRows: IAnswerRow[], workspaceId?: string): Map<string, IMissionItemLinks> => {
+    const links = this.database.prepare(`SELECT * FROM mission_item_links${workspaceId ? ' WHERE workspace_id = ?' : ''} ORDER BY item_id`)
+      .all(...(workspaceId ? [workspaceId] : [])) as ILinkRow[];
+    const byItem = new Map<string, IMissionItemLinks>();
+    if (!links.length) return byItem;
+    const rowById = new Map(itemRows.map((row) => [row.id, row]));
+    const answerById = new Map(answerRows.map((row) => [row.id, row]));
+    const entry = (itemId: string): IMissionItemLinks => {
+      const current = byItem.get(itemId) ?? { ...NO_LINKS };
+      byItem.set(itemId, current);
+      return current;
+    };
+    for (const link of links) {
+      const follower = rowById.get(link.item_id);
+      const target = rowById.get(link.follows_up_item_id);
+      if (!follower || !target) continue;
+      entry(follower.id).followsUp = followsUpView(target, target.answer_id === null ? undefined : answerById.get(target.answer_id));
+      entry(target.id).followedBy = followedByView(follower);
+    }
+    return byItem;
   };
 
   /** ADR-0031 §3: answers of the last 7 UTC days (today included) per day, item class and actor kind. */
@@ -1173,7 +1292,16 @@ export class MissionControlStore {
         committed.push(this.applyOneEvent(event, requestHash, authority, options.questionMinVersion ?? 1, options.soProposals?.get(event.eventId) ?? null));
       }
       const cursor = Number((this.database.prepare('SELECT COALESCE(MAX(seq), 0) AS cursor FROM events').get() as { cursor: number }).cursor);
-      return { events: committed, cursor, replayed: allReplayed };
+      // A replay rebuilds the same answer from the stored link, so the asker reads it either way.
+      const followedUps = events.flatMap((event) => (event.type === 'attention.opened' && event.payload.followsUp !== undefined
+        ? [this.followedUpOf(event.payload.itemId)].filter((entry): entry is IMissionFollowedUp => entry !== null)
+        : []));
+      return {
+        events: committed,
+        cursor,
+        replayed: allReplayed,
+        ...(followedUps.length === 1 ? { followedUp: followedUps[0] } : followedUps.length > 1 ? { followedUps } : {}),
+      };
     });
     try {
       return transaction();
@@ -1302,8 +1430,12 @@ export class MissionControlStore {
       if (itemId.startsWith(SO_PROPOSAL_ITEM_PREFIX) !== (soProposal !== null)) {
         invalidMissionRequest(`a ${SO_PROPOSAL_ITEM_PREFIX} item opens only with its proposal record, and a record only with that item`);
       }
-      const { itemId: ignored, humanReview: reviewInput, ...question } = event.payload;
+      // `followsUp` is not a question field (ADR-0037 amendment D2, rule 1): it never reaches question_json or the hash.
+      const { itemId: ignored, humanReview: reviewInput, followsUp, ...question } = event.payload;
       void ignored;
+      const target = followsUp === undefined ? null : this.requireFollowUp({
+        workspaceId: event.workspaceId, runId: event.runId, itemId, followsUp, humanReview: reviewInput,
+      });
       const humanReview = reviewInput
         ? this.stampHumanReview(event, run, authority, now)
         : null;
@@ -1326,8 +1458,10 @@ export class MissionControlStore {
           .run(itemId, event.workspaceId, soProposal.proposerTabId, soProposal.text, soProposal.scope, soProposal.checkName, soProposal.cites, now);
       }
       this.confirmBootstrap(run.id, now);
-      return this.insertEvent(event, itemId, 1, now, requestHash,
+      const opened = this.insertEvent(event, itemId, 1, now, requestHash,
         this.attentionEventPayload(event.payload, state, candidateReason, humanReview));
+      if (target) this.writeFollowUp(target, itemId, now);
+      return opened;
     }
 
     if (!itemRow) throw new MissionControlError(404, 'not-found', `attention item ${itemId} not found`);
@@ -1411,6 +1545,112 @@ export class MissionControlStore {
         .run(now, now, delivery.id);
     }
     return this.insertEvent(event, item.id, item.revision, now, requestHash);
+  };
+
+  /**
+   * The target of a follow-up, checked against the edge cases of ADR-0037 amendment D2; a refusal throws and writes
+   * nothing. The new item must reach the owner: a candidate is not yet a question to the owner.
+   */
+  private requireFollowUp = (input: IMissionFollowUpInput): IItemRow => {
+    if (input.followsUp === input.itemId) {
+      invalidMissionRequest(`followsUp names the item itself (${input.itemId}); it must name an earlier, answered item`);
+    }
+    const target = this.itemRow(input.followsUp);
+    if (!target) throw new MissionControlError(404, 'not-found', `follow-up target ${input.followsUp} not found`);
+    // ADR-0021: the denial names neither the other workspace nor the target's state.
+    if (target.workspace_id !== input.workspaceId) {
+      throw new MissionControlError(403, 'forbidden',
+        'followsUp names an item outside this workspace: Mission Control writes are confined to the caller workspace (ADR-0021). Use coordinator notes for a cross-workspace request.');
+    }
+    const refuse = (message: string, detail: IMissionFollowUpRefusal): never => missionConflict(message, undefined, { followsUp: detail });
+    if (target.run_id !== input.runId) {
+      refuse(`follow-up target ${target.id} is outside this run: an item, its answer and its delivery belong to one run binding`, { reason: 'other-run' });
+    }
+    if (target.state === 'cancelled') {
+      refuse(`follow-up target ${target.id} was cancelled, so it has no owner answer to follow up; open the item without followsUp`, { reason: 'not-answered' });
+    }
+    if (target.state !== 'answered' && target.state !== 'resolved') {
+      refuse(`follow-up target ${target.id} is not answered yet (state ${target.state}): revise it with attention.updated; a compatible revision keeps the owner's draft`,
+        { reason: 'not-answered' });
+    }
+    const follower = this.database.prepare('SELECT item_id FROM mission_item_links WHERE follows_up_item_id = ?').pluck().get(target.id) as string | undefined;
+    if (follower !== undefined) {
+      const tip = this.chainTip(follower);
+      refuse(`follow-up target ${target.id} is already followed up by ${follower}; follow up the tip ${tip} after the owner answers it, or revise ${tip} while it is open`,
+        { reason: 'already-followed', followedBy: follower, tip });
+    }
+    if (!input.humanReview || input.humanReview.humanNeed === 'none') {
+      invalidMissionRequest('a follow-up must reach the owner: send humanReview with a humanNeed other than none (a candidate is not yet a question to the owner)');
+    }
+    return target;
+  };
+
+  /** The last item of the chain that starts at `itemId`: links point from newer to older items, so the walk ends. */
+  private chainTip = (itemId: string): string =>
+    this.database.prepare(`WITH RECURSIVE chain(id, depth) AS (
+        SELECT ?, 0
+        UNION ALL SELECT link.item_id, chain.depth + 1 FROM mission_item_links link JOIN chain ON link.follows_up_item_id = chain.id
+        WHERE chain.depth < 100000
+      ) SELECT id FROM chain ORDER BY depth DESC LIMIT 1`).pluck().get(itemId) as string;
+
+  /**
+   * The follow-up's writes after its item opened (ADR-0037 amendment D2, rule 3): the link, and for an answered target
+   * its delivery acknowledged and the target resolved by a `system:follow-up:` event. A resolved target gets the link only.
+   */
+  private writeFollowUp = (target: IItemRow, itemId: string, now: number): void => {
+    this.database.prepare('INSERT INTO mission_item_links (item_id, follows_up_item_id, workspace_id, at) VALUES (?,?,?,?)')
+      .run(itemId, target.id, target.workspace_id, now);
+    if (target.state !== 'answered') return;
+    if (target.answer_id !== null) {
+      // As `answer.acknowledged` does; the version moves, so a claim that read the old row cannot take it.
+      this.database.prepare(`UPDATE deliveries SET state='acknowledged', next_attempt_at=NULL, acknowledged_at=?, updated_at=MAX(?,updated_at+1)
+        WHERE answer_id=? AND state<>'acknowledged'`).run(now, now, target.answer_id);
+    }
+    const revision = target.revision + 1;
+    const resolution = `Followed up by ${itemId}.`;
+    this.database.prepare(`UPDATE attention_items SET revision=?, state='resolved', resolution=?, updated_at=? WHERE id=?`)
+      .run(revision, resolution, now, target.id);
+    this.insertServerEvent({
+      id: `${FOLLOW_UP_EVENT_PREFIX}${itemId}`,
+      workspaceId: target.workspace_id,
+      runId: target.run_id,
+      entityId: target.id,
+      revision,
+      type: 'attention.resolved',
+      payload: this.eventPayloadWithRouting({ itemId: target.id, resolution, followedBy: itemId, actor: 'system:follow-up' },
+        'resolved', target.candidate_reason, parseJson<TMissionHumanReview>(target.human_review_json)),
+    }, now);
+  };
+
+  /** The answer a follow-up acknowledged, for the 200 body (rule 4); null when the item follows nothing up. */
+  private followedUpOf = (itemId: string): IMissionFollowedUp | null => {
+    const link = this.database.prepare('SELECT * FROM mission_item_links WHERE item_id = ?').get(itemId) as ILinkRow | undefined;
+    const target = link ? this.itemRow(link.follows_up_item_id) : undefined;
+    if (!target) return null;
+    const view = followsUpView(target, this.answerRow(target.answer_id));
+    const resolved = this.database.prepare('SELECT 1 FROM events WHERE id = ?').get(`${FOLLOW_UP_EVENT_PREFIX}${itemId}`) !== undefined;
+    return {
+      itemId: target.id,
+      answerId: target.answer_id,
+      optionIds: view.answer?.optionIds ?? [],
+      optionLabels: view.answer?.optionLabels ?? [],
+      text: view.answer?.text ?? '',
+      resolved,
+    };
+  };
+
+  /**
+   * The question check's view of a follow-up (ADR-0037 amendment D2, rule 2): the refusal the events route would give,
+   * or null. It reads and writes nothing else.
+   */
+  followUpRefusal = (input: IMissionFollowUpInput): MissionControlError | null => {
+    try {
+      this.database.transaction(() => this.requireFollowUp(input))();
+      return null;
+    } catch (error) {
+      if (isMissionControlError(error)) return error;
+      throw error;
+    }
   };
 
   /** A paste may be in flight to the binding the run is leaving: held as uncertain, never sent again. */

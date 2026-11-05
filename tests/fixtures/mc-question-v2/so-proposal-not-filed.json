@@ -67,5 +67,7 @@
     "state": "not-filed",
     "orderId": null,
     "reason": "Filing it would make the standing orders of ws-fixture 8301 bytes, past the 8192-byte budget. Strike an order, then propose again."
-  }
+  },
+  "followsUp": null,
+  "followedBy": null
 }

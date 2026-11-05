@@ -1,4 +1,5 @@
 import { ANSWER_TYPES, effectiveAnswerType } from '@/lib/mission-question-format';
+import { answerCardUrl } from '@/components/features/mission-control/board-model';
 import { REMOVED_OPTION_LABEL, isMissionDraftEmpty } from '@/components/features/mission-control/mission-control-utils';
 import type { IMissionDraft } from '@/components/features/mission-control/mission-control-utils';
 import type {
@@ -171,4 +172,40 @@ export const hasVisibleRevision = (draft: IMissionDraft): boolean =>
 export const noticeOptionLabel = (draft: IMissionDraft, optionId: string): string => {
   const label = draft.item.options.find((option) => option.id === optionId)?.label ?? draft.notice?.labels[optionId];
   return label === undefined ? REMOVED_OPTION_LABEL : `“${label}”`;
+};
+
+/** One step back along a follow-up chain, as the new card shows it (ADR-0037 amendment D2, rule 6). */
+export interface IFollowsUpView {
+  title: string;
+  href: string;
+  /** The owner's earlier choices by label; "no option" when the answer was text alone. Null when no answer is served. */
+  choices: string | null;
+  /** The owner's earlier text; null when the answer had none or no answer is served. */
+  text: string | null;
+}
+
+/** One step forward, as the earlier card shows it; `state` is the served token, read through the item-state label map. */
+export interface IFollowedByView {
+  title: string;
+  href: string;
+  state: string;
+}
+
+const titleOr = (title: string, itemId: string): string => (title.trim() ? title : `Item ${itemId}`);
+
+export const followsUpView = (item: Pick<IMissionAttentionItem, 'followsUp'>): IFollowsUpView | null => {
+  const link = item.followsUp ?? null;
+  if (!link) return null;
+  const answer = link.answer;
+  return {
+    title: titleOr(link.title, link.itemId),
+    href: answerCardUrl(link.itemId),
+    choices: answer ? (answer.optionLabels.length ? answer.optionLabels.join(', ') : 'no option') : null,
+    text: answer && answer.text.trim() ? answer.text : null,
+  };
+};
+
+export const followedByView = (item: Pick<IMissionAttentionItem, 'followedBy'>): IFollowedByView | null => {
+  const link = item.followedBy ?? null;
+  return link ? { title: titleOr(link.title, link.itemId), href: answerCardUrl(link.itemId), state: link.state } : null;
 };
