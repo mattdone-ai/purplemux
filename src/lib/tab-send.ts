@@ -1,6 +1,6 @@
 import { isAgentPanelType } from '@/lib/agent-panel-types';
 import type { ITab, TPanelType } from '@/types/terminal';
-import type { TCliState } from '@/types/timeline';
+import type { TCliState, TStartupPrompt } from '@/types/timeline';
 
 /**
  * A prompt is pasted into a TUI composer, not streamed, so the ceiling is about
@@ -110,6 +110,8 @@ export interface ITabSendTarget {
    * the composer is empty, so the `composer-ready` gate accepts it.
    */
   waitingAtPrompt?: boolean;
+  /** The startup dialog a `startup-prompt` tab waits at (D14); absent in every other state. */
+  startupPrompt?: TStartupPrompt | null;
 }
 
 /**
@@ -152,7 +154,8 @@ export type TSendReadiness =
   | { ok: true; target: ITabSendTarget }
   | { ok: false; reason: 'tab-not-found' }
   | { ok: false; reason: 'session-not-running'; cliState: TCliState | null }
-  | { ok: false; reason: 'readiness-timeout'; cliState: TCliState | null; waitedMs: number };
+  | { ok: false; reason: 'readiness-timeout'; cliState: TCliState | null; waitedMs: number }
+  | { ok: false; reason: 'startup-prompt'; cliState: TCliState | null; startupPrompt: TStartupPrompt | null };
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -198,6 +201,12 @@ export const awaitSendReadiness = async (
       target.waitingAtPrompt === true
     ) {
       return { ok: true, target };
+    }
+
+    // A startup dialog (folder trust, external imports) never clears on its own: a wait would trade an
+    // immediate diagnosis for a deadline's worth of silence, and a paste would answer the dialog (D14).
+    if (target.cliState === 'startup-prompt') {
+      return { ok: false, reason: 'startup-prompt', cliState: target.cliState, startupPrompt: target.startupPrompt ?? null };
     }
 
     const waitedMs = now() - startedAt;
@@ -251,8 +260,8 @@ export const performTabSend = async (
 
   if (!readiness.ok) {
     if (readiness.reason === 'tab-not-found') return { status: 404, body: { error: 'tab-not-found' } };
-    // `readiness-timeout` cannot occur on this gate: there is no composer wait
-    // to time out, so a refusal here is always a dead session.
+    // `readiness-timeout` and `startup-prompt` cannot occur on this gate: it
+    // has no composer check, so a refusal here is always a dead session.
     return {
       status: 409,
       body: { error: 'agent-not-ready', cliState: readiness.cliState, detail: 'session-not-running' },

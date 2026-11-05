@@ -17,6 +17,7 @@ import { isAgentPanelType } from '@/lib/agent-panel-types';
 import { getLedgerStore } from '@/lib/ledger-store';
 import { appendDelivered } from '@/lib/tab-event-router';
 import { createLogger } from '@/lib/logger';
+import { startupPromptFix, startupPromptLabel } from '@/lib/startup-prompt';
 
 const log = createLogger('tab-send');
 
@@ -92,11 +93,13 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
       findTarget: async (wsId, id) => {
         const found = await findTab(wsId, id);
         if (!found) return null;
+        const live = getStatusManager().getAllForClient()[id];
         return {
           sessionName: found.tab.sessionName,
           panelType: found.tab.panelType,
-          cliState: resolveTabCliState(found.tab, getStatusManager().getAllForClient()[id]),
+          cliState: resolveTabCliState(found.tab, live),
           waitingAtPrompt: getStatusManager().isWaitingAtPrompt(id),
+          startupPrompt: live?.startupPrompt?.kind ?? null,
         };
       },
       hasSession: hasSessionOrUnreachable,
@@ -109,6 +112,18 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
 
   if (!readiness.ok) {
     if (readiness.reason === 'tab-not-found') return res.status(404).json(TAB_NOT_FOUND_BODY);
+    if (readiness.reason === 'startup-prompt') {
+      // At once, with nothing typed: a paste would answer the dialog (D14).
+      return res.status(409).json({
+        error: 'agent-not-ready',
+        code: 'startup-prompt',
+        tabId,
+        cliState: readiness.cliState,
+        startupPrompt: readiness.startupPrompt,
+        startupPromptLabel: startupPromptLabel(readiness.startupPrompt),
+        detail: startupPromptFix(readiness.startupPrompt),
+      });
+    }
     return res.status(409).json({
       error: 'agent-not-ready',
       code: readiness.reason,

@@ -3,13 +3,24 @@ import { renderPaneResult } from '@/lib/pane-suggestions';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { TComposerReading } from '@/types/fleet-status';
 import type { TPanelType } from '@/types/terminal';
+import type { TStartupPrompt } from '@/types/timeline';
 
 // The checks an unattended sender runs before typing into an agent's
 // composer (ADR-0008, ADR-0012). Extracted from Mission Control's dispatch so
 // Mission Control and the tab inbox ask the same questions in the same order
 // and name a refusal the same way.
 
-const tail = (content: string, lines = 24): string => content.split('\n').slice(-lines).join('\n');
+/**
+ * The last `lines` lines of a capture, after the blank rows under the content: a pane taller than what the
+ * agent drew pads it with empty rows (measured: Claude Code 2.1.318 at 120x40 drew its composer with 26 blank
+ * rows below it), and those rows would push the composer out of the window.
+ */
+const tail = (content: string, lines = 24): string => {
+  const all = content.split('\n');
+  let end = all.length;
+  while (end > 0 && all[end - 1].replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '').trim() === '') end -= 1;
+  return all.slice(Math.max(0, end - lines), end).join('\n');
+};
 
 const composerMarker = (panelType: TPanelType | undefined): string | null => (panelType === 'codex-cli'
   ? '›'
@@ -50,6 +61,40 @@ export const paneShowsEmptyComposer = (panelType: TPanelType | undefined, conten
   const plain = withoutSuggestions(panelType, content);
   if (parsePermissionOptions(tail(plain)).options.length > 0) return false;
   return hasEmptyAgentComposer(panelType, plain);
+};
+
+/**
+ * The Claude Code startup dialogs that stop a tab before any hook runs (D14). Texts measured on Claude Code
+ * 2.1.318 (the pane fixtures in tests/unit/lib/fixtures/startup-prompt/); the older trust wording
+ * ("Do you trust the files in this folder?", numbered options) is kept. A dialog counts only with its
+ * heading AND one of its own option lines, at line start, and no empty composer under it.
+ */
+const STARTUP_PROMPTS: ReadonlyArray<{ kind: TStartupPrompt; heading: RegExp; option: RegExp }> = [
+  {
+    kind: 'folder-trust',
+    heading: /^[ \t]*(?:Accessing workspace:|Do you trust the files in this folder\?)/m,
+    option: /^[ \t]*(?:❯[ \t]*)?(?:\d+\.[ \t]*)?(?:Yes, I trust this folder|Yes, proceed|No, exit)\b/m,
+  },
+  {
+    kind: 'external-imports',
+    heading: /^[ \t]*Allow external CLAUDE\.md file imports\?/m,
+    option: /^[ \t]*(?:❯[ \t]*)?(?:\d+\.[ \t]*)?(?:Yes, allow external imports|No, disable external imports)\b/m,
+  },
+];
+
+/** How far up the startup-dialog read looks: the trust dialog is 15 lines, plus a long wrapped path. */
+const STARTUP_PROMPT_SCAN_LINES = 40;
+
+/** The startup dialog a Claude pane shows, or null. Only Claude Code has these dialogs. */
+export const paneStartupPrompt = (panelType: TPanelType | undefined, content: string): TStartupPrompt | null => {
+  if (panelType !== 'claude-code') return null;
+  const plain = tail(withoutSuggestions(panelType, content), STARTUP_PROMPT_SCAN_LINES);
+  // A dialog that was answered is erased; an empty composer below old text means the agent is past it.
+  if (hasEmptyAgentComposer(panelType, plain)) return null;
+  for (const prompt of STARTUP_PROMPTS) {
+    if (prompt.heading.test(plain) && prompt.option.test(plain)) return prompt.kind;
+  }
+  return null;
 };
 
 /** How far up a fleet read looks for the composer line: a typed multi-line brief wraps far above 12 lines. */

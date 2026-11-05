@@ -49,6 +49,7 @@ State of the work in progress inside the Claude CLI. Only changed by determinist
 | `needs-input` | Permission prompt / awaiting user input | `notification` hook |
 | `unknown` | Was `busy` before a server restart, recovery not finished | Awaiting `resolveUnknown` |
 | `inactive` | Initial state when the Claude process is not running | Default on tab creation |
+| `startup-prompt` | The Claude process runs but waits at a startup dialog no hook reports: folder trust or external CLAUDE.md imports (D14). `startupPrompt` names it (`folder-trust` / `external-imports`) with `since` | The readiness pane probe (below). Runtime only: the layout stores `inactive` |
 | `cancelled` | User is deleting the tab | Client-only local state |
 
 ### Transition Rules (`deriveStateFromEvent`)
@@ -111,6 +112,7 @@ When the user selects an option on a permission prompt, Claude resumes work but 
 | `unknown` | `unknown` | Gray dot (static) |
 | `idle` | `idle` | None |
 | `inactive` | `idle` | None |
+| `startup-prompt` | `needs-input` | Amber dot (pulse); counts toward attention |
 | `cancelled` | (component-specific) | — |
 
 ### Fleet status (ADR-0023)
@@ -301,8 +303,16 @@ runs only while the agent runs, restarts on every launch (`markAgentLaunch`), an
 capture is the pane at its own size with escapes (no resize). If it shows an empty composer and no
 option list (`paneShowsEmptyComposer`, the check the inbox runs, with the dim suggestion or
 placeholder removed), and the tab is still `inactive` with no event since the probe began, the poll
-fires a synthetic `session-start` and logs `readiness: pane-probe`. A trust prompt (`❯ No, exit`) and
-the first-run picker (`❯ 2. Dark mode`) stay `inactive`. Fixtures: `tests/fixtures/panes/`. A fresh
+fires a synthetic `session-start` and logs `readiness: pane-probe`. The first-run picker
+(`❯ 2. Dark mode`) stays `inactive`. A folder-trust or external-imports dialog (`paneStartupPrompt`: the
+dialog heading and one of its option lines, with no empty composer under them) moves the tab to
+`startup-prompt` silently and with no orchestrator nudge (story 05, D14). The probe keeps reading a
+`startup-prompt` tab: another dialog updates `startupPrompt`, an empty composer is the synthetic
+`session-start`, any other screen is `inactive` again (no nudge), and an agent that exited (`No, exit`)
+is `inactive` through the agent-gone check. `tab send` refuses a `startup-prompt` tab at once (409
+`startup-prompt`, CLI exit 5) and types nothing; the web shows it as `needs-input`, the fleet panel as
+"at a startup prompt", flagged at once. Blank rows under the drawn content are trimmed before every
+window read (a 120x40 pane measured 26). Fixtures: `tests/fixtures/panes/`. A fresh
 Claude's composer placeholder (`Try "…"`) is dim, so a capture without escapes reads it as typed text.
 
 A session id the poll detects (`detectActiveSession`) is persisted to the layout when no hook bound

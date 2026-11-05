@@ -57,6 +57,108 @@ export const buildRemoteClaudeCommand = (opts: {
   return parts.join(' ');
 };
 
+/**
+ * The remote half of the pre-trust (D14, ruling R-05, story 05 consult ruling): the same keys as
+ * workspace-trust.ts, written into the remote user's `~/.claude.json` for the tab's cwd by an atomic
+ * read-modify-write (a temporary in the same directory, then one rename). A remote tab has no claude home
+ * of its own (ADR-0022), so its Claude reads that file. Python, not node: `ssh … sh -s` reads no login
+ * profile, and on the pool hosts `node` is on PATH only in a login shell (measured on mdserver1). Exit 0:
+ * written or nothing to change; 3: the cwd is outside the workspace directory; 4: the file is unreadable
+ * and is left as it is. The create script ignores every exit: a lost seed shows the dialog, which the
+ * status reader reports as `startup-prompt`.
+ */
+export const REMOTE_TRUST_SEED_SCRIPT = `import json, os, sys, tempfile
+TRUST_KEYS = ('hasTrustDialogAccepted', 'hasClaudeMdExternalIncludesApproved', 'hasClaudeMdExternalIncludesWarningShown')
+
+def within(child, root):
+    return child == root or child.startswith(root.rstrip('/') + '/')
+
+def main_repository_root(git_root):
+    dot_git = os.path.join(git_root, '.git')
+    if os.path.isdir(dot_git) and not os.path.islink(dot_git):
+        return git_root
+    try:
+        with open(dot_git, encoding='utf-8') as handle:
+            pointer = next((line[len('gitdir:'):].strip() for line in handle if line.startswith('gitdir:')), '')
+        if not pointer:
+            return None
+        git_dir = os.path.join(git_root, pointer)
+        with open(os.path.join(git_dir, 'commondir'), encoding='utf-8') as handle:
+            common = handle.read().strip()
+    except OSError:
+        return None
+    if not common:
+        return None
+    common_dir = os.path.realpath(os.path.join(git_dir, common))
+    return os.path.dirname(common_dir) if os.path.basename(common_dir) == '.git' else None
+
+def main(cwd, workspace_dir):
+    abs_cwd, real_cwd = os.path.abspath(cwd), os.path.realpath(cwd)
+    abs_ws, real_ws = os.path.abspath(workspace_dir), os.path.realpath(workspace_dir)
+    if not (within(real_cwd, real_ws) or within(abs_cwd, abs_ws)):
+        return 3
+    keys = {abs_cwd, real_cwd}
+    if within(real_cwd, real_ws):
+        current = real_cwd
+        while True:
+            if os.path.lexists(os.path.join(current, '.git')):
+                keys.add(current)
+                main_root = main_repository_root(current)
+                if main_root and within(main_root, real_ws):
+                    keys.add(main_root)
+                break
+            parent = os.path.dirname(current)
+            if current == real_ws or parent == current or not within(parent, real_ws):
+                break
+            current = parent
+    target = os.path.realpath(os.path.join(os.path.expanduser('~'), '.claude.json'))
+    try:
+        with open(target, encoding='utf-8') as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError):
+        return 4
+    if not isinstance(data, dict):
+        return 4
+    projects = data.get('projects')
+    if not isinstance(projects, dict):
+        projects = {}
+    changed = False
+    for key in sorted(keys):
+        entry = projects.get(key)
+        if entry is not None and not isinstance(entry, dict):
+            continue
+        following = dict(entry or {})
+        declined = following.get('hasClaudeMdExternalIncludesApproved') is False and following.get('hasClaudeMdExternalIncludesWarningShown') is True
+        touched = entry is None
+        for name in TRUST_KEYS:
+            if following.get(name) is True or (declined and name == 'hasClaudeMdExternalIncludesApproved'):
+                continue
+            following[name] = True
+            touched = True
+        if touched:
+            projects[key] = following
+            changed = True
+    if not changed:
+        return 0
+    data['projects'] = projects
+    fd, temporary = tempfile.mkstemp(prefix='.claude.json.', dir=os.path.dirname(target))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+    except BaseException:
+        os.unlink(temporary)
+        raise
+    return 0
+
+sys.exit(main(sys.argv[1], sys.argv[2]))
+`;
+
+export const REMOTE_TRUST_SEED_RELATIVE = 'trust-seed.py';
+
 export interface IRemoteKitFile {
   /** Relative to the kit directory; `[A-Za-z0-9._/-]` only. */
   path: string;
@@ -102,6 +204,8 @@ export const remoteKitFiles = (opts: {
   workspaceId?: string;
   prompt: string | null;
   tabEnv?: { tabId: string; content: string };
+  /** Ship the pre-trust script (a tab whose cwd is inside a workspace directory). */
+  trustSeed?: boolean;
 }): IRemoteKitFile[] => [
   { path: 'tmux.conf', content: opts.tmuxConf, mode: 0o600 },
   { path: 'status-hook.sh', content: REMOTE_HOOK_SCRIPT_CONTENT, mode: 0o700 },
@@ -115,11 +219,20 @@ export const remoteKitFiles = (opts: {
   // Always present for a workspace tab: the launch names it whether or not this host wrote one yet.
   ...(opts.workspaceId ? [{ path: remotePromptRelative(opts.workspaceId), content: opts.prompt ?? '', mode: 0o600 as const }] : []),
   ...(opts.tabEnv ? [{ path: remoteTabEnvRelative(opts.tabEnv.tabId), content: opts.tabEnv.content, mode: 0o600 as const }] : []),
+  ...(opts.trustSeed ? [{ path: REMOTE_TRUST_SEED_RELATIVE, content: REMOTE_TRUST_SEED_SCRIPT, mode: 0o600 as const }] : []),
 ];
+
+/**
+ * The create script's pre-trust line: run only when python3 exists, every failure ignored, so a seed never
+ * blocks a launch (story 05 AC 2). Runs after the kit files land and before the session starts.
+ */
+export const remoteTrustSeedLine = (trust: { cwd: string; workspaceDirectory: string }): string =>
+  `if command -v python3 >/dev/null 2>&1; then python3 "$d/${REMOTE_TRUST_SEED_RELATIVE}" ${shQuote(trust.cwd)} ${shQuote(trust.workspaceDirectory)} >/dev/null 2>&1 || :; fi`;
 
 /**
  * One `sh -s` script: refuse a session name that exists (exit 17, before any
  * file is written), write every kit file (base64, a temporary, one rename),
+ * pre-trust the cwd when it is inside a workspace directory (fail-open),
  * create the session with the kit's tmux.conf and tag it with this call's nonce
  * in the same tmux command, and re-read the config into a server that already ran. Fed on stdin, so file
  * contents and secrets never reach a command line.
@@ -132,7 +245,12 @@ export const buildRemoteCreateScript = (opts: {
   rows: number;
   cwd?: string;
   launch: string;
+  /** Pre-trust the cwd (D14): the kit files must include the trust-seed script. */
+  trust?: { cwd: string; workspaceDirectory: string };
 }): string => {
+  if (opts.trust && !opts.files.some((file) => file.path === REMOTE_TRUST_SEED_RELATIVE)) {
+    throw new Error(`a pre-trust needs the kit file ${REMOTE_TRUST_SEED_RELATIVE}`);
+  }
   const dirs = new Set(['bin', 'tabs', 'hook-spool']);
   for (const file of opts.files) {
     if (!SAFE_RELATIVE.test(file.path) || file.path.split('/').includes('..')) throw new Error(`unsafe kit path: ${file.path}`);
@@ -148,6 +266,7 @@ export const buildRemoteCreateScript = (opts: {
     `mkdir -p ${[...dirs].map((dir) => `"$d/${dir}"`).join(' ')}`,
     'put() { printf \'%s\' "$2" | base64 -d > "$d/$1.tmp.$$"; chmod "$3" "$d/$1.tmp.$$"; mv -f "$d/$1.tmp.$$" "$d/$1"; }',
     ...opts.files.map((file) => `put ${shQuote(file.path)} ${shQuote(Buffer.from(file.content).toString('base64'))} ${file.mode.toString(8)}`),
+    ...(opts.trust ? [remoteTrustSeedLine(opts.trust)] : []),
     [
       shQuote('tmux'), shQuote('-u'), shQuote('-L'), sock, shQuote('-f'), '"$d/tmux.conf"',
       ...['new-session', '-d', '-s', opts.session, '-x', String(opts.cols), '-y', String(opts.rows), ...(opts.cwd ? ['-c', opts.cwd] : [])].map(shQuote),

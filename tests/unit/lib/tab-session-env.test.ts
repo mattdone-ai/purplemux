@@ -26,6 +26,7 @@ vi.mock('@/lib/grok-home', () => ({ ensureWorkspaceGrokHome: vi.fn(async () => '
 vi.mock('@/lib/providers/grok/hook-config', () => ({ writeGrokHookFile: vi.fn(async () => {}) }));
 vi.mock('@/lib/workspace-home', () => ({
   ensureWorkspaceClaudeHome: vi.fn(async () => '/fake/claude-home'),
+  workspaceDirectories: vi.fn(async () => []),
   workspaceIdFromSessionName: (name: string) => name.match(/^pt-(ws-.+?)-pane-/)?.[1] ?? null,
 }));
 
@@ -84,6 +85,15 @@ describe('a tab created after this change carries its identity', () => {
     expect(env.PMUX_TAB_TOKEN).toMatch(/^[0-9a-f]{64}$/);
     expect(resolveTabToken(env.PMUX_TAB_TOKEN)).toMatchObject({ tabId: 'tab-t1', record: { workspaceId: 'ws-a', sessionName: SESSION } });
     expect(env.PMUX_TOKEN).toBe(getWorkspaceToken('ws-a'));
+  });
+
+  it('hands the tab cwd to the claude home, which pre-trusts it inside the workspace (story 05, D14)', async () => {
+    const { createSession } = await import('@/lib/tmux');
+    const { ensureWorkspaceClaudeHome } = await import('@/lib/workspace-home');
+    vi.mocked(ensureWorkspaceClaudeHome).mockClear();
+    await createSession(SESSION, 80, 24, mockHome.value, { workspaceId: 'ws-a', tabId: 'tab-t1' });
+    await createSession(SESSION, 80, 24, undefined, { workspaceId: 'ws-a', tabId: 'tab-t1' });
+    expect(vi.mocked(ensureWorkspaceClaudeHome).mock.calls).toEqual([['ws-a', mockHome.value], ['ws-a', undefined]]);
   });
 
   it('gives a recreated session of the same tab the same token', async () => {

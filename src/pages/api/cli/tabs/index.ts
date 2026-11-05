@@ -20,7 +20,8 @@ import { RemoteHostError, isValidRemoteHostName, originName, readRemoteHosts, re
 import fs from 'fs/promises';
 import path from 'path';
 import type { TPanelType, TTabRole } from '@/types/terminal';
-import type { TCliState } from '@/types/timeline';
+import type { TCliState, TStartupPrompt } from '@/types/timeline';
+import { startupPromptBody } from '@/lib/startup-prompt';
 import type { ILastEvent } from '@/types/status';
 import { remoteHostUnreachableBody } from '@/lib/cli-error';
 import { WipCapError, admitAgentCreate, auditOverCap } from '@/lib/tab-cap';
@@ -109,6 +110,10 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       agentSessionId: string | null;
       agentLaunchConfig?: { model?: string; effort?: string };
       cliState: TCliState | null;
+      /** A `startup-prompt` tab's dialog, its label and since when (D14); absent in every other state. */
+      startupPrompt?: TStartupPrompt | null;
+      startupPromptLabel?: string;
+      startupPromptSince?: number | null;
       lastEvent: ILastEvent | null;
       busySince: number | null;
       reportsTo: string | null;
@@ -158,6 +163,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
             agentSessionId: provider?.readSessionId(tab) ?? null,
             agentLaunchConfig: tab.agentLaunchConfig,
             cliState: liveStatus[tab.id]?.cliState ?? tab.cliState ?? null,
+            ...startupPromptBody(liveStatus[tab.id]?.cliState, liveStatus[tab.id]?.startupPrompt),
             lastEvent: liveStatus[tab.id]?.lastEvent ?? null,
             busySince: liveStatus[tab.id]?.busySince ?? null,
             reportsTo: tab.reportsTo ?? null,

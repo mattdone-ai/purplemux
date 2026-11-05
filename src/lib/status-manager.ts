@@ -19,7 +19,7 @@ import { createRateLimitsWatcher } from '@/lib/rate-limits-watcher';
 import { createClaudeUsagePoller } from '@/lib/claude-usage-poller';
 import { createLogger } from '@/lib/logger';
 import { capturePaneAtWidth } from '@/lib/capture-at-width';
-import { paneShowsEmptyComposer } from '@/lib/composer-readiness';
+import { paneShowsEmptyComposer, paneStartupPrompt } from '@/lib/composer-readiness';
 import { isCodexTuiReadyContent } from '@/lib/codex-tui-ready-detector';
 import { CODEX_PROVIDER_ID } from '@/lib/providers/codex';
 import { GROK_PROVIDER_ID } from '@/lib/providers/grok';
@@ -31,8 +31,8 @@ import { cacheCodexRateLimitsFromJsonl } from '@/lib/codex-rate-limits-cache';
 import { parsePermissionOptions } from '@/lib/permission-prompt';
 import type { IPaneInfo } from '@/lib/tmux';
 import type { ITab, IWorkspace, TPanelType } from '@/types/terminal';
-import type { TCliState } from '@/types/timeline';
-import type { ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
+import type { TCliState, TStartupPrompt } from '@/types/timeline';
+import type { IStartupPromptReading, ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
 import { addStandup, readAllLatestStandups, readLatestStandupEvidence } from '@/lib/standup-store';
 import { buildNudgeMessage, buildHeartbeatMessage, nudgeKindForTransition, MAX_NUDGE_HISTORY, KICKOFF_FALLBACK_DELAY_MS, ORCH_IDLE_HEARTBEAT_MS, ORCH_MAX_HEARTBEATS } from '@/lib/orchestration';
 import { getSignalEngine } from '@/lib/signal-engine';
@@ -178,7 +178,18 @@ export const READINESS_PROBE_AFTER_MS = 8_000;
 // Claude only. grok-cli joins once a real grok pane is pinned as a fixture
 // (story 30 F8): its `[›❯>]` marker also matches a bare `>` line.
 const PANE_PROBE_PANELS: ReadonlySet<TPanelType> = new Set<TPanelType>(['claude-code']);
-const AGENT_GUARDED_STATES: Set<TCliState> = new Set(['busy', 'idle', 'needs-input', 'ready-for-review']);
+/**
+ * A persisted state as a restart reads it: `busy` is unknown until a hook speaks, and `startup-prompt` (runtime
+ * only, D14) is `inactive` until the pane probe reads the dialog again.
+ */
+const restoredCliState = (persisted: TCliState): TCliState => (persisted === 'busy'
+  ? 'unknown'
+  : persisted === 'startup-prompt' ? 'inactive' : persisted);
+
+/** What the Claude pane probe saw: an empty composer, a startup dialog, another screen, or no look yet. */
+type TPaneProbeReading = 'ready' | TStartupPrompt | 'other' | 'unread';
+
+const AGENT_GUARDED_STATES: Set<TCliState> = new Set(['busy', 'idle', 'needs-input', 'ready-for-review', 'startup-prompt']);
 // tmux set-titles emits "<cmd>|<path>" once a shell takes over the pane.
 // An agent CLI normally writes its own title (no pipe), so this regex
 // distinguishes "agent gone" from "agent rewrote title" without a process call.
@@ -614,7 +625,7 @@ export class StatusManager {
         const provider = getProviderByPanelType(tab.panelType);
         const detected = await this.readTabMetadata(paneInfo, provider, tab);
         const persisted: TCliState = (tab.cliState as TCliState | undefined) ?? 'idle';
-        const cliState: TCliState = persisted === 'busy' ? 'unknown' : persisted;
+        const cliState: TCliState = restoredCliState(persisted);
 
         const { terminalStatus, listeningPorts } = provider
           ? { terminalStatus: 'idle' as const, listeningPorts: [] as number[] }
@@ -1022,7 +1033,7 @@ export class StatusManager {
 
         if (!existing) {
           const persisted: TCliState = (tab.cliState as TCliState | undefined) ?? 'idle';
-          const initialState: TCliState = persisted === 'busy' ? 'unknown' : persisted;
+          const initialState: TCliState = restoredCliState(persisted);
           const detected = await this.readTabMetadata(paneInfo, provider, tab);
           // lastEvent는 메모리 전용이라 재시작 시 유실. persisted needs-input을 복원할 때는
           // 클라이언트 ack가 seq=0과 매칭할 baseline이 필요하므로 합성한다.
@@ -1185,15 +1196,20 @@ export class StatusManager {
           }
         }
 
-        if (existing.cliState !== 'inactive') {
+        if (existing.cliState !== 'inactive' && existing.cliState !== 'startup-prompt') {
           this.inactiveSeenAt.delete(tab.id);
         } else if (provider && existing.panelType && PANE_PROBE_PANELS.has(existing.panelType)) {
           const seq = existing.eventSeq;
-          if (await this.checkAgentPaneReady(tab.id, existing, now, checkAgentRunning)
-              && this.stillInactiveAt(tab.id, existing, seq)) {
+          const probedState = existing.cliState;
+          const reading = await this.checkAgentPaneReady(tab.id, existing, now, checkAgentRunning);
+          if (reading === 'ready' && this.stillAt(tab.id, existing, probedState, seq)) {
             this.inactiveSeenAt.delete(tab.id);
             hookLog.info({ tabId: tab.id, panelType: existing.panelType }, 'readiness: pane-probe — synthetic session-start');
             this.updateTabFromHook(existing.tmuxSession, 'session-start');
+            continue;
+          }
+          if (reading !== 'ready' && reading !== 'unread' && this.stillAt(tab.id, existing, probedState, seq)
+              && this.applyStartupPromptReading(tab.id, existing, reading, now)) {
             continue;
           }
         }
@@ -1668,6 +1684,7 @@ export class StatusManager {
         agentSessionId: entry.agentSessionId,
         compactingSince: entry.compactingSince,
         permissionRequest: entry.permissionRequest,
+        startupPrompt: entry.startupPrompt ?? null,
         lastEvent: entry.lastEvent,
         eventSeq: entry.eventSeq,
         turnEnd: entry.turnEnd ?? null,
@@ -1681,7 +1698,12 @@ export class StatusManager {
     entry: ITabStatusEntry,
     newState: TCliState,
     /** `nudge: null` keeps the human alert and sends the orchestrator nothing (a stop with no end line, L49). */
-    opts: { silent?: boolean; nudge?: { kind: TOrchestrationNudgeKind; detail: string } | null } = {},
+    opts: {
+      silent?: boolean;
+      nudge?: { kind: TOrchestrationNudgeKind; detail: string } | null;
+      /** The dialog of a move to `startup-prompt` (D14); every other state clears it. */
+      startupPrompt?: IStartupPromptReading;
+    } = {},
   ): void {
     const prevState = entry.cliState;
     if (prevState === newState) {
@@ -1690,6 +1712,7 @@ export class StatusManager {
     }
     const prevBusySince = entry.busySince;
     entry.cliState = newState;
+    entry.startupPrompt = newState === 'startup-prompt' ? opts.startupPrompt ?? null : null;
     // The agent process is gone: its halt went with it.
     if (newState === 'inactive' && entry.turnError?.class === 'usage-limit') this.closeTurnErrorEpisode(entry, 'agent-exited');
     entry.readyForReviewAt = newState === 'ready-for-review' ? Date.now() : null;
@@ -2595,46 +2618,76 @@ export class StatusManager {
   }
 
   /**
-   * The Claude/Grok readiness fallback (story 17): `inactive` for longer than
+   * The Claude/Grok readiness fallback (story 17): `inactive` (or `startup-prompt`) for longer than
    * READINESS_PROBE_AFTER_MS, the agent process running, and the pane showing an
-   * empty composer with no option list over it. A trust prompt or a first-run
-   * picker is not ready. Never inferred from a persisted `idle` (no process check).
+   * empty composer with no option list over it: `ready`. A trust or imports dialog
+   * is not ready: its kind (D14). A first-run picker or any other screen: `other`.
+   * No look at the pane (too early, no agent process): `unread`. Never inferred
+   * from a persisted `idle` (no process check).
    */
   private async checkAgentPaneReady(
     tabId: string,
     entry: ITabStatusEntry,
     now: number,
     checkAgentRunning: () => Promise<boolean>,
-  ): Promise<boolean> {
+  ): Promise<TPaneProbeReading> {
     // The clock runs only while the agent runs: a tab idling at a shell does not
     // age it, and a relaunch typed at the shell starts it again (review r1: a
     // stale clock probed a booting TUI at +700 ms). A launch through
     // markAgentLaunch is held off by the launch-stamp wait below.
     if (!(await checkAgentRunning())) {
       this.inactiveSeenAt.delete(tabId);
-      return false;
+      return 'unread';
     }
     const since = this.inactiveSeenAt.get(tabId);
     if (since === undefined) {
       this.inactiveSeenAt.set(tabId, now);
-      return false;
+      return 'unread';
     }
-    if (now - since < READINESS_PROBE_AFTER_MS) return false;
+    if (now - since < READINESS_PROBE_AFTER_MS) return 'unread';
     const launch = entry.lastResumeOrStartedAt;
-    if (launch !== undefined && now - launch < READINESS_PROBE_AFTER_MS) return false;
+    if (launch !== undefined && now - launch < READINESS_PROBE_AFTER_MS) return 'unread';
     // The pane at its own size: the marker check needs no width, and a resize
     // would pause a narrow viewer on every poll while a trust prompt waits.
     const content = await capturePaneContent(entry.tmuxSession, { escapes: true });
-    return !!content && paneShowsEmptyComposer(entry.panelType, content);
+    if (!content) return 'other';
+    if (paneShowsEmptyComposer(entry.panelType, content)) return 'ready';
+    return paneStartupPrompt(entry.panelType, content) ?? 'other';
   }
 
   /**
-   * After a probe's awaits: the tab is still this entry, still inactive, and no
+   * A probe that read the pane, in `inactive` or `startup-prompt` (D14): a startup dialog moves the tab to
+   * `startup-prompt` (or names the new dialog); any other screen moves a `startup-prompt` tab back to
+   * `inactive`. Silent, and no orchestrator nudge: the agent did not exit. True when the state changed.
+   */
+  private applyStartupPromptReading(tabId: string, entry: ITabStatusEntry, reading: TStartupPrompt | 'other', now: number): boolean {
+    if (reading === 'other') {
+      if (entry.cliState !== 'startup-prompt') return false;
+      hookLog.info({ tabId }, 'readiness: startup prompt gone — back to inactive');
+      this.applyCliState(tabId, entry, 'inactive', { silent: true, nudge: null });
+    } else {
+      if (entry.cliState === 'startup-prompt' && entry.startupPrompt?.kind === reading) return false;
+      hookLog.info({ tabId, startupPrompt: reading }, 'readiness: the agent waits at a startup prompt');
+      if (entry.cliState === 'startup-prompt') entry.startupPrompt = { kind: reading, since: now };
+      else this.applyCliState(tabId, entry, 'startup-prompt', { silent: true, nudge: null, startupPrompt: { kind: reading, since: now } });
+    }
+    this.persistToLayout(entry);
+    this.broadcastUpdate(tabId, entry);
+    return true;
+  }
+
+  /**
+   * After a probe's awaits: the tab is still this entry, still in the probed state, and no
    * event arrived meanwhile. A prompt-submit or notification in that window must
    * not be overwritten by the synthetic session start (a false turn end).
    */
+  private stillAt(tabId: string, entry: ITabStatusEntry, probedState: TCliState, seq: number | undefined): boolean {
+    return this.tabs.get(tabId) === entry && entry.cliState === probedState && entry.eventSeq === seq;
+  }
+
+  /** As {@link stillAt} for an `inactive` tab (the Codex TUI detector). */
   private stillInactiveAt(tabId: string, entry: ITabStatusEntry, seq: number | undefined): boolean {
-    return this.tabs.get(tabId) === entry && entry.cliState === 'inactive' && entry.eventSeq === seq;
+    return this.stillAt(tabId, entry, 'inactive', seq);
   }
 
   /** A hook or launch bound the session: the poll no longer owns it, and a write in flight does not reclaim it. */
@@ -3383,7 +3436,9 @@ export class StatusManager {
   }
 
   private persistToLayout(entry: ITabStatusEntry): void {
-    updateTabCliStatus(entry.tmuxSession, entry.cliState, entry.dismissedAt).catch(() => {});
+    // `startup-prompt` is runtime only (D14): the probe reads it again after a restart.
+    const persisted = entry.cliState === 'startup-prompt' ? 'inactive' : entry.cliState;
+    updateTabCliStatus(entry.tmuxSession, persisted, entry.dismissedAt).catch(() => {});
   }
 
   private broadcastUpdate(tabId: string, entry: ITabStatusEntry, exclude?: WebSocket): void {
@@ -3409,6 +3464,7 @@ export class StatusManager {
       agentSessionId: entry.agentSessionId,
       compactingSince: entry.compactingSince,
       permissionRequest: entry.permissionRequest,
+      startupPrompt: entry.startupPrompt ?? null,
       lastEvent: entry.lastEvent,
       eventSeq: entry.eventSeq,
     };

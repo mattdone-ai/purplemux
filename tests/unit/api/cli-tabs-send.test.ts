@@ -21,7 +21,10 @@ const cliUtils = vi.hoisted(() => ({
   ),
 }));
 
-const live = vi.hoisted(() => ({ entries: {} as Record<string, { cliState: TCliState }>, waiting: new Set<string>() }));
+const live = vi.hoisted(() => ({
+  entries: {} as Record<string, { cliState: TCliState; startupPrompt?: { kind: 'folder-trust' | 'external-imports'; since: number } | null }>,
+  waiting: new Set<string>(),
+}));
 const tabEvents = vi.hoisted(() => ({
   route: vi.fn(async (_event: unknown) => ({ class: 'digest', delivered: false, seq: 1, duplicate: false })),
 }));
@@ -252,6 +255,32 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
     expect((response.body as { waitedMs: number }).waitedMs).toBeLessThan(50);
     expect(delivery.deliverPrompt).not.toHaveBeenCalled();
   });
+
+  it.each(['folder-trust', 'external-imports'] as const)(
+    'refuses a tab at the %s startup prompt at once, with the dialog and the fix, and types nothing (story 05, D14)',
+    async (kind) => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith('inactive')));
+      live.entries = { [TAB_ID]: { cliState: 'startup-prompt', startupPrompt: { kind, since: 1 } } };
+      const started = Date.now();
+
+      // The default 60 s budget: the refusal must not wait any of it.
+      const response = await call({ content: 'here is your brief' });
+
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(response.statusCode).toBe(409);
+      const label = kind === 'folder-trust' ? 'the folder-trust prompt' : 'the external CLAUDE.md imports prompt';
+      expect(response.body).toEqual({
+        error: 'agent-not-ready',
+        code: 'startup-prompt',
+        tabId: TAB_ID,
+        cliState: 'startup-prompt',
+        startupPrompt: kind,
+        startupPromptLabel: label,
+        detail: `the agent waits at ${label}: answer it in the tab, or create the tab with --cwd under a workspace directory, which purplemux pre-trusts`,
+      });
+      expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it.each<TCliState>(['busy', 'inactive', 'unknown', 'cancelled'])(
     'refuses a send while %s',

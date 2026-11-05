@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { createLogger } from '@/lib/logger';
+import { resolveTrustTargets, trustedProjectEntry } from '@/lib/workspace-trust';
 
 const log = createLogger('workspace-home');
 
@@ -185,8 +186,11 @@ const writeJsonAtomic = async (file: string, data: unknown): Promise<void> => {
  * Entries are merged, never overwritten: a directory the workspace already knows
  * about keeps whatever it has learned, and a re-rooted workspace picks up the
  * decision for its new directory on the next launch.
+ *
+ * The tab's cwd, when it is a workspace directory or under one, is pre-trusted
+ * (D14, ruling R-05): see workspace-trust.ts. An owner decision stays.
  */
-const seedProjectDecisions = async (home: string, directories: string[]): Promise<void> => {
+export const seedProjectDecisions = async (home: string, directories: string[], cwd?: string): Promise<void> => {
   const target = path.join(home, '.claude.json');
   const current = await readJson(target);
   const source = await readJson(CLAUDE_STATE_FILE);
@@ -212,6 +216,16 @@ const seedProjectDecisions = async (home: string, directories: string[]): Promis
     if (Object.keys(carried).length === 0) continue;
     projects[dir] = carried;
     changed = true;
+  }
+  const trust = cwd ? await resolveTrustTargets(cwd, directories) : null;
+  if (trust) {
+    const inherited = sourceProjects[trust.workspaceDirectory] ?? sourceProjects[path.resolve(trust.workspaceDirectory)];
+    for (const key of trust.keys) {
+      const next = trustedProjectEntry(projects[key], inherited, INHERITED_PROJECT_KEYS);
+      if (!next) continue;
+      projects[key] = next;
+      changed = true;
+    }
   }
 
   if (!changed && Object.keys(current).length > 0) return;
@@ -256,9 +270,10 @@ export const workspaceDirectories = async (wsId: string): Promise<string[]> =>
 
 /**
  * Build (or repair) the workspace's private Claude config dir and return its path
- * for CLAUDE_CONFIG_DIR. Idempotent — safe to call on every tab launch.
+ * for CLAUDE_CONFIG_DIR. Idempotent — safe to call on every tab launch. `cwd`
+ * is the tab's launch directory, pre-trusted when it is inside the workspace.
  */
-export const ensureWorkspaceClaudeHome = async (wsId: string): Promise<string> => {
+export const ensureWorkspaceClaudeHome = async (wsId: string, cwd?: string): Promise<string> => {
   const directories = await workspaceDirectories(wsId);
   const home = workspaceHomeDir(wsId);
   await fs.mkdir(home, { recursive: true });
@@ -284,7 +299,7 @@ export const ensureWorkspaceClaudeHome = async (wsId: string): Promise<string> =
     }),
   );
 
-  await seedProjectDecisions(home, directories);
+  await seedProjectDecisions(home, directories, cwd);
   return home;
 };
 

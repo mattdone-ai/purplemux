@@ -134,6 +134,32 @@ describe('tab send — permanent and retryable failures are distinct', () => {
     expect(requests[0].body).toEqual({ content: 'hi', waitMs: 1000 });
   });
 
+  it('exits 5 at once for an agent at a startup prompt, naming the dialog and the fix the server served (story 05, D14)', async () => {
+    reply = json(409, {
+      error: 'agent-not-ready',
+      code: 'startup-prompt',
+      tabId: 'tab-x',
+      cliState: 'startup-prompt',
+      startupPrompt: 'folder-trust',
+      startupPromptLabel: 'the folder-trust prompt',
+      detail: 'the agent waits at the folder-trust prompt: answer it in the tab, or create the tab with --cwd under a workspace directory, which purplemux pre-trusts',
+    });
+
+    const { code, stderr } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+
+    expect(code).toBe(5);
+    expect(stderr).toContain('error: startup-prompt (the agent waits at the folder-trust prompt: answer it in the tab, or create the tab with --cwd');
+    expect(stderr).toContain('nothing was typed; a retry cannot help until the prompt is answered');
+    expect(stderr).not.toContain('retry, bounded');
+  });
+
+  it('a startup-prompt refusal without a served sentence still names the prompt in words', async () => {
+    reply = json(409, { error: 'agent-not-ready', code: 'startup-prompt', tabId: 'tab-x' });
+    const { code, stderr } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+    expect(code).toBe(5);
+    expect(stderr).toContain('the agent waits at a Claude Code startup prompt');
+  });
+
   it('exits 4 for a tab replaced while the send waited', async () => {
     reply = json(409, { error: 'agent-target-changed', code: 'target-changed', tabId: 'tab-x' });
 
@@ -286,6 +312,7 @@ describe('the code → exit table', () => {
     ['session-not-running', 4],
     ['target-changed', 4],
     ['readiness-timeout', 5],
+    ['startup-prompt', 5],
     ['lease-not-found', 7],
     ['note-not-found', 7],
     ['watch-not-found', 7],
