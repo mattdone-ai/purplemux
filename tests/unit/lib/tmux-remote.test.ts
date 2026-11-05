@@ -289,6 +289,72 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(remoteCommand(calls.list[1])).toBe(`[ "$('tmux' '-L' 'pmux-mdserver1' 'show-options' '-qv' '-t' '=${REMOTE}:' '@pmux-create' 2>/dev/null)" = '${nonce}' ] && 'tmux' '-L' 'pmux-mdserver1' 'kill-session' '-t' '=${REMOTE}'; true; rm -f "$HOME/.purplemux-remote/mdserver1/tabs/tab-remote1.env"`);
   });
 
+  // Story 12: the kit's CLI runs once on the host before any session starts; a CLI that does not run refuses the create.
+  it('a kit whose CLI does not run on the host refuses the create with remote-kit-broken, naming the module and the host, and removes the env file', async () => {
+    const stderr = "pmux-kit-probe: node:internal/modules/cjs/loader:1228\npmux-kit-probe:   throw err;\npmux-kit-probe: Error: Cannot find module './curator-spot-check-event.js'\npmux-kit-probe: Require stack:\n";
+    replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 18, stderr } : { stdout: '' });
+    const { createSession } = await import('@/lib/tmux');
+    const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await expect(creating).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: "Error: Cannot find module './curator-spot-check-event.js'" });
+    await expect(creating).rejects.toThrow("the CLI kit does not run on ai-server (Error: Cannot find module './curator-spot-check-event.js'); no agent started");
+    expect(calls.list).toHaveLength(2);
+    expect(remoteCommand(calls.list[1])).toContain('rm -f "$HOME/.purplemux-remote/mdserver1/tabs/tab-remote1.env"');
+  });
+
+  // Review r1 finding 1: the probe's own budget on the host gives a kit verdict, never 503 remote-host-unreachable.
+  it('a probe that ran past its budget on the host is remote-kit-broken "timed out", never remote-host-unreachable', async () => {
+    replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 18, stderr: 'pmux-kit-probe: kit probe timed out after 4 s\n' } : { stdout: '' });
+    const { createSession } = await import('@/lib/tmux');
+    const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await expect(creating).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: 'kit probe timed out after 4 s' });
+    await expect(creating).rejects.not.toMatchObject({ name: 'RemoteHostError' });
+  });
+
+  // Review r1 finding 3: a restart probes the kit before it kills the old session.
+  it('probeRemoteKit ships only the CLI and probes it in one sh -s run, and starts no session', async () => {
+    const { probeRemoteKit } = await import('@/lib/tmux');
+    await probeRemoteKit(REMOTE);
+    expect(calls.list).toHaveLength(1);
+    expect(remoteCommand(calls.list[0])).toBe('sh -s');
+    const script = calls.list[0].input ?? '';
+    expect([...script.matchAll(/^put '([^']+)'/gm)].map((m) => m[1])).toEqual(['bin/cli.js', 'bin/curator-spot-check-event.js', 'bin/purplemux']);
+    expect(script).toContain('d="$HOME/.purplemux-remote/mdserver1"');
+    expect(script).toContain('timeout -k 1 4 sh -c ');
+    expect(script).not.toMatch(/new-session|kill-session|tabs\//);
+  });
+
+  it('probeRemoteKit: exit 18 is remote-kit-broken, an ssh failure is remote-host-unreachable that killed nothing, a local tab is never asked', async () => {
+    const { probeRemoteKit } = await import('@/lib/tmux');
+    replies.fn = () => ({ code: 18, stderr: "pmux-kit-probe: Error: Cannot find module './x.js'\n" });
+    await expect(probeRemoteKit(REMOTE)).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: "Error: Cannot find module './x.js'" });
+    replies.fn = () => ({ code: 255, stderr: 'ssh: connect to host ai-server port 22: Connection timed out' });
+    await expect(probeRemoteKit(REMOTE)).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+    await expect(probeRemoteKit(REMOTE)).rejects.toThrow('nothing was killed');
+    replies.fn = () => ({ code: 2, stderr: 'sh: 3: base64: not found' });
+    await expect(probeRemoteKit(REMOTE)).rejects.toThrow(`the kit probe for ${REMOTE} on ai-server failed (exit 2: sh: 3: base64: not found); nothing was killed`);
+    calls.list = [];
+    await probeRemoteKit(LOCAL);
+    expect(calls.list).toEqual([]);
+  });
+
+  it('a CLI this server cannot read refuses the create before anything reaches the host, naming the module', async () => {
+    const fsModule = (await import('fs/promises')).default;
+    const realRead = fsModule.readFile.bind(fsModule);
+    const read = vi.spyOn(fsModule, 'readFile').mockImplementation(((file: Parameters<typeof realRead>[0], ...rest: unknown[]) => (
+      String(file).endsWith('/bin/curator-spot-check-event.js')
+        ? Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }))
+        : (realRead as (...a: unknown[]) => Promise<unknown>)(file, ...rest)
+    )) as typeof fsModule.readFile);
+    try {
+      const { createSession } = await import('@/lib/tmux');
+      const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+      await expect(creating).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: 'this server could not read its CLI to ship it: bin/curator-spot-check-event.js: ENOENT' });
+      expect(calls.list.filter((c) => c.cmd === 'ssh')).toEqual([]);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it('a name that already exists on the host is refused before any file is written, and that session is never touched (review r1 B2)', async () => {
     replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 17, stderr: `pmux: session ${REMOTE} already exists` } : { stdout: '' });
     const { createSession } = await import('@/lib/tmux');
@@ -306,7 +372,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(remoteCommand(calls.list[0])).toBe('sh -s');
     const script = calls.list[0].input ?? '';
     const lines = script.trim().split('\n');
-    const order = ['has-session', 'put ', 'new-session', '@pmux-create', 'source-file'].map((word) => lines.findIndex((l) => l.includes(word)));
+    const order = ['has-session', 'put ', 'if ! pmux_probe=$(', 'new-session', '@pmux-create', 'source-file'].map((word) => lines.findIndex((l) => l.includes(word)));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(script).toContain(`'tmux' '-u' '-L' 'pmux-mdserver1' '-f' "$d/tmux.conf" 'new-session' '-d' '-s' '${REMOTE}' '-x' '120' '-y' '40' '-c' '/home/mdone/code/nomupay'`);

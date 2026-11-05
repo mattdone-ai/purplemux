@@ -23,7 +23,8 @@ import type { TPanelType, TTabRole } from '@/types/terminal';
 import type { TCliState, TStartupPrompt } from '@/types/timeline';
 import { startupPromptBody } from '@/lib/startup-prompt';
 import type { ILastEvent } from '@/types/status';
-import { remoteHostUnreachableBody } from '@/lib/cli-error';
+import { remoteHostUnreachableBody, remoteKitBrokenBody } from '@/lib/cli-error';
+import { RemoteKitBrokenError } from '@/lib/remote-kit';
 import { WipCapError, admitAgentCreate, auditOverCap } from '@/lib/tab-cap';
 import { checkEvaluatorBrowser, checkTabRole } from '@/lib/tab-role';
 import { AUTO_HOST, resolveAutoHost, type IAutoPlacement } from '@/lib/pool-tab-placement';
@@ -399,6 +400,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       if (err instanceof RemoteHostError) {
         return res.status(503).json(remoteHostUnreachableBody(err));
       }
+      if (err instanceof RemoteKitBrokenError) return res.status(502).json(remoteKitBrokenBody(err));
       const msg = err instanceof Error ? err.message : 'unknown error';
       log.error(`create tab failed: ${msg}`);
       return res.status(500).json({ error: msg });

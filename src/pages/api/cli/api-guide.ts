@@ -345,7 +345,9 @@ POST /api/cli/tabs
   "host" runs the tab's tmux on that host over ssh (ADR-0022). It must be listed in fleet config
   remote.hosts, else 400 { "code": "remote-host-invalid" }; terminal and claude-code tabs run remote,
   codex-cli and grok-cli do not: 400 { "code": "remote-type-unsupported" } (both CLI exit 2). A host that does not answer
-  over ssh is 503 { "code": "remote-host-unreachable", "host" } (exit 6). The pane gets
+  over ssh is 503 { "code": "remote-host-unreachable", "host" } (exit 6). The kit's CLI runs once
+  on the host before the session starts; when it does not run there, 502 { "code": "remote-kit-broken",
+  "host", "line" } (exit 1; "line" names the cause, e.g. a missing module) and no agent starts. The pane gets
   PMUX_TAB_ID, PMUX_WORKSPACE_ID, PMUX_URL (this server) and its own tab token, never the
   workspace token. A remote claude-code tab's hooks, transcript and CLI reach this server, so
   status, result, send, close and the watchdog work as for a local tab; status serves "host".

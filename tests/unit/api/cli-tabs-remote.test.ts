@@ -180,6 +180,21 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
     expect(state.body).toMatchObject({ code: 'remote-host-unreachable', host: 'ai-server' });
   });
 
+  // Story 12 AC 2: the kit's CLI did not run on the host; no agent started. Exit 1 in the CLI (ADR-0016).
+  it('a kit whose CLI does not run on the host answers 502 remote-kit-broken with the host and the line', async () => {
+    const { RemoteKitBrokenError } = await import('@/lib/remote-kit');
+    layout.addTabToPane.mockRejectedValueOnce(new RemoteKitBrokenError('ai-server', "Error: Cannot find module './x.js'"));
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server' });
+    expect(state.statusCode).toBe(502);
+    expect(state.body).toEqual({
+      error: "the CLI kit does not run on ai-server (Error: Cannot find module './x.js'); no agent started and no session was touched. Repair the kit or the host, then try again",
+      code: 'remote-kit-broken',
+      host: 'ai-server',
+      line: "Error: Cannot find module './x.js'",
+    });
+    expect(registerTab).not.toHaveBeenCalled();
+  });
+
   it('an unreadable fleet config refuses, never reads as no hosts', async () => {
     registry.hosts = new Error('fleet-config.json is not { values, versions, history }');
     const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server' });

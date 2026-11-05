@@ -1,6 +1,7 @@
 import { REMOTE_HOOK_SCRIPT_CONTENT } from '@/lib/hook-scripts';
 import { claudeHookEvents } from '@/lib/hook-settings';
 import { originName, remoteSessionExistsGuard, remoteSocketName, remoteTagArgs, shQuote } from '@/lib/remote-host';
+import { buildRemoteLoginShellCommand } from '@/lib/shell-env';
 
 /**
  * What a remote host holds for this server's tabs (ADR-0022, slice b), under
@@ -204,7 +205,7 @@ export const readRemoteCliModules = async (read: (name: string) => Promise<strin
 
 export const remoteKitFiles = (opts: {
   tmuxConf: string;
-  /** File name to content, from `readRemoteCliModules`; null ships no CLI. */
+  /** File name to content, from `readRemoteCliModules`; null ships no CLI, and `buildRemoteCreateScript` then refuses the file set (story 12). */
   cli: Record<string, string> | null;
   workspaceId?: string;
   prompt: string | null;
@@ -227,6 +228,85 @@ export const remoteKitFiles = (opts: {
   ...(opts.trustSeed ? [{ path: REMOTE_TRUST_SEED_RELATIVE, content: REMOTE_TRUST_SEED_SCRIPT, mode: 0o600 as const }] : []),
 ];
 
+/** The create script exits with this when the kit's CLI does not run on the host (story 12): no session was started. */
+export const REMOTE_KIT_BROKEN_EXIT = 18;
+
+/** Each stderr line of a failed kit probe carries this prefix, so no other line of the script is read as its cause. */
+export const REMOTE_KIT_PROBE_PREFIX = 'pmux-kit-probe: ';
+
+const CLI_MODULE = /^bin\/[A-Za-z0-9._-]+\.(?:c?js|json)$/;
+
+/**
+ * The probe's own budget on the host, in seconds (story 12 review r1): inside the create's 10 s ssh deadline after a
+ * 5 s `ConnectTimeout`, so a slow login shell reads as a kit verdict, never as a host that did not answer. Measured
+ * 2026-11-05: the whole probe takes 0.35-0.37 s on ai-server at load 12.6.
+ */
+export const REMOTE_KIT_PROBE_BUDGET_S = 4;
+
+// The probe itself, run as `sh -c BODY pmux-kit-probe <kit dir> <module>...`, so one bound covers every step. One line.
+const probeBody = (): string => [
+  'd=$1; shift',
+  `pmux_node=$(${buildRemoteLoginShellCommand('command -v node')} 2>/dev/null | tail -n 1) || pmux_node=`,
+  'case "$pmux_node" in /*) [ -x "$pmux_node" ] || pmux_node= ;; *) pmux_node= ;; esac',
+  `if [ -z "$pmux_node" ]; then echo ${shQuote(`${REMOTE_KIT_PROBE_PREFIX}node is not an executable on PATH in a login shell on this host`)} >&2; exit ${REMOTE_KIT_BROKEN_EXIT}; fi`,
+  `if ! pmux_probe=$( { PATH="\${pmux_node%/*}:$PATH" "$d/bin/purplemux" help >/dev/null && "$pmux_node" -e 'for (const file of process.argv.slice(1)) require(file)' "$@"; } 2>&1 </dev/null ); then printf '%s\\n' "$pmux_probe" | head -n 40 | sed ${shQuote(`s/^/${REMOTE_KIT_PROBE_PREFIX}/`)} >&2; exit ${REMOTE_KIT_BROKEN_EXIT}; fi`,
+].join('; ');
+
+/**
+ * The kit probe (harness-flow-loop-2 story 12): after the kit lands and before any session starts, run the kit's
+ * CLI as the pane will. `node` is found the way the pane's interactive login shell finds it, then `bin/purplemux help`
+ * runs through the wrapper, and every shipped module is required once, so a lazy module that cannot load fails here
+ * too. Loading `cli.js` runs nothing (`require.main`). A failure prints the output with the probe prefix (at most 40
+ * lines). The probe runs as one child bounded on the host (review r1): `timeout -k 1 <budget>` where the host has
+ * it (coreutils signals the probe's whole process group), else a shell watchdog that signals the probe's shell (dash
+ * has no job control without a tty, so no group kill: a descendant of a hung probe can outlive it there). The probe
+ * writes to a file in the kit, never to the script's stderr, so no descendant holds the ssh channel open past the
+ * budget (measured: a `$(… | tail)` child kept it open 5 s). Exit 124, 137 or 143 reads as "kit probe timed out".
+ * Any failure exits `REMOTE_KIT_BROKEN_EXIT`, so the script never
+ * reaches `new-session` after a probe that failed or ran out of time. Every stdin is `/dev/null`: the rest of the
+ * create script is on the shell's stdin.
+ */
+export const remoteKitProbeLines = (modules: readonly string[], budgetSeconds: number = REMOTE_KIT_PROBE_BUDGET_S): string[] => {
+  if (!Number.isInteger(budgetSeconds) || budgetSeconds < 1) throw new Error(`kit probe budget must be a whole number of seconds: ${budgetSeconds}`);
+  const run = `sh -c ${shQuote(probeBody())} pmux-kit-probe "$d" ${modules.map((module) => `"$d/${module}"`).join(' ')} </dev/null >/dev/null 2>"$pmux_probe_out"`;
+  const watchdog = `( sleep ${budgetSeconds}; kill -TERM "$pmux_probe_pid" 2>/dev/null; sleep 1; kill -KILL "$pmux_probe_pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &`;
+  return [
+    'pmux_probe_rc=0; pmux_probe_out="$d/.kit-probe.$$"',
+    `if command -v timeout >/dev/null 2>&1; then timeout -k 1 ${budgetSeconds} ${run} || pmux_probe_rc=$?; else ${run} & pmux_probe_pid=$!; ${watchdog} pmux_watch_pid=$!; wait "$pmux_probe_pid" || pmux_probe_rc=$?; kill "$pmux_watch_pid" 2>/dev/null || :; fi`,
+    '[ "$pmux_probe_rc" -eq 0 ] || cat "$pmux_probe_out" >&2 2>/dev/null || :; rm -f "$pmux_probe_out"',
+    `case "$pmux_probe_rc" in 124|137|143) echo ${shQuote(`${REMOTE_KIT_PROBE_PREFIX}kit probe timed out after ${budgetSeconds} s`)} >&2; exit ${REMOTE_KIT_BROKEN_EXIT} ;; 0) ;; *) exit ${REMOTE_KIT_BROKEN_EXIT} ;; esac`,
+  ];
+};
+
+const PROBE_ERROR_LINE = /^(?:[A-Z][A-Za-z]*)?Error\b/;
+const PROBE_LINE_MAX = 300;
+
+/**
+ * The line that names why the kit probe failed: Node's own error line (`Error: Cannot find module …`,
+ * `SyntaxError: …`) when there is one, since a stack's first line is only a file position; else the first non-empty
+ * probe line. Only lines with the probe prefix count.
+ */
+export const remoteKitProbeFailureLine = (stderr: string): string => {
+  const lines = stderr.split('\n')
+    .filter((line) => line.startsWith(REMOTE_KIT_PROBE_PREFIX))
+    .map((line) => line.slice(REMOTE_KIT_PROBE_PREFIX.length).trim())
+    .filter(Boolean);
+  const line = lines.find((l) => PROBE_ERROR_LINE.test(l)) ?? lines[0] ?? 'the kit\'s CLI exited with no output';
+  return line.length > PROBE_LINE_MAX ? `${line.slice(0, PROBE_LINE_MAX - 1)}…` : line;
+};
+
+/**
+ * A remote create or restart refused because the CLI kit cannot run on the host (story 12): the probe failed or ran
+ * out of time there, or this server could not read its own CLI. No agent started, and no session was touched. 502 `remote-kit-broken`, exit 1 (ADR-0016):
+ * a retry fails the same way until the kit or the host is repaired.
+ */
+export class RemoteKitBrokenError extends Error {
+  constructor(readonly host: string, readonly line: string) {
+    super(`the CLI kit does not run on ${host} (${line}); no agent started and no session was touched. Repair the kit or the host, then try again`);
+    this.name = 'RemoteKitBrokenError';
+  }
+}
+
 /**
  * The create script's pre-trust line: run only when python3 exists, every failure ignored, so a seed never
  * blocks a launch (story 05 AC 2). Runs after the kit files land and before the session starts.
@@ -234,10 +314,46 @@ export const remoteKitFiles = (opts: {
 export const remoteTrustSeedLine = (trust: { cwd: string; workspaceDirectory: string }): string =>
   `if command -v python3 >/dev/null 2>&1; then python3 "$d/${REMOTE_TRUST_SEED_RELATIVE}" ${shQuote(trust.cwd)} ${shQuote(trust.workspaceDirectory)} >/dev/null 2>&1 || :; fi`;
 
+// Story 12 AC 3: no script starts a pane, or answers for the kit, without a CLI that ran.
+const kitCliModules = (files: readonly IRemoteKitFile[], what: string): string[] => {
+  const missing = ['bin/cli.js', 'bin/purplemux'].filter((name) => !files.some((file) => file.path === name));
+  if (missing.length) throw new Error(`${what} needs the kit's CLI: missing=[${missing.join(', ')}]`);
+  return files.map((file) => file.path).filter((p) => CLI_MODULE.test(p));
+};
+
+/** `d=<kit>`, its directories, and each file written by base64, a temporary and one rename. */
+const kitWriteLines = (files: readonly IRemoteKitFile[], baseDirs: readonly string[]): string[] => {
+  const dirs = new Set(baseDirs);
+  for (const file of files) {
+    if (!SAFE_RELATIVE.test(file.path) || file.path.split('/').includes('..')) throw new Error(`unsafe kit path: ${file.path}`);
+    const dir = file.path.split('/').slice(0, -1).join('/');
+    if (dir) dirs.add(dir);
+  }
+  return [
+    `d=${remoteKitPath()}`,
+    'umask 077',
+    `mkdir -p ${[...dirs].map((dir) => `"$d/${dir}"`).join(' ')}`,
+    'put() { printf \'%s\' "$2" | base64 -d > "$d/$1.tmp.$$"; chmod "$3" "$d/$1.tmp.$$"; mv -f "$d/$1.tmp.$$" "$d/$1"; }',
+    ...files.map((file) => `put ${shQuote(file.path)} ${shQuote(Buffer.from(file.content).toString('base64'))} ${file.mode.toString(8)}`),
+  ];
+};
+
+/**
+ * The kit probe alone, for a restart (story 12 review r1, finding 3): a restart kills the old session before its
+ * create runs, so it ships the CLI the create will ship and probes it first. A broken kit then leaves the old tab
+ * alive. Writes only the CLI files (`bin/`), which the create rewrites with the same content; starts no session.
+ */
+export const buildRemoteKitProbeScript = (files: readonly IRemoteKitFile[]): string => {
+  const cli = files.filter((file) => file.path.startsWith('bin/'));
+  const cliModules = kitCliModules(cli, 'a remote kit probe');
+  return `${['set -e', ...kitWriteLines(cli, ['bin']), ...remoteKitProbeLines(cliModules)].join('\n')}\n`;
+};
+
 /**
  * One `sh -s` script: refuse a session name that exists (exit 17, before any
  * file is written), write every kit file (base64, a temporary, one rename),
- * pre-trust the cwd when it is inside a workspace directory (fail-open),
+ * run the kit's CLI once and refuse when it does not run (exit 18, story 12; the files must hold `bin/cli.js` and
+ * `bin/purplemux`), pre-trust the cwd when it is inside a workspace directory (fail-open),
  * create the session with the kit's tmux.conf and tag it with this call's nonce
  * in the same tmux command, and re-read the config into a server that already ran. Fed on stdin, so file
  * contents and secrets never reach a command line.
@@ -256,21 +372,13 @@ export const buildRemoteCreateScript = (opts: {
   if (opts.trust && !opts.files.some((file) => file.path === REMOTE_TRUST_SEED_RELATIVE)) {
     throw new Error(`a pre-trust needs the kit file ${REMOTE_TRUST_SEED_RELATIVE}`);
   }
-  const dirs = new Set(['bin', 'tabs', 'hook-spool']);
-  for (const file of opts.files) {
-    if (!SAFE_RELATIVE.test(file.path) || file.path.split('/').includes('..')) throw new Error(`unsafe kit path: ${file.path}`);
-    const dir = file.path.split('/').slice(0, -1).join('/');
-    if (dir) dirs.add(dir);
-  }
+  const cliModules = kitCliModules(opts.files, 'a remote create');
   const sock = shQuote(remoteSocketName());
   const lines = [
     'set -e',
     remoteSessionExistsGuard(opts.session),
-    `d=${remoteKitPath()}`,
-    'umask 077',
-    `mkdir -p ${[...dirs].map((dir) => `"$d/${dir}"`).join(' ')}`,
-    'put() { printf \'%s\' "$2" | base64 -d > "$d/$1.tmp.$$"; chmod "$3" "$d/$1.tmp.$$"; mv -f "$d/$1.tmp.$$" "$d/$1"; }',
-    ...opts.files.map((file) => `put ${shQuote(file.path)} ${shQuote(Buffer.from(file.content).toString('base64'))} ${file.mode.toString(8)}`),
+    ...kitWriteLines(opts.files, ['bin', 'tabs', 'hook-spool']),
+    ...remoteKitProbeLines(cliModules),
     ...(opts.trust ? [remoteTrustSeedLine(opts.trust)] : []),
     [
       shQuote('tmux'), shQuote('-u'), shQuote('-L'), sock, shQuote('-f'), '"$d/tmux.conf"',

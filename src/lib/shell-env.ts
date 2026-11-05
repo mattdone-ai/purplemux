@@ -72,6 +72,17 @@ export const buildShellLaunchCommand = (extraEnv: Record<string, string> = {}): 
 const REMOTE_INHERITED_KEYS = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'XDG_RUNTIME_DIR'];
 
 /**
+ * One command in the shell a remote pane gets (harness-flow-loop-2 story 12): the same `env -i` floor and the remote
+ * account's `$SHELL`, interactive and login, as the pane's own shell is. `sh -s` reads no profile, so it can find no
+ * `node` that the pane finds (measured on mdserver1: only `-ilc` finds nvm's node). Its stdin is `/dev/null`: in a
+ * create script, stdin is the rest of the script. Its stderr is the caller's to redirect.
+ */
+export const buildRemoteLoginShellCommand = (command: string): string => {
+  const inherited = REMOTE_INHERITED_KEYS.map((k) => `${k}="$${k}"`).join(' ');
+  return `env -i ${inherited} PATH=${shQuote(LOGIN_SHELL_BASE_PATH)} "\${SHELL:-/bin/sh}" -ilc ${shQuote(command)} </dev/null`;
+};
+
+/**
  * The pane shell of a remote tab (ADR-0022). Like `buildShellLaunchCommand`,
  * but the account values are the REMOTE host's: the sh that tmux runs the
  * command with expands them there. Only `extraEnv` comes from this host.
