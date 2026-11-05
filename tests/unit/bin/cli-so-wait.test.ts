@@ -39,6 +39,20 @@ vi.mock('@/lib/status-manager', () => ({
   }),
 }));
 
+// `so propose` (ADR-0041 §1 amendment D7): the portfolio selection, the run identity and the owner push are the only fakes;
+// the route, the order files and the Mission Control store under the test HOME are real.
+const sm = vi.hoisted(() => ({ tabId: null as string | null }));
+vi.mock('@/lib/scrum-master-access', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/scrum-master-access')>();
+  return { ...actual, selectedScrumMasterScope: async (scope: { tabId?: string }) => (sm.tabId && scope.tabId === sm.tabId
+    ? { managerWorkspaceId: 'ws-a', managerTabId: sm.tabId, workspaceIds: ['ws-b'] } : null) };
+});
+const ORCH = { tabId: 'tab-a', providerId: 'claude', sessionId: 'sess-a', runtimeGeneration: 'launch-1' };
+vi.mock('@/lib/mission-control-runtime', () => ({ resolveMissionTargetIdentity: vi.fn(async (_ws: string, tabId: string) => (tabId === ORCH.tabId ? ORCH : null)) }));
+vi.mock('@/lib/mission-question-config', () => ({ readQuestionMinVersion: vi.fn(async () => 2) }));
+vi.mock('@/lib/attention-alerts', () => ({ alertOpenedAttention: vi.fn(async () => []) }));
+vi.mock('@/lib/curator-service', () => ({ curatorOnMissionEvents: vi.fn() }));
+
 const ENTRY = path.resolve('bin/purplemux.js');
 const run = promisify(execFile);
 interface IResult { code: number; stdout: string; stderr: string }
@@ -79,6 +93,7 @@ describe('purplemux so and wait — the installed CLI against the real routes (s
       ...(await loadLeaseRoutes()),
       '/api/cli/watches': (await import('@/pages/api/cli/watches/index')).default,
       '/api/cli/standing-orders': (await import('@/pages/api/cli/standing-orders/index')).default,
+      '/api/cli/standing-orders/proposals': (await import('@/pages/api/cli/standing-orders/proposals')).default,
     };
     for (const id of ['SO-1', 'SO-8', 'SO-99']) {
       routes[`/api/cli/standing-orders/${id}/strike`] = (req, res) => {
@@ -149,6 +164,45 @@ describe('purplemux so and wait — the installed CLI against the real routes (s
     expect(bad.stderr).toContain('so-invalid');
     expect(bad.stderr).toContain('text: 601 characters, at most 600');
     expect((await cli(['so', 'add', '--text', 't', '--source', 's'], tabA)).code).toBe(2);
+  });
+
+  it('so propose: 3 forbidden unless the selected SM; 2 for a bad field; 3 no-orchestrator-run; 0 prints the item id; 3 open-proposal', async () => {
+    sm.tabId = null;
+    const why = 'The owner said this to three seats.';
+    const forbidden = await cli(['so', 'propose', '--text', 'A rule for every seat.', '--why', why], tabA);
+    expect(forbidden.code).toBe(3);
+    expect(forbidden.stderr).toMatch(/^error: forbidden .*only the launch tab of the selected portfolio manager proposes/);
+    expect((await cli(['so', 'propose', '--text', 'A rule.'], tabA)).code).toBe(2);
+    expect((await cli(['so', 'propose', '-w', 'ws-a', '--text', 'A rule.', '--why', why], tabA)).code).toBe(2);
+    sm.tabId = 'tab-a';
+    const bad = await cli(['so', 'propose', '--text', 'A rule for every seat.', '--why', 'w'.repeat(201)], tabA);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain('so-invalid');
+    expect(bad.stderr).toContain('why: 201 characters, at most 200');
+    const noRun = await cli(['so', 'propose', '--text', 'A rule for every seat.', '--why', why], tabA);
+    expect(noRun.code).toBe(3);
+    expect(noRun.stderr).toMatch(/^error: so-proposal-refused \(conflict.*\) — no-orchestrator-run: ws-a has no open Mission Control run bound to its orchestrator/);
+    await writeFixture(mockHome.value, [
+      { id: 'ws-a', name: 'alpha', tabs: [{ id: 'tab-a', name: 'one' }], orchestratorTabId: 'tab-a' },
+      { id: 'ws-b', name: 'beta', tabs: [{ id: 'tab-b', name: 'two' }] },
+    ]);
+    const { getMissionControlStore } = await import('@/lib/mission-control-store');
+    const store = getMissionControlStore();
+    store.applyEvents([{ schemaVersion: 1, workspaceId: 'ws-a', runId: 'run-a', producerAt: 1, eventId: 'e-start', expectedRevision: 0,
+      bindingGeneration: 0, type: 'run.started', payload: { objective: 'Portfolio', tabId: 'tab-a' } }], new Map([['e-start', ORCH]]));
+    const opened = await cli(['so', 'propose', '--text', 'A rule for every seat.', '--why', why, '--cites', 'owner message m1, 2026-11-05T01:00Z'], tabA);
+    expect(opened.code, opened.stderr).toBe(0);
+    expect(opened.stdout).toMatch(/^so-proposal-[0-9a-f]{24} opened for the owner in Mission Control: Yes files the fleet order as quoted; it reaches \d+ workspace\(s\) and \d+ live agent tab\(s\); the largest prompt section would be \d+ bytes of 8192\n$/);
+    const itemId = opened.stdout.split(' ')[0];
+    expect(store.attentionItem(itemId)).toMatchObject({ state: 'open', class: 'scope', defaultOptionId: null, answerType: 'confirm' });
+    const again = await cli(['so', 'propose', '--text', 'a rule for every seat', '--why', why, '--json'], tabA);
+    expect(again.code).toBe(3);
+    expect(again.stderr).toContain(`open-proposal: proposal ${itemId} of the same text is still open`);
+    expect((await cli(['so', 'list'], tabA)).stdout).not.toContain('A rule for every seat.');
+    sm.tabId = null;
+    // The store lives under this test's HOME: close it so no later test reads a deleted file.
+    store.close();
+    delete (globalThis as { __ptMissionControlStore?: unknown }).__ptMissionControlStore;
   });
 
   it('wait add --auth registers an auth watch on the profile; a profile that is not SSO exits 2', async () => {

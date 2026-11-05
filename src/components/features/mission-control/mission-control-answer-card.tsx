@@ -13,6 +13,7 @@ import {
   formatMissionAge,
 } from '@/components/features/mission-control/mission-control-utils';
 import QuestionMarkdown from '@/components/features/mission-control/question-markdown';
+import { ProposalOutcome } from '@/components/features/mission-control/proposal-outcome';
 import {
   answerTypeHint,
   changedFields,
@@ -397,6 +398,7 @@ const MissionControlAnswerCard = ({
       </CardHeader>
       <CardContent className="space-y-4 px-4 pb-4 sm:px-5 sm:pb-5">
         {view.blocked && <BlockedCost blocked={view.blocked} />}
+        <ProposalOutcome proposal={item.proposal} />
         <RevisionNotice draft={draft} />
 
         {item.humanReview?.humanNeed !== 'none' && item.humanReview?.humanReason && (
@@ -602,6 +604,7 @@ export const MissionControlDeliveryCard = ({
         </div>
         <div>
           <p className="break-words text-sm font-medium">{item.title}</p>
+          {item.proposal && <div className="mt-2"><ProposalOutcome proposal={item.proposal} /></div>}
           {answer && (
             <p className="mt-1 break-words text-sm text-muted-foreground">
               {answer.text || (answer.actionCompleted ? 'Action marked complete' : `${answer.optionIds.length} option selected`)}

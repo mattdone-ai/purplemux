@@ -99,14 +99,21 @@ const parse = <T>(schema: z.ZodType<T>, input: unknown): T => {
 export const NEEDS_DECISION_EVENT_PREFIX = 'system:needs-decision:';
 /** The server's keep-or-strike item for an order the curator filed (story 23): only it may take one. */
 export const CURATOR_ORDER_EVENT_PREFIX = 'system:curator-so:';
-const RESERVED_EVENT_ID_PREFIXES = ['system:migration:', 'system:rebind:', 'answer:auto:', NEEDS_DECISION_EVENT_PREFIX, CURATOR_ORDER_EVENT_PREFIX];
+/** The server's fleet standing-order proposal item (ADR-0041 §1 amendment D7): only it may take one. */
+export const SO_PROPOSAL_EVENT_PREFIX = 'system:so-proposal:';
+const RESERVED_EVENT_ID_PREFIXES = [
+  'system:migration:', 'system:rebind:', 'answer:auto:', NEEDS_DECISION_EVENT_PREFIX, CURATOR_ORDER_EVENT_PREFIX, SO_PROPOSAL_EVENT_PREFIX,
+];
 /**
  * Item ids only a server producer opens or revises, by the producer's event prefix: a `strike` answer on a
  * `curator-so-<n>` item strikes an order, so no tab or token may open one (story 23 review r1 F1).
  */
 export const CURATOR_ORDER_ITEM_PREFIX = 'curator-so-';
+/** A Yes on a `so-proposal-` item files a fleet order: no tab or token may open or revise one, so none can change its class or add a default. */
+export const SO_PROPOSAL_ITEM_PREFIX = 'so-proposal-';
 const RESERVED_ITEM_ID_PREFIXES: ReadonlyArray<{ itemPrefix: string; serverPrefix: string }> = [
   { itemPrefix: CURATOR_ORDER_ITEM_PREFIX, serverPrefix: CURATOR_ORDER_EVENT_PREFIX },
+  { itemPrefix: SO_PROPOSAL_ITEM_PREFIX, serverPrefix: SO_PROPOSAL_EVENT_PREFIX },
 ];
 const RESERVED_SUBMISSION_ID_PREFIX = 'auto:';
 
