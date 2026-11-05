@@ -251,6 +251,15 @@ describe('the server opens the item (story 14 AC 4)', () => {
     expect(await openNeedsDecisionItem(deps, stop({ line: 'DONE: fine' }))).toEqual({ opened: false, reason: 'not-needs-decision' });
   });
 
+  it('states the fallback reason in the item when a reportsTo tab\'s question reaches the owner (D28 review r1, 1)', async () => {
+    startRun();
+    const reason = 'reports-to target unavailable: tab-lead is gone or halted, and no live orchestrator can take it';
+    expect(await openNeedsDecisionItem(await needsDecisionDeps(), stop({ fallbackReason: reason }))).toMatchObject({ opened: true });
+    const [item] = items() as unknown as Array<Record<string, unknown>>;
+    expect(JSON.stringify(item)).toContain(`It reached you because ${reason}.`);
+    expect(JSON.stringify(item)).toContain(`hfl-14 ended its turn with NEEDS-DECISION and no tab can take it (${reason}): the owner decides it.`);
+  });
+
   it('refuses a line with no question mark after the marker: no item, no id remembered (D28 v2 addendum)', async () => {
     startRun();
     const deps = await needsDecisionDeps();
@@ -404,12 +413,9 @@ describe('the asking tab\'s notice (story 36, D1)', () => {
       .toBe(`[needs-decision] item-not-opened: no-orchestrator. Your NEEDS-DECISION line opened no Mission Control item; owner push dispatched, delivery not confirmed. Its id would be ${ID}.`);
   });
 
-  it('tells a line with no question that nothing opened, and a reportsTo tab where its question went (D28)', () => {
+  it('tells a line with no question that nothing opened (D28)', () => {
     expect(needsDecisionAskerNotice({ kind: 'no-question' })).toBe(
       '[needs-decision] item-not-opened: no-question. Your NEEDS-DECISION line holds no question mark after the marker, so the server opened no Mission Control item and told no one. If you need a decision, end on one line: NEEDS-DECISION: <question>? (a) <option> (b) <option>.');
-    expect(needsDecisionAskerNotice({ kind: 'reports-to', reportsTo: 'tab-o', target: null })).toBe(
-      '[needs-decision] item-not-opened: reports-to. You report to tab-o, so your NEEDS-DECISION line goes to that tab, never to the owner\'s Mission Control; no tab received it: tab-o is not a live agent tab and the workspace has no other orchestrator.');
-    expect(needsDecisionAskerNotice({ kind: 'reports-to', reportsTo: 'tab-o', target: 'tab-orch' })).toContain('; it went to tab-orch as a watchdog nudge.');
   });
 
   it('collapses a refusal detail to one line of at most 200 chars, and tells an orchestrator how to open the item itself', () => {

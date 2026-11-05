@@ -769,7 +769,10 @@ delivery is broadcast again under the nudges' ids; an hour-old held backlog rais
 
 A classified stop whose end line (ADR-0018, story 09 amendment: the last line, or the last paragraph joined when it
 wraps) starts `NEEDS-DECISION:` also opens a Mission Control item (ADR-0041 §2), whatever the tab's `reportOn`, unless
-the tab has a `reportsTo` (its question then goes only to that tab) or the line holds no `?` (outcome `no-question`): `applyStopTurnEnd` awaits `openNeedsDecision` before the nudge, handing the whole last line of the
+the tab has a `reportsTo` (its question then goes to that tab, else a live orchestrator; with neither, the owner item
+opens with `reports-to target unavailable` in it) or the line holds no `?` (outcome `no-question`). The end line is read
+from the last 600 characters of the message (`TURN_TAIL_CHARS`); a wrapped end paragraph longer than that gives no marker.
+For an item, `applyStopTurnEnd` awaits `openNeedsDecision` before the nudge, handing the whole last line of the
 tail, the stop's seq and time, and the turn's start (the previous stop's `at`, else `busySince`) to
 `openNeedsDecisionItem`, which opens nothing when an item for the same line is still open or the tab already opened one
 this turn. The nudge's end line then carries the item note. With no item, a live orchestrator that receives the tab's

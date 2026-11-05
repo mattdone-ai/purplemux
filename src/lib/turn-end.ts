@@ -74,29 +74,38 @@ export interface ITurnEndInput {
   armedWatches: number;
 }
 
-// Markdown emphasis or a quote around the marker does not hide it.
-const bare = (line: string): string => line.trim().replace(/^[>*_`\s]+/, '').replace(/[*_`\s]+$/, '');
+// Markdown emphasis, a quote, or a list prefix (`- `, `+ `, `1. `, `2) `) around the marker does not hide it (review r1, 3).
+const bare = (line: string): string =>
+  line.trim().replace(/^(?:[>*_`\s]|[-+](?=\s)|\d+[.)](?=\s))+/, '').replace(/[*_`\s]+$/, '');
 
 const clip = (line: string): string =>
   line.length > MAX_MARKER_LINE_CHARS ? `${line.slice(0, MAX_MARKER_LINE_CHARS)}…` : line;
 
 // A second marker inside an end line, at the start or after a character that cannot be part of a marker word
 // (D28: "NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: …" opened an owner item).
-const INNER_MARKER = new RegExp(`(?:^|[^A-Za-z0-9_-])(?:${TURN_MARKER_NAMES.join('|')}):`);
+const INNER_MARKER = new RegExp(`(?:^|[^A-Za-z0-9_-])(${TURN_MARKER_NAMES.join('|')}):`, 'g');
+const NEEDS_DECISION = 'NEEDS-DECISION:';
 
 const startMarker = (line: string): string | null => TURN_MARKERS.find((marker) => line.startsWith(marker)) ?? null;
 
-/** True when the line starts with a marker and names one more marker after it: one end line carries one marker. */
+/**
+ * True when the line starts with a marker, names one more marker after it, and one of the two is `NEEDS-DECISION:`
+ * (the D28 shape: a question quoted beside another verdict asks nothing). Any other pair keeps the FIRST marker:
+ * `DONE: … READY-TO-MERGE: PR #12` is a DONE (review r1, 2).
+ */
 const holdsTwoMarkers = (line: string): boolean => {
   const marker = startMarker(line);
-  return marker !== null && INNER_MARKER.test(line.slice(marker.length));
+  if (marker === null) return false;
+  const inner = [...line.slice(marker.length).matchAll(INNER_MARKER)].map((match) => `${match[1]}:`);
+  return inner.length > 0 && (marker === NEEDS_DECISION || inner.includes(NEEDS_DECISION));
 };
 
 /**
  * What a turn's tail ends on, unclipped:
  * - `marker`: the end line and the `READY-TO-MERGE:` lines that ride along above it. `complete` is false only when the
  *   end line runs from the first character of a tail cut at TURN_TAIL_CHARS, where its start may be missing.
- * - `refused`: the end line starts with a marker but holds a second one (D28). It counts as no marker; the caller logs it.
+ * - `refused`: the end line starts with a marker and holds a second one, one of the two `NEEDS-DECISION:` (D28). It
+ *   counts as no marker; the caller logs it.
  * - null: no end line.
  *
  * The end line is the last non-empty line when that starts with a marker (ADR-0018). Otherwise it is the last

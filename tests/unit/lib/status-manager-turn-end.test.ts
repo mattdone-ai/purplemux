@@ -531,17 +531,52 @@ describe('stop classification (ADR-0018)', () => {
         expect(entry.turnEnd).toMatchObject({ kind: 'ready-for-review' });
       });
 
-      it('a reportsTo that no tab can receive: still no owner item or push, and the asker is told', async () => {
-        noOrchestrator();
+      // Review r1, finding 1: a question never vanishes. A reportsTo that cannot take it hands it to a live orchestrator,
+      // and with none, the owner item opens as before, with the reason in it.
+      const lead = (halted: boolean): ITabStatusEntry => ({
+        cliState: 'idle', workspaceId: 'ws-1', tabName: 'lead', tmuxSession: 'tmux-lead', panelType: 'claude-code',
+        ...(halted ? { turnError: { class: 'usage-limit' as const, code: 'usage_limit_exceeded', text: 'limit', startedAt: 0, resumeItemId: null, escalated: false } } : {}),
+      });
+      const FALLBACK = (target: string) => `reports-to target unavailable: ${target} is gone or halted, and no live orchestrator can take it`;
+      const BY_ORCH = (target: string) => ` [no owner item: this tab reports to ${target}, so its NEEDS-DECISION is answered by you, the orchestrator (${target} cannot take it), never sent to the owner (SO-6); answer it, or ask the owner on your own end line]`;
+
+      it.each([
+        ['a dead reportsTo', 'tab-gone', false],
+        ['a reportsTo halted by a usage limit', 'lead', true],
+      ])('%s with a live orchestrator: the orchestrator gets the question, no owner item', async (_name, target, halted) => {
         const { manager, paste } = await managerWithPaste();
-        manager.registerTab('worker', { ...worker('claude-code', await writeLines('claude/d28d.jsonl', [claudeEnd('Ok.\n\nNEEDS-DECISION: Ship it?')])), reportsTo: 'tab-gone' });
+        if (target === 'lead') manager.registerTab('lead', lead(halted));
+        const line = 'NEEDS-DECISION: Ship it?';
+        manager.registerTab('worker', { ...worker('claude-code', await writeLines(`claude/d28g-${target}.jsonl`, [claudeEnd(`Ok.\n\n${line}`)])), reportsTo: target, reportOn: ['DONE'] as TTurnMarkerName[] });
         manager.updateTabFromHook('tmux-worker', 'stop');
         await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+        await settle();
         expect(needsDecision.open).not.toHaveBeenCalled();
         expect(pushes()).toEqual([]);
-        expect(sentTo(paste, 'tmux-worker')).toEqual([
-          '[needs-decision] item-not-opened: reports-to. You report to tab-gone, so your NEEDS-DECISION line goes to that tab, never to the owner\'s Mission Control; no tab received it: tab-gone is not a live agent tab and the workspace has no other orchestrator.',
-        ]);
+        expect(sentTo(paste, 'tmux-root')).toEqual([`[orchestrator-watchdog] worker worker (w1) ended: ${line}${BY_ORCH(target)} — read with: purplemux tab result -w ws-1 worker`]);
+        expect(sentTo(paste, 'tmux-lead')).toEqual([]);
+      });
+
+      it.each([
+        ['a dead reportsTo, no orchestrator', 'tab-gone', 'none'],
+        ['a halted reportsTo, no orchestrator', 'lead', 'none'],
+        ['a dead reportsTo, the configured orchestrator not live', 'tab-gone', 'inactive'],
+      ])('%s: today\'s owner item opens, with "reports-to target unavailable" in it', async (_name, target, orchestrator) => {
+        if (orchestrator === 'none') noOrchestrator();
+        needsDecision.open.mockResolvedValueOnce({ opened: true, itemId: ID, runId: 'run-a' });
+        const { manager, paste } = await managerWithPaste();
+        if (orchestrator === 'inactive') manager.registerTab('root', { cliState: 'inactive', workspaceId: 'ws-1', tabName: 'root', tmuxSession: 'tmux-root', panelType: 'claude-code' });
+        if (target === 'lead') manager.registerTab('lead', lead(true));
+        const line = 'NEEDS-DECISION: Ship it?';
+        manager.registerTab('worker', { ...worker('claude-code', await writeLines(`claude/d28h-${target}-${orchestrator}.jsonl`, [claudeEnd(`Ok.\n\n${line}`)])), reportsTo: target });
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(needsDecision.open).toHaveBeenCalledTimes(1));
+        expect(needsDecision.open.mock.calls[0][1]).toMatchObject({ line, fallbackReason: FALLBACK(target) });
+        // The item note rides the nudge to the configured orchestrator's tab, or reaches the asker when there is none.
+        const noteReader = orchestrator === 'none' ? 'tmux-worker' : 'tmux-root';
+        await waitFor(() => expect(sentTo(paste, noteReader)).toHaveLength(1));
+        expect(sentTo(paste, noteReader)[0]).toContain(`[MC item ${ID} opened for the owner by the server`);
+        expect(sentTo(paste, 'tmux-lead')).toEqual([]);
       });
 
       it('no question mark: the server refuses the item, sends no push and no "open it yourself" note', async () => {

@@ -260,6 +260,8 @@ interface INeedsDecisionResult {
   note: string;
   /** The nudge goes out whatever the tab's reportOn. */
   mustReach: boolean;
+  /** The nudge's recipient, chosen for a reportsTo tab's question (D28); absent: the escalation target. */
+  target?: string;
   /**
    * What the asking tab itself is told, once per line, notice and id a day. `ifUnheard`: only when the nudge carrying
    * the note does not go out (no escalation target, or its reportOn holds the marker back).
@@ -1701,7 +1703,8 @@ export class StatusManager {
     /** `nudge: null` keeps the human alert and sends the orchestrator nothing (a stop with no end line, L49). */
     opts: {
       silent?: boolean;
-      nudge?: { kind: TOrchestrationNudgeKind; detail: string } | null;
+      /** `target`: the recipient the caller chose (a reportsTo tab's question, D28); otherwise the escalation target. */
+      nudge?: { kind: TOrchestrationNudgeKind; detail: string; target?: string } | null;
       /** The dialog of a move to `startup-prompt` (D14); every other state clears it. */
       startupPrompt?: IStartupPromptReading;
     } = {},
@@ -1749,8 +1752,8 @@ export class StatusManager {
     if (newState === 'idle' || newState === 'ready-for-review') this.contextLifecycle.onIdle(tabId);
     const nudgeKind = opts.nudge === null ? null : nudgeKindForTransition(prevState, newState, !!opts.silent);
     if (nudgeKind) {
-      const nudge = opts.nudge && !opts.silent ? opts.nudge : { kind: nudgeKind, detail: undefined };
-      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail).catch((err) => {
+      const nudge: { kind: TOrchestrationNudgeKind; detail?: string; target?: string } = opts.nudge && !opts.silent ? opts.nudge : { kind: nudgeKind };
+      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail, undefined, nudge.target).catch((err) => {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }
@@ -1882,6 +1885,8 @@ export class StatusManager {
     kind: TOrchestrationNudgeKind,
     detail?: string,
     episode = `seq:${entry.lastEvent?.seq ?? 'none'}`,
+    /** A recipient the caller already chose and checked (D28); otherwise the escalation target. */
+    targetOverride?: string,
   ): Promise<boolean> {
     if (!isAgentPanelType(entry.panelType)) return false;
     // A tab being closed raises nothing: the close is deliberate (L38).
@@ -1891,7 +1896,7 @@ export class StatusManager {
     }
     const ws = await getWorkspaceByIdCached(entry.workspaceId);
     if (!ws) return false;
-    const targetTabId = this.escalationTarget(tabId, entry, ws);
+    const targetTabId = targetOverride ?? this.escalationTarget(tabId, entry, ws);
     if (!targetTabId) return false;
 
     const now = Date.now();
@@ -2833,7 +2838,7 @@ export class StatusManager {
     if (turnEnd.kind !== 'turn-marker') {
       // One end line carries one marker (D28): a refused line opens nothing, and it is logged with its text.
       const read = readTurnEnd(snapshot?.lastAssistantTail);
-      if (read?.kind === 'refused') log.warn({ tabId, line: read.line, reason: read.reason }, 'end line refused: it holds two turn markers, so it is no end line');
+      if (read?.kind === 'refused') log.warn({ tabId, line: read.line, reason: read.reason }, 'end line refused: it holds two turn markers, one of them NEEDS-DECISION, so it is no end line');
     }
     // HANDOFF-READY answers a ROTATE; the check itself waits for the prompt (ADR-0036 §2).
     this.contextLifecycle.onTurnEnd(tabId, snapshot?.lastAssistantTail);
@@ -2859,9 +2864,11 @@ export class StatusManager {
     let decision: INeedsDecisionResult = { note: '', mustReach: false, asker: null };
     const endLine = turnEnd.kind === 'turn-marker' ? turnEnd.lines.at(-1) : undefined;
     if (stopSeq !== undefined && endLine?.startsWith('NEEDS-DECISION:')) {
-      decision = entry.reportsTo && entry.reportsTo !== tabId
-        ? await this.routeNeedsDecisionToReportsTo(tabId, entry, entry.reportsTo, snapshot?.lastAssistantTail, endLine)
-        : await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at, previous?.at ?? entry.busySince ?? at);
+      const reportsTo = entry.reportsTo && entry.reportsTo !== tabId ? entry.reportsTo : null;
+      const routed = reportsTo ? await this.routeNeedsDecisionToReportsTo(tabId, entry, reportsTo, snapshot?.lastAssistantTail, endLine) : null;
+      // A question never vanishes (review r1, 1): with no live tab to take it, it opens today's owner item.
+      decision = routed ?? await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at,
+        previous?.at ?? entry.busySince ?? at, reportsTo ? `reports-to target unavailable: ${reportsTo} is gone or halted, and no live orchestrator can take it` : undefined);
       if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
     }
     if (turnEnd.kind === 'turn-marker') {
@@ -2891,18 +2898,18 @@ export class StatusManager {
       log.info({ tabId, marker: turnEnd.lines.at(-1), reportOn: entry.reportOn, filtered: this.reportOnFiltered }, 'turn-marker nudge withheld: the marker is outside the tab\'s reportOn');
     }
     const nudge = forwarded && turnEnd.kind === 'turn-marker'
-      ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}` }
+      ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}`, ...(decision.target ? { target: decision.target } : {}) }
       : null;
     // The note reached a tab only if this nudge goes out to a target (review r1, finding 4).
     const askerHeard = decision.asker?.ifUnheard && nudge !== null
-      && await this.hasEscalationTarget(tabId, entry);
+      && (decision.target !== undefined || await this.hasEscalationTarget(tabId, entry));
     if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
     if (entry.cliState !== 'ready-for-review') {
       this.applyCliState(tabId, entry, 'ready-for-review', { nudge });
       this.persistToLayout(entry);
     } else if (nudge && !(previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
       && previous.marker?.join('\n') === turnEnd.lines.join('\n'))) {
-      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail).catch((err) => {
+      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail, undefined, decision.target).catch((err) => {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }
@@ -2933,21 +2940,32 @@ export class StatusManager {
 
   /**
    * A NEEDS-DECISION line of a tab with a reportsTo (D28): the question belongs to that tab, so no owner item opens and no
-   * owner push goes out. The nudge goes to the tab's escalation target (its live reportsTo, else the orchestrator) whatever
-   * its reportOn, and the asker hears of it only when no tab receives it.
+   * owner push goes out. The recipient is the reportsTo while it is a live agent tab not halted by a usage limit, else a
+   * live, un-halted orchestrator; the nudge goes to it whatever the tab's reportOn. With neither, null: the caller opens
+   * today's owner item, so the question never vanishes (review r1, 1).
    */
   private async routeNeedsDecisionToReportsTo(
     tabId: string, entry: ITabStatusEntry, reportsTo: string, tail: string | null | undefined, markerLine: string,
-  ): Promise<INeedsDecisionResult> {
+  ): Promise<INeedsDecisionResult | null> {
     const full = lastTurnLine(tail);
     const line = full?.line.startsWith('NEEDS-DECISION:') ? full.line : markerLine;
     const ws = await getWorkspaceByIdCached(entry.workspaceId);
-    const target = ws ? this.escalationTarget(tabId, entry, ws) : null;
+    const takes = (candidate: string | null | undefined): candidate is string =>
+      !!candidate && candidate !== tabId && this.isLiveAgentTab(candidate) && !this.isHaltedByUsageLimit(candidate);
+    const live = this.liveReportsTo(tabId, entry);
+    const orch = ws?.orchestration?.enabled ? ws.orchestration.orchestratorTabId : null;
+    const target = takes(live) ? live : takes(orch) ? orch : null;
+    if (!target) {
+      log.warn({ tabId, reportsTo, line }, 'NEEDS-DECISION of a tab with reportsTo: reports-to target unavailable and no live orchestrator; the owner item opens');
+      return null;
+    }
     log.info({ tabId, reportsTo, target, line }, 'NEEDS-DECISION of a tab with reportsTo: sent to that tab, no owner item (D28)');
+    const by = target === reportsTo ? 'you' : `you, the orchestrator (${reportsTo} cannot take it)`;
     return {
-      note: ` [no owner item: this tab reports to ${reportsTo}, so its NEEDS-DECISION is answered by you, never sent to the owner (SO-6); answer it, or ask the owner on your own end line]`,
+      note: ` [no owner item: this tab reports to ${reportsTo}, so its NEEDS-DECISION is answered by ${by}, never sent to the owner (SO-6); answer it, or ask the owner on your own end line]`,
       mustReach: true,
-      asker: { lineKey: needsDecisionLineKey(entry.workspaceId, tabId, line), notice: { kind: 'reports-to', reportsTo, target }, ifUnheard: true },
+      target,
+      asker: null,
     };
   }
 
@@ -2958,11 +2976,14 @@ export class StatusManager {
    */
   private async openNeedsDecision(
     tabId: string, entry: ITabStatusEntry, tail: string | null | undefined, markerLine: string, stopSeq: number, stopAt: number,
-    turnStartedAt: number,
+    turnStartedAt: number, fallbackReason?: string,
   ): Promise<INeedsDecisionResult> {
     const full = lastTurnLine(tail);
     const { line, complete } = full?.line.startsWith('NEEDS-DECISION:') ? full : { line: markerLine, complete: false };
-    const stop = { workspaceId: entry.workspaceId, tabId, tabName: entry.tabName, line, lineComplete: complete, stopSeq, stopAt, turnStartedAt };
+    const stop = {
+      workspaceId: entry.workspaceId, tabId, tabName: entry.tabName, line, lineComplete: complete, stopSeq, stopAt, turnStartedAt,
+      ...(fallbackReason ? { fallbackReason } : {}),
+    };
     let outcome: TNeedsDecisionOutcome;
     try {
       outcome = await openNeedsDecisionItem(await needsDecisionDeps(), stop);

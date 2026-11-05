@@ -80,6 +80,8 @@ export interface INeedsDecisionSource {
   workspaceId: string;
   tabId: string;
   tabName: string;
+  /** Why the owner gets a question a tab with a reportsTo asked (D28 review r1, 1); stated in the context. */
+  fallbackReason?: string;
 }
 
 /**
@@ -97,6 +99,7 @@ export const buildNeedsDecisionQuestion = (source: INeedsDecisionSource): Record
     `> ${source.line.trim()}`,
     '',
     ...(complete ? [] : ['The line reached the harness clipped, so its options were not read: the whole question is in the pane.', '']),
+    ...(source.fallbackReason ? [`It reached you because ${source.fallbackReason}.`, ''] : []),
     `Its pane: \`purplemux tab result -w ${source.workspaceId} ${source.tabId}\`. Your answer goes to the workspace orchestrator, which owns the run and relays it.`,
   ].join('\n');
   return {

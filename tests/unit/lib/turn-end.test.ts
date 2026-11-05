@@ -122,10 +122,20 @@ describe('extractTurnMarker', () => {
       expect(classifyTurnEnd(input(D28))).toEqual({ kind: 'ready-for-review', transcript: true });
     });
 
-    it('refuses any two markers on one end line, also when the second arrives on a wrapped line', () => {
-      expect(readTurnEnd('DONE: x; BLOCKED: y')).toMatchObject({ kind: 'refused' });
-      expect(readTurnEnd('DONE: x\n(see READY-TO-MERGE: a#1)')).toMatchObject({ kind: 'refused', line: 'DONE: x (see READY-TO-MERGE: a#1)' });
-      expect(readTurnEnd('DONE: a\nBLOCKED: b\nmore')).toMatchObject({ kind: 'refused' });
+    it('refuses two markers on one end line when one of them is NEEDS-DECISION, also across a wrapped line', () => {
+      expect(readTurnEnd('BLOCKED: x; NEEDS-DECISION: y?')).toMatchObject({ kind: 'refused', reason: 'two-markers' });
+      expect(readTurnEnd('NEEDS-DECISION: ship it?\n(DONE: the rest)')).toMatchObject({ kind: 'refused', line: 'NEEDS-DECISION: ship it? (DONE: the rest)' });
+    });
+
+    // Review r1, finding 2: any other pair keeps the FIRST marker at the line start.
+    it.each([
+      ['DONE: story 9 done; NEEDS-DECISION: none open', null],
+      ['DONE: 09 landed READY-TO-MERGE: PR #12', 'DONE: 09 landed READY-TO-MERGE: PR #12'],
+      ['DONE: 09 gate VALID; the wrapped part\nnames BLOCKED: none', 'DONE: 09 gate VALID; the wrapped part names BLOCKED: none'],
+      ['DONE: x; BLOCKED: none', 'DONE: x; BLOCKED: none'],
+      ['DONE: a\nBLOCKED: b\nmore', 'DONE: a BLOCKED: b more'],
+    ])('the review example %j reads as %j', (tail, line) => {
+      expect(extractTurnMarker(`Report.\n\n${tail}`)).toEqual(line === null ? null : [line]);
     });
 
     it('does not count a marker word that is part of a longer token, nor a lower-case one', () => {
@@ -137,8 +147,23 @@ describe('extractTurnMarker', () => {
       expect(readTurnEnd('I will not send the NEEDS-DECISION: ORCH holds it.')).toBeNull();
     });
 
-    it('stops the READY-TO-MERGE ride-along at a line that holds two markers', () => {
-      expect(extractTurnMarker(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2 DONE: soon', 'DONE: x'].join('\n'))).toEqual(['DONE: x']);
+    it('stops the READY-TO-MERGE ride-along at a line that holds a NEEDS-DECISION pair, and keeps any other pair', () => {
+      expect(extractTurnMarker(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2 NEEDS-DECISION: merge?', 'DONE: x'].join('\n'))).toEqual(['DONE: x']);
+      expect(extractTurnMarker(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2 DONE: soon', 'DONE: x'].join('\n')))
+        .toEqual(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2 DONE: soon', 'DONE: x']);
+    });
+
+    // Review r1, finding 3.
+    it('reads a marker after a list prefix at the line start', () => {
+      expect(extractTurnMarker('Report.\n\n- DONE: shipped')).toEqual(['DONE: shipped']);
+      expect(extractTurnMarker('Report.\n\n* BLOCKED: gate red')).toEqual(['BLOCKED: gate red']);
+      expect(extractTurnMarker('Report.\n\n1. NEEDS-DECISION: ship it?')).toEqual(['NEEDS-DECISION: ship it?']);
+      expect(extractTurnMarker('Report.\n\n2) CHECKPOINTED: /h.md')).toEqual(['CHECKPOINTED: /h.md']);
+      expect(extractTurnMarker('> - **DONE: quoted list**')).toEqual(['DONE: quoted list']);
+      expect(extractTurnMarker('- READY-TO-MERGE: a#1\n- DONE: wrapped\n  line')).toEqual(['READY-TO-MERGE: a#1', 'DONE: wrapped line']);
+      // A minus or a number that is part of the text is not a list prefix.
+      expect(extractTurnMarker('-DONE: x')).toBeNull();
+      expect(extractTurnMarker('1.DONE: x')).toBeNull();
     });
   });
 
