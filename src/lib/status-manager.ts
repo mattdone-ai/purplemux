@@ -2900,16 +2900,21 @@ export class StatusManager {
     const nudge = forwarded && turnEnd.kind === 'turn-marker'
       ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}`, ...(decision.target ? { target: decision.target } : {}) }
       : null;
-    // The note reached a tab only if this nudge goes out to a target (review r1, finding 4).
-    const askerHeard = decision.asker?.ifUnheard && nudge !== null
+    const toTarget = decision.asker?.ifUnheard && nudge !== null
       && (decision.target !== undefined || await this.hasEscalationTarget(tabId, entry));
     if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
+    // A tab already ready-for-review that ends on the same marker again sends no second nudge: the repeat filter.
+    const repeat = entry.cliState === 'ready-for-review' && previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
+      && previous.marker?.join('\n') === turnEnd.lines.join('\n');
+    const sent = repeat ? null : nudge;
+    // The note reached a tab only if the nudge that survives the repeat filter goes out to a target (review r1,
+    // finding 4; #521): a held-back repeat carries no note, so the asker hears it itself.
+    const askerHeard = toTarget && sent !== null;
     if (entry.cliState !== 'ready-for-review') {
       this.applyCliState(tabId, entry, 'ready-for-review', { nudge });
       this.persistToLayout(entry);
-    } else if (nudge && !(previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
-      && previous.marker?.join('\n') === turnEnd.lines.join('\n'))) {
-      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail, undefined, decision.target).catch((err) => {
+    } else if (sent) {
+      this.nudgeOrchestrator(tabId, entry, sent.kind, sent.detail, undefined, decision.target).catch((err) => {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }
