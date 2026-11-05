@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { createLogger } from '@/lib/logger';
+import { isMissionControlError } from '@/lib/mission-control-errors';
 import type { IMissionItemOpener, IMissionOpenRunBinding } from '@/lib/mission-control-store';
 import { NEEDS_DECISION_EVENT_PREFIX } from '@/lib/mission-control-validation';
 import { buildNeedsDecisionQuestion, isNeedsDecisionLine, needsDecisionAsks } from '@/lib/needs-decision';
@@ -17,6 +18,13 @@ const g = globalThis as unknown as { __ptNeedsDecisionItemIds?: Map<string, { it
 const rememberedIds = (): Map<string, { itemId: string; at: number }> => {
   if (!g.__ptNeedsDecisionItemIds) g.__ptNeedsDecisionItemIds = new Map();
   return g.__ptNeedsDecisionItemIds;
+};
+/** The line key's id from now; the newest entry goes last, and the oldest leaves past the cap. */
+const rememberId = (lineKey: string, itemId: string, at: number): void => {
+  const ids = rememberedIds();
+  ids.delete(lineKey);
+  ids.set(lineKey, { itemId, at });
+  while (ids.size > NEEDS_DECISION_ID_MEMORY) ids.delete(ids.keys().next().value!);
 };
 
 export interface INeedsDecisionStop {
@@ -99,8 +107,7 @@ export const stableNeedsDecisionItemId = (
   openIds: (prefix: string) => readonly string[] = () => [],
 ): { itemId: string; lineKey: string } => {
   const fresh = needsDecisionItemId(stop);
-  const ids = rememberedIds();
-  const held = ids.get(fresh.lineKey);
+  const held = rememberedIds().get(fresh.lineKey);
   if (held && now - held.at < NEEDS_DECISION_ID_WINDOW_MS) {
     let isClosed = false;
     try {
@@ -117,9 +124,7 @@ export const stableNeedsDecisionItemId = (
     open = undefined;
   }
   const itemId = open ?? fresh.itemId;
-  ids.delete(fresh.lineKey);
-  ids.set(fresh.lineKey, { itemId, at: now });
-  while (ids.size > NEEDS_DECISION_ID_MEMORY) ids.delete(ids.keys().next().value!);
+  rememberId(fresh.lineKey, itemId, now);
   return { itemId, lineKey: fresh.lineKey };
 };
 
@@ -183,6 +188,14 @@ const openItem = async (deps: INeedsDecisionDeps, stop: INeedsDecisionStop, item
   try {
     await deps.apply(stop.workspaceId, [event], { tabId: stop.tabId, identity: 'hook' }, { serverPrefix: NEEDS_DECISION_EVENT_PREFIX });
   } catch (err) {
+    // Another opener took the line between the dedupe above and this write (#521 review r1, 1): the store's typed
+    // refusal names the open item, so the line has its item and the owner was told; the line keeps that id.
+    const open = isMissionControlError(err) && err.code === 'already-open' ? err.current?.id : undefined;
+    if (open) {
+      rememberId(lineKey, open, deps.now());
+      log.info({ workspaceId: stop.workspaceId, tabId: stop.tabId, itemId, open }, 'NEEDS-DECISION item already open from another opener');
+      return { opened: false, reason: 'already-open', itemId: open };
+    }
     const detail = err instanceof Error ? err.message : String(err);
     log.warn({ workspaceId: stop.workspaceId, tabId: stop.tabId, itemId }, `NEEDS-DECISION item not opened: ${detail}`);
     return { opened: false, reason: 'refused', itemId, detail };

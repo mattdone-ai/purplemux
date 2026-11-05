@@ -95,7 +95,7 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
   `<tab name or id> · <workspace name or id>: <the line without the marker and the class tag, whitespace collapsed>`
   cut at 400 code points at a word, with a trailing `…` (story 36; 100 code points before it, with no mark, cut the
   options mid-word); it carries the tab and workspace, so a tap opens the tab. One push per workspace, tab and
-  normalized line in 24 h, kept in memory (at most 2,000 keys, oldest evicted; a restart may send one more). The
+  normalized line in 24 h, kept in memory (at most 2,000 keys, oldest evicted; a restart may send one more push). The
   dispatch is never awaited. The note says what the server did, never what the owner received:
   `[no MC item (<reason>): owner push dispatched, delivery not confirmed]`, or
   `[no MC item (<reason>): owner push for this line already dispatched at <UTC ISO time>]`. Not the inbox: an inbox
@@ -126,7 +126,7 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     open for the owner`), so it can name the item. When that nudge goes out, the target holds the note and the asker is
     told nothing itself.
   - **Once a day per line, notice and id.** Keyed by line key, notice kind (not opened / item) and id, 24 h, in memory
-    like the push (at most 2,000 keys; a restart may send one more). The line the tab repeats while it waits never wakes
+    like the push (at most 2,000 keys; a restart may send one more notice). The line the tab repeats while it waits never wakes
     it in a loop, while the open that follows a not-opened stop is still told; a repeat after the open sends nothing new.
   - **The (ii) push is unchanged, and it means "no item opened".** It goes out only when no item opened, so it never
     carries an `itemId`, and the phone opens the tab for it (an `nd-` id on a `needs-decision` alert would open that
@@ -165,6 +165,10 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     `{"error": "an item for this NEEDS-DECISION line is already open: <open item id>", "code": "already-open", "current": <the open item>}`.
     The same id again stays the 409 `conflict` `attention item already exists`. Once the open item is answered,
     resolved or cancelled, an `nd-` id of that line opens again.
+  - **A racing open is `already-open`, not `refused` (review r1).** If another opener takes the line between the
+    opener's dedupe and its own write, the opener reads the typed refusal: the outcome is `already-open` with the open
+    item's id (`current.id`), and the line keeps that id. So no "open it yourself" note and no (ii) push go out for an
+    item that is open. Every other refusal stays `refused`.
   - **The asker hears a note that the repeat filter held back.** A tab already `ready-for-review` that ends on the same
     marker again sends no second nudge. The note of that stop then reaches no tab, so the asker gets it itself (the
     notice above): "the note rides the nudge" means the nudge that survives the repeat filter.

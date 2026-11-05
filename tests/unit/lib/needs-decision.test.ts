@@ -475,6 +475,38 @@ describe('the server opens the item (story 14 AC 4)', () => {
     expect(items().map((i) => i.id).sort()).toEqual([noted, opened, other].sort());
   });
 
+  // #521 review r1, 1: another opener takes the line between the opener's dedupe and its write.
+  it('a racing open between the dedupe and the write: the typed refusal is already-open with the open item\'s id, and the line keeps it', async () => {
+    startRun();
+    const base = await needsDecisionDeps();
+    const line = 'NEEDS-DECISION: Ship the export now? (a) yes (b) no';
+    const racer = needsDecisionItemId(stop({ line, stopSeq: 99, stopAt: 99_000 })).itemId;
+    const { applyMissionEventBatch } = await import('@/lib/mission-control-events');
+    const deps = {
+      ...base,
+      orchestratorTabId: async (workspaceId: string) => {
+        await applyMissionEventBatch('ws-a', [{
+          eventId: 'orch-open-race', schemaVersion: 1, workspaceId: 'ws-a', runId: 'run-a', expectedRevision: 0, producerAt: 2, bindingGeneration: 1,
+          type: 'attention.opened', payload: {
+            itemId: racer, ...buildNeedsDecisionQuestion({ workspaceId: 'ws-a', tabId: 'tab-w', tabName: 'w', line }),
+            humanReview: { humanNeed: 'decision', humanReason: 'r', handling: 'h', reviewerTabId: 'tab-orch' },
+          },
+        }], { tabId: 'tab-orch', identity: 'launch' });
+        return base.orchestratorTabId(workspaceId);
+      },
+    };
+    const own = needsDecisionItemId(stop({ line, stopSeq: 1, stopAt: 1_000 })).itemId;
+    expect(own).not.toBe(racer);
+    expect(await openNeedsDecisionItem(deps, stop({ line, stopSeq: 1, stopAt: 1_000 }))).toEqual({ opened: false, reason: 'already-open', itemId: racer });
+    expect(items().map((item) => item.id)).toEqual([racer]);
+    const remembered = (globalThis as { __ptNeedsDecisionItemIds?: Map<string, { itemId: string }> }).__ptNeedsDecisionItemIds!;
+    expect([...remembered.values()].map((held) => held.itemId)).toEqual([racer]);
+    // Any other refusal stays `refused` with the line's own id.
+    const refused = await openNeedsDecisionItem({ ...base, apply: async () => { throw new Error('store said no'); } },
+      stop({ line: 'NEEDS-DECISION: Other?', stopSeq: 2, stopAt: 2_000, turnStartedAt: Date.now() + 1 }));
+    expect(refused).toMatchObject({ opened: false, reason: 'refused', detail: 'store said no' });
+  });
+
   // Finding 3: an asker that quotes the item id in its repeat keeps the line's key, so it finds the same item.
   it('the line key ignores a quoted nd- id, bare or in brackets', async () => {
     const id = `nd-${'0123456789abcdef'.repeat(2)}`;
