@@ -6,13 +6,14 @@ import { promisify } from 'util';
 import { describe, expect, it } from 'vitest';
 import {
   REMOTE_KIT_BROKEN_EXIT,
+  REMOTE_KIT_PROBE_BUDGET_S,
   buildRemoteCreateScript,
+  buildRemoteKitProbeScript,
   cliLocalRequires,
   readRemoteCliModules,
   remoteKitFiles,
   remoteKitProbeFailureLine,
   remoteKitProbeLines,
-  type IRemoteKitFile,
 } from '@/lib/remote-kit';
 
 // Story 36: the remote kit shipped bin/cli.js alone, while cli.js requires ./curator-spot-check-event.js at load, so
@@ -81,7 +82,8 @@ describe('the remote kit\'s CLI modules (story 36)', () => {
 // These run the probe lines the create script carries through a real `sh -s`, against a kit on disk.
 describe('the remote kit probe (harness-flow-loop-2 story 12)', () => {
   /** A scratch HOME with the kit's bin/ files and a stand-in login shell that answers `command -v node`. */
-  const scratchKit = async (cli: Record<string, string> | null, shellAnswer: string = process.execPath) => {
+  const scratchKit = async (cli: Record<string, string> | null, shell: { answer?: string; sleepSeconds?: number } = {}) => {
+    const answer = shell.answer ?? process.execPath;
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-kit-probe-'));
     const kit = path.join(home, 'kit');
     const files = remoteKitFiles({ tmuxConf: '', cli, prompt: null }).filter((f) => f.path.startsWith('bin/'));
@@ -91,23 +93,37 @@ describe('the remote kit probe (harness-flow-loop-2 story 12)', () => {
     }
     // The stand-in reads its stdin (a probe that left it attached would eat the rest of the script), prints a
     // profile banner on stdout and noise on stderr, then the answer: as an nvm profile and an interactive bash do.
-    const shell = path.join(home, 'login-shell');
-    await fs.writeFile(shell, `#!/bin/sh\ncat >/dev/null\necho 'welcome banner'\necho 'bash: no job control in this shell' >&2\n${shellAnswer ? `echo '${shellAnswer}'\n` : ''}`, { mode: 0o700 });
-    return { home, kit, files, shell };
+    const loginShell = path.join(home, 'login-shell');
+    await fs.writeFile(loginShell, [
+      '#!/bin/sh', 'cat >/dev/null', ...(shell.sleepSeconds ? [`sleep ${shell.sleepSeconds}`] : []),
+      "echo 'welcome banner'", "echo 'bash: no job control in this shell' >&2", ...(answer ? [`echo '${answer}'`] : []), '',
+    ].join('\n'), { mode: 0o700 });
+    // A host without `timeout` (macOS): only the tools the probe uses, so it takes the shell watchdog.
+    const tools = path.join(home, 'tools');
+    await fs.mkdir(tools);
+    for (const tool of ['sh', 'env', 'tail', 'head', 'sed', 'sleep', 'cat', 'dirname', 'rm']) await fs.symlink(path.join('/usr/bin', tool), path.join(tools, tool));
+    return { home, kit, files, shell: loginShell, tools };
   };
+
+  type TScratch = Awaited<ReturnType<typeof scratchKit>>;
+  type TBound = 'timeout' | 'shell watchdog';
+  const BOUNDS: TBound[] = ['timeout', 'shell watchdog'];
 
   /** The probe lines in a `sh -s` script, followed by 128 KiB of padding and a marker the probe must not swallow. */
-  const runProbe = (scratch: { home: string; kit: string; files: IRemoteKitFile[]; shell: string }) => {
+  const runProbe = (scratch: TScratch, bound: TBound = 'timeout', budgetSeconds?: number) => {
     const modules = scratch.files.map((f) => f.path).filter((p) => /\.(?:c?js|json)$/.test(p));
-    const script = ['set -e', `d='${scratch.kit}'`, ...remoteKitProbeLines(modules), `# ${'x'.repeat(128 * 1024)}`, 'echo after-probe', ''].join('\n');
+    const script = ['set -e', `d='${scratch.kit}'`, ...remoteKitProbeLines(modules, budgetSeconds), `# ${'x'.repeat(128 * 1024)}`, 'echo after-probe', ''].join('\n');
     // No node on this PATH: the probe must find it through the login shell, as on a pool host.
-    return spawnSync('sh', ['-s'], { input: script, encoding: 'utf-8', env: { NODE_ENV: 'test', HOME: scratch.home, SHELL: scratch.shell, PATH: '/usr/bin:/bin' } });
+    const PATH = bound === 'timeout' ? '/usr/bin:/bin' : scratch.tools;
+    const started = Date.now();
+    const result = spawnSync('/bin/sh', ['-s'], { input: script, encoding: 'utf-8', env: { NODE_ENV: 'test', HOME: scratch.home, SHELL: scratch.shell, PATH } });
+    return { ...result, elapsedMs: Date.now() - started };
   };
 
-  it('passes for the real CLI kit, finds node through the login shell, and leaves the rest of the script on stdin', async () => {
+  it.each(BOUNDS)('passes for the real CLI kit (%s), finds node through the login shell, and leaves the rest of the script on stdin', async (bound) => {
     const scratch = await scratchKit(await readRemoteCliModules(readBin));
     try {
-      const result = runProbe(scratch);
+      const result = runProbe(scratch, bound);
       expect(result.stderr).toBe('');
       expect(result.status).toBe(0);
       expect(result.stdout).toBe('after-probe\n');
@@ -116,17 +132,38 @@ describe('the remote kit probe (harness-flow-loop-2 story 12)', () => {
     }
   });
 
-  it('a module missing on the host: exit 18 before the rest of the script, naming the module', async () => {
+  it.each(BOUNDS)('a module missing on the host (%s): exit 18 before the rest of the script, naming the module', async (bound) => {
     const scratch = await scratchKit(await readRemoteCliModules(readBin));
     try {
       await fs.rm(path.join(scratch.kit, 'bin/curator-spot-check-event.js'));
-      const result = runProbe(scratch);
+      const result = runProbe(scratch, bound);
       expect(result.status).toBe(REMOTE_KIT_BROKEN_EXIT);
       expect(result.stdout).toBe('');
       expect(remoteKitProbeFailureLine(result.stderr)).toBe("Error: Cannot find module './curator-spot-check-event.js'");
     } finally {
       await fs.rm(scratch.home, { recursive: true, force: true });
     }
+  });
+
+  // Review r1 finding 1: a slow login shell must read as a kit verdict inside the create's 10 s deadline, never as a
+  // host that did not answer; and the script must stop before anything after the probe (new-session) runs.
+  it.each(BOUNDS)('a probe that runs past its budget (%s): exit 18 with "timed out", inside the budget, and the script stops', async (bound) => {
+    const scratch = await scratchKit(await readRemoteCliModules(readBin), { sleepSeconds: 5 });
+    try {
+      const result = runProbe(scratch, bound, 1);
+      expect(result.status).toBe(REMOTE_KIT_BROKEN_EXIT);
+      expect(result.stdout).toBe('');
+      expect(remoteKitProbeFailureLine(result.stderr)).toBe('kit probe timed out after 1 s');
+      expect(result.elapsedMs).toBeLessThan(4000);
+    } finally {
+      await fs.rm(scratch.home, { recursive: true, force: true });
+    }
+  });
+
+  it('the budget is a whole number of seconds, 4 s by default: inside the 10 s create deadline after a 5 s connect', () => {
+    expect(REMOTE_KIT_PROBE_BUDGET_S).toBe(4);
+    expect(remoteKitProbeLines(['bin/cli.js']).join('\n')).toContain('timeout -k 1 4 sh -c ');
+    for (const bad of [0, 1.5, -1, Number.NaN]) expect(() => remoteKitProbeLines(['bin/cli.js'], bad)).toThrow('kit probe budget must be a whole number of seconds');
   });
 
   it('a lazy module that cannot load fails the probe, although `help` alone never requires it', async () => {
@@ -152,7 +189,7 @@ describe('the remote kit probe (harness-flow-loop-2 story 12)', () => {
     ['prints a function name, not a path', 'node'],
     ['prints a path that is not an executable', '/nonexistent/bin/node'],
   ])('a login shell that %s: exit 18, naming node', async (_label, answer) => {
-    const scratch = await scratchKit(await readRemoteCliModules(readBin), answer);
+    const scratch = await scratchKit(await readRemoteCliModules(readBin), { answer });
     try {
       const result = runProbe(scratch);
       expect(result.status).toBe(REMOTE_KIT_BROKEN_EXIT);
@@ -183,13 +220,38 @@ describe('the remote kit probe (harness-flow-loop-2 story 12)', () => {
     const trust = { cwd: '/w/a', workspaceDirectory: '/w' };
     const lines = buildRemoteCreateScript({ nonce: 'N0nce', files, session: 'pt-ws-a-pane-p-tab-r', cols: 80, rows: 24, launch: 'sh -l', trust }).split('\n');
     const lastPut = lines.map((l, i) => (l.startsWith('put ') ? i : -1)).filter((i) => i >= 0).at(-1)!;
-    const probe = lines.findIndex((l) => l.startsWith('pmux_node=$('));
-    const lastProbe = lines.findIndex((l) => l.startsWith('if ! pmux_probe=$('));
+    const probe = lines.findIndex((l) => l.startsWith('pmux_probe_rc=0;'));
+    const lastProbe = lines.findIndex((l) => l.startsWith('case "$pmux_probe_rc" in'));
     expect(probe).toBe(lastPut + 1);
-    expect(lines[lastProbe]).toContain('"$d/bin/cli.js" "$d/bin/curator-spot-check-event.js"');
+    expect(lines[probe + 1]).toContain('pmux-kit-probe "$d" "$d/bin/cli.js" "$d/bin/curator-spot-check-event.js" </dev/null >/dev/null 2>"$pmux_probe_out"');
+    expect(lastProbe).toBe(probe + 3);
     expect(lastProbe).toBeLessThan(lines.findIndex((l) => l.startsWith('if command -v python3')));
     expect(lastProbe).toBeLessThan(lines.findIndex((l) => l.includes("'new-session'")));
     expect(() => buildRemoteCreateScript({ nonce: 'N0nce', files: remoteKitFiles({ tmuxConf: '', cli: null, prompt: null }), session: 's', cols: 80, rows: 24, launch: 'sh -l' }))
       .toThrow("a remote create needs the kit's CLI: missing=[bin/cli.js, bin/purplemux]");
+  });
+
+  // Review r1 finding 3: a restart probes the kit before it kills the old session.
+  it('the stand-alone probe script writes only the CLI files, probes them and starts no session; it runs green on a real kit', async () => {
+    const cli = await readRemoteCliModules(readBin);
+    const files = remoteKitFiles({ tmuxConf: 'set -g status off', cli, workspaceId: 'ws-r', prompt: 'p', tabEnv: { tabId: 't', content: 'PMUX_TAB_TOKEN=x' } });
+    const script = buildRemoteKitProbeScript(files);
+    expect([...script.matchAll(/^put '([^']+)'/gm)].map((m) => m[1])).toEqual(['bin/cli.js', 'bin/curator-spot-check-event.js', 'bin/purplemux']);
+    expect(script).not.toMatch(/new-session|has-session|tmux|PMUX_TAB_TOKEN/);
+    expect(() => buildRemoteKitProbeScript(remoteKitFiles({ tmuxConf: '', cli: null, prompt: null })))
+      .toThrow("a remote kit probe needs the kit's CLI: missing=[bin/cli.js, bin/purplemux]");
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-kit-probe-script-'));
+    try {
+      const shell = path.join(home, 'login-shell');
+      await fs.writeFile(shell, `#!/bin/sh\necho '${process.execPath}'\n`, { mode: 0o700 });
+      // The script names the kit by this server's origin under $HOME, as on the host.
+      const result = spawnSync('/bin/sh', ['-s'], { input: script, encoding: 'utf-8', env: { NODE_ENV: 'test', HOME: home, SHELL: shell, PATH: '/usr/bin:/bin' } });
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      const origin = (await fs.readdir(path.join(home, '.purplemux-remote')))[0];
+      expect((await fs.readdir(path.join(home, '.purplemux-remote', origin))).sort()).toEqual(['bin']);
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
   });
 });

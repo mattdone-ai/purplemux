@@ -301,6 +301,42 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(remoteCommand(calls.list[1])).toContain('rm -f "$HOME/.purplemux-remote/mdserver1/tabs/tab-remote1.env"');
   });
 
+  // Review r1 finding 1: the probe's own budget on the host gives a kit verdict, never 503 remote-host-unreachable.
+  it('a probe that ran past its budget on the host is remote-kit-broken "timed out", never remote-host-unreachable', async () => {
+    replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 18, stderr: 'pmux-kit-probe: kit probe timed out after 4 s\n' } : { stdout: '' });
+    const { createSession } = await import('@/lib/tmux');
+    const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await expect(creating).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: 'kit probe timed out after 4 s' });
+    await expect(creating).rejects.not.toMatchObject({ name: 'RemoteHostError' });
+  });
+
+  // Review r1 finding 3: a restart probes the kit before it kills the old session.
+  it('probeRemoteKit ships only the CLI and probes it in one sh -s run, and starts no session', async () => {
+    const { probeRemoteKit } = await import('@/lib/tmux');
+    await probeRemoteKit(REMOTE);
+    expect(calls.list).toHaveLength(1);
+    expect(remoteCommand(calls.list[0])).toBe('sh -s');
+    const script = calls.list[0].input ?? '';
+    expect([...script.matchAll(/^put '([^']+)'/gm)].map((m) => m[1])).toEqual(['bin/cli.js', 'bin/curator-spot-check-event.js', 'bin/purplemux']);
+    expect(script).toContain('d="$HOME/.purplemux-remote/mdserver1"');
+    expect(script).toContain('timeout -k 1 4 sh -c ');
+    expect(script).not.toMatch(/new-session|kill-session|tabs\//);
+  });
+
+  it('probeRemoteKit: exit 18 is remote-kit-broken, an ssh failure is remote-host-unreachable that killed nothing, a local tab is never asked', async () => {
+    const { probeRemoteKit } = await import('@/lib/tmux');
+    replies.fn = () => ({ code: 18, stderr: "pmux-kit-probe: Error: Cannot find module './x.js'\n" });
+    await expect(probeRemoteKit(REMOTE)).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: "Error: Cannot find module './x.js'" });
+    replies.fn = () => ({ code: 255, stderr: 'ssh: connect to host ai-server port 22: Connection timed out' });
+    await expect(probeRemoteKit(REMOTE)).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+    await expect(probeRemoteKit(REMOTE)).rejects.toThrow('nothing was killed');
+    replies.fn = () => ({ code: 2, stderr: 'sh: 3: base64: not found' });
+    await expect(probeRemoteKit(REMOTE)).rejects.toThrow(`the kit probe for ${REMOTE} on ai-server failed (exit 2: sh: 3: base64: not found); nothing was killed`);
+    calls.list = [];
+    await probeRemoteKit(LOCAL);
+    expect(calls.list).toEqual([]);
+  });
+
   it('a CLI this server cannot read refuses the create before anything reaches the host, naming the module', async () => {
     const fsModule = (await import('fs/promises')).default;
     const realRead = fsModule.readFile.bind(fsModule);

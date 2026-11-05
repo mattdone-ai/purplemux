@@ -187,7 +187,7 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
     const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server' });
     expect(state.statusCode).toBe(502);
     expect(state.body).toEqual({
-      error: "remote tab not created: the CLI kit does not run on ai-server (Error: Cannot find module './x.js'); no agent started. Repair the kit or the host, then create the tab again",
+      error: "the CLI kit does not run on ai-server (Error: Cannot find module './x.js'); no agent started and no session was touched. Repair the kit or the host, then try again",
       code: 'remote-kit-broken',
       host: 'ai-server',
       line: "Error: Cannot find module './x.js'",

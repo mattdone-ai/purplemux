@@ -41,6 +41,7 @@ import {
   REMOTE_KIT_BROKEN_EXIT,
   RemoteKitBrokenError,
   buildRemoteCreateScript,
+  buildRemoteKitProbeScript,
   readRemoteCliModules,
   remoteKitFiles,
   remoteKitPath,
@@ -168,6 +169,48 @@ const remoteTrustTarget = async (
   }
 };
 
+const kitBroken = (host: string, line: string): RemoteKitBrokenError => {
+  const err = new RemoteKitBrokenError(host, line);
+  log.error(err.message);
+  return err;
+};
+
+const kitProbeFailure = (host: string, err: unknown): RemoteKitBrokenError =>
+  kitBroken(host, remoteKitProbeFailureLine(String((err as { stderr?: unknown }).stderr ?? '')));
+
+/**
+ * This server's CLI for a remote kit: `bin/cli.js` and every module it requires (story 36). One that cannot be read
+ * refuses the create before anything reaches the host (story 12 AC 3), naming the module.
+ */
+const readRemoteKitCli = async (host: string): Promise<Record<string, string>> => {
+  let unreadable: string | null = null;
+  const cli = await readRemoteCliModules((file) => fs.readFile(path.join(CLI_BIN_DIR, file), 'utf-8').catch((err: unknown) => {
+    unreadable ??= `bin/${file}: ${(err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))}`;
+    throw err;
+  }));
+  if (cli === null) throw kitBroken(host, `this server could not read its CLI to ship it: ${unreadable ?? 'bin/cli.js'}`);
+  return cli;
+};
+
+/**
+ * Probe a remote tab's kit without touching its session (story 12 review r1, finding 3): ship the CLI the create
+ * would ship and run the kit probe. A restart calls it before it kills the old session, so a broken kit leaves the
+ * tab alive. Throws `RemoteKitBrokenError` (the probe failed or ran out of time on the host), `RemoteHostError` (ssh
+ * failed or timed out), or an Error for any other exit. A local session has no kit: it returns at once.
+ */
+export const probeRemoteKit = async (name: string): Promise<void> => {
+  const host = await sessionHostOf(name);
+  if (!host) return;
+  const script = buildRemoteKitProbeScript(remoteKitFiles({ tmuxConf: '', cli: await readRemoteKitCli(host), prompt: null }));
+  try {
+    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: script });
+  } catch (err) {
+    if ((err as { code?: unknown }).code === REMOTE_KIT_BROKEN_EXIT) throw kitProbeFailure(host, err);
+    if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)}); nothing was killed`);
+    throw new Error(`the kit probe for ${name} on ${host} failed (${describeRemoteFailure(err)}); nothing was killed`);
+  }
+};
+
 /**
  * A remote tab's session (ADR-0022 §8; slice b). One `ssh … sh -s` run writes
  * the kit (tmux.conf, the Claude hook and hooks.json, this server's CLI, the
@@ -197,21 +240,11 @@ const createRemoteSession = async (
     await writeClaudePromptFile({ id: identity.workspaceId }).catch((err) => log.error(
       `claude prompt for ${identity.workspaceId} not rewritten before remote create; the kit gets the last file written: ${err instanceof Error ? err.message : err}`));
   }
-  let cliUnreadable: string | null = null;
   const [tmuxConf, cli, prompt] = await Promise.all([
     fs.readFile(TMUX_CONFIG_PATH, 'utf-8'),
-    readRemoteCliModules((file) => fs.readFile(path.join(CLI_BIN_DIR, file), 'utf-8').catch((err: unknown) => {
-      cliUnreadable ??= `bin/${file}: ${(err as { code?: string }).code ?? (err instanceof Error ? err.message : String(err))}`;
-      throw err;
-    })),
+    readRemoteKitCli(host),
     identity ? fs.readFile(getClaudePromptPath(identity.workspaceId), 'utf-8').catch(() => null) : Promise.resolve(null),
   ]);
-  // Story 12 AC 3: a create without a CLI to ship is refused before anything reaches the host.
-  if (cli === null) {
-    const kitError = new RemoteKitBrokenError(host, `this server could not read its CLI to ship it: ${cliUnreadable ?? 'bin/cli.js'}`);
-    log.error(kitError.message);
-    throw kitError;
-  }
   const launch = buildRemoteShellLaunchCommand(env, tabEnv ? remoteKitPath(remoteTabEnvRelative(tabEnv.tabId)) : undefined);
   const trust = await remoteTrustTarget(name, identity, cwd);
   const nonce = nanoid(16);
@@ -241,11 +274,7 @@ const createRemoteSession = async (
     ].join('; ');
     await runSsh(host, cleanup, { timeoutMs: CMD_TIMEOUT }).catch(() => {});
     // The kit probe runs before new-session (story 12): no session and no agent started.
-    if ((err as { code?: unknown }).code === REMOTE_KIT_BROKEN_EXIT) {
-      const kitError = new RemoteKitBrokenError(host, remoteKitProbeFailureLine(String((err as { stderr?: unknown }).stderr ?? '')));
-      log.error(kitError.message);
-      throw kitError;
-    }
+    if ((err as { code?: unknown }).code === REMOTE_KIT_BROKEN_EXIT) throw kitProbeFailure(host, err);
     if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)})`);
     throw new Error(`remote session ${name} on ${host} was not created (${describeRemoteFailure(err)})`);
   }
