@@ -1859,7 +1859,9 @@ Question format v2 (ADR-0037):
   <new id>." (event id system:follow-up:<new id>, reserved). The new item must carry a humanReview
   whose humanNeed is not none (400 invalid-request). The 200 body carries "followedUp": { "itemId",
   "answerId", "optionIds", "optionLabels", "text", "resolved" } (a batch with two or more follow-ups
-  carries "followedUps": [...] instead); read the answer there, since its paste is never sent.
+  carries "followedUps": [...] instead); read the answer there, since its paste is never sent. A
+  selected option id that the earlier question no longer holds is labelled "an option no longer in
+  the question", never the id.
   "resolved" is false when the earlier item was already resolved: the store writes the link only.
   Refusals write nothing: an open, candidate or cancelled target 409 with "followsUp": { "reason":
   "not-answered" } (revise an open item with attention.updated instead); another run 409

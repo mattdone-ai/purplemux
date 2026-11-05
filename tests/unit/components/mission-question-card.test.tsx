@@ -438,6 +438,13 @@ describe('follow-up cards (ADR-0037 amendment D2, rule 6), from the follow-up-* 
     expect(html).not.toContain('data-followed-by');
   });
 
+  it('an earlier option the question no longer holds shows the neutral words the server serves, never the id', () => {
+    const gone = { ...later(), followsUp: { ...later().followsUp!, answer: { ...later().followsUp!.answer!, optionIds: ['trial-x'], optionLabels: ['an option no longer in the question'] } } };
+    const html = render(draftOf(gone));
+    expect(html).toContain('You answered: </span>an option no longer in the question');
+    expect(html).not.toContain('trial-x');
+  });
+
   it('a text-only earlier answer reads "no option" with its text; an absent answer says so', () => {
     const textOnly = { ...later(), followsUp: { ...later().followsUp!, answer: { ...later().followsUp!.answer!, optionIds: [], optionLabels: [] } } };
     expect(render(draftOf(textOnly))).toContain('You answered: </span>no option');

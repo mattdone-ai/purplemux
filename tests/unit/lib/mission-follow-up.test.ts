@@ -196,6 +196,21 @@ describe('a follow-up of an answered item (rule 3)', () => {
   });
 });
 
+describe('an option id the frozen question lacks never reaches a face (review r1 finding 4)', () => {
+  it('reads as "an option no longer in the question" in followedUp and in the served followsUp', () => {
+    const { store } = answered();
+    // Corrupt data: the answered question no longer holds the selected option 'keep'.
+    const database = fileOf(store);
+    const row = database.prepare("SELECT question_json FROM attention_items WHERE id = 'item-a'").get() as { question_json: string };
+    const stored = JSON.parse(row.question_json) as { options: Array<{ id: string }> };
+    stored.options = stored.options.filter((option) => option.id !== 'keep');
+    database.prepare("UPDATE attention_items SET question_json = ? WHERE id = 'item-a'").run(JSON.stringify(stored));
+    const result = ask(store, 'item-b', { followsUp: 'item-a' });
+    expect(result.followedUp).toMatchObject({ optionIds: ['keep'], optionLabels: ['an option no longer in the question'] });
+    expect(item(store, 'item-b').followsUp?.answer?.optionLabels).toEqual(['an option no longer in the question']);
+  });
+});
+
 describe('the served item (rule 5)', () => {
   it('serves followsUp with the earlier answer and followedBy with the new item, and null on an item with no link', () => {
     const { store } = answered();

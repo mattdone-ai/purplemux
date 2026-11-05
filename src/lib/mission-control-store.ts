@@ -52,6 +52,7 @@ import {
   diffMissionQuestions,
   mergeMissionChanges,
   questionLint,
+  selectedOptionLabels,
   type TMissionStoredQuestion,
 } from '@/lib/mission-question-format';
 import {
@@ -389,11 +390,9 @@ const NO_LINKS: IMissionItemLinks = { followsUp: null, followedBy: null };
 const questionTitle = (questionJson: string): string =>
   String((JSON.parse(questionJson) as { title?: unknown }).title ?? '');
 
-/** The labels of the selected options, read from the answered (frozen) question; an unknown id reads as itself. */
-const optionLabelsOf = (questionJson: string, optionIds: readonly string[]): string[] => {
-  const options = (JSON.parse(questionJson) as { options?: Array<{ id: string; label: string }> }).options ?? [];
-  return optionIds.map((optionId) => options.find((option) => option.id === optionId)?.label ?? optionId);
-};
+/** The labels of the selected options, read from the answered (frozen) question; an id it lacks never reaches a face. */
+const optionLabelsOf = (questionJson: string, optionIds: readonly string[]): string[] =>
+  selectedOptionLabels((JSON.parse(questionJson) as { options?: Array<{ id: string; label: string }> }).options ?? [], optionIds);
 
 const followsUpView = (target: IItemRow, answer: IAnswerRow | undefined): IMissionFollowsUp => {
   const request = answer ? JSON.parse(answer.request_json) as IMissionAnswerRequest : null;
