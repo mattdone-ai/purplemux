@@ -99,8 +99,23 @@ export const runAutoAnswerPass = async (deps: IAutoAnswerDeps = defaultDeps): Pr
   return outcomes;
 };
 
+/**
+ * The tick's two passes: the bookkeeping rule, then the fleet standing-order proposals (ADR-0041 §1 amendment D7),
+ * which run whatever the auto-answer key holds, so a crash or a restart after the owner's answer cannot lose a Yes.
+ */
+export const runTickPasses = async (
+  autoAnswer: () => Promise<unknown> = () => runAutoAnswerPass(),
+  proposals: () => Promise<unknown> = async () => {
+    const m = await import('@/lib/so-proposal-service');
+    return m.runSoProposalPass(await m.soProposalDeps());
+  },
+): Promise<void> => {
+  await autoAnswer().catch((err) => log.error({ err }, 'auto-answer pass failed'));
+  await proposals().catch((err) => log.error({ err }, 'standing-order proposal pass failed'));
+};
+
 /** One tick per process: a second start is a no-op, and a pass never overlaps the previous one. */
-export const startAutoAnswerTick = (pass: () => Promise<unknown> = () => runAutoAnswerPass()): void => {
+export const startAutoAnswerTick = (pass: () => Promise<unknown> = () => runTickPasses()): void => {
   if (g.__ptAutoAnswerTick) return;
   const tick: { timer: ReturnType<typeof setInterval>; running: Promise<unknown> | null } = {
     timer: setInterval(() => {

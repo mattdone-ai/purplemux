@@ -128,6 +128,8 @@ to an exit code through one table:
      2  usage error (standing orders, ADR-0041)  so-invalid, so-too-large                   fix the command, or strike an order
      3  refused by state (orders, ADR-0041)      so-unreadable, so-struck                   after the file is repaired
      7  not found (standing orders, ADR-0041)    so-not-found                               —
+     3  refused by state (proposal, ADR-0041)    so-proposal-refused (reason duplicate,     after the state changes
+                                                 open-proposal or no-orchestrator-run)
 
 The CLI writes the code and its class to stderr, e.g.
   error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
@@ -742,8 +744,21 @@ POST /api/cli/standing-orders   { "text", "source", "workspaceId"?, "scope"?, "c
 POST /api/cli/standing-orders/<SO-n>/strike   { "reason" }
   The same authority as the order's file. 404 so-not-found; 409 so-struck when already struck (exit 3).
   The order stays in its file with "struck: <UTC> — <reason>".
-CLI: purplemux so add (-w WS | --fleet) --text T --source S [--scope S] [--check C]; so strike
-SO-N --reason R; so list [-w WS] [--all] [--json].
+POST /api/cli/standing-orders/proposals   { "text", "why", "cites"?, "scope"?, "check"? }
+  ADR-0041 §1 amendment D7: the launch tab of the selected portfolio manager only (selectedScrumMasterScope);
+  every other caller, the admin token included, gets 403 forbidden (exit 3). why: one line, at most 200;
+  cites: at most 300, the owner message the manager relays (into the item's context, never the order's
+  source). Checks before the item opens: 400 so-invalid, 400 so-too-large; 409 so-proposal-refused with
+  "reason": duplicate | open-proposal | no-orchestrator-run (exit 3). Then the server opens item
+  so-proposal-<16 hex text><8 hex time> on the manager's bound run: format 2, confirm (yes | no), class
+  scope, no default, nothing recommended. 201 { itemId, workspaceId, runId, workspaces, liveTabs, bytes }.
+  The owner's Yes files the fleet order as the server's admin caller with source "owner answer <answerId>
+  on MC item <itemId> (<UTC date>), proposed by <ws>/<tab>"; No, text alone, a withdrawal
+  (attention.cancelled) or 72 h with no answer files nothing. The item serves proposal: { state
+  (open | filed | declined | expired | withdrawn | not-filed), orderId, reason } | null. For expired and
+  not-filed the proposer tab gets one "[purplemux standing order] proposal <itemId> …" line.
+CLI: purplemux so add (-w WS | --fleet) --text T --source S [--scope S] [--check C]; so propose --text T
+--why W [--cites C] [--scope S] [--check C]; so strike SO-N --reason R; so list [-w WS] [--all] [--json].
 
 ## Fleet config (ADR-0019)
 

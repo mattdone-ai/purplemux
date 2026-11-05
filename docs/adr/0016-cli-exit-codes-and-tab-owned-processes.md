@@ -44,6 +44,7 @@ A second defect sat in front of the CLI. The installed entry point, `bin/purplem
 | 2 | usage error (standing orders, ADR-0041) | `so-invalid`, `so-too-large`: the active orders one workspace loads would pass 8192 bytes; the message names the measured size | fix the command, or strike an order |
 | 3 | refused by state (standing orders, ADR-0041) | `so-unreadable`: an order file is not in its layout and is never read as empty; `so-struck`: the order is already struck | after the file is repaired; a struck order stays struck |
 | 7 | not found (standing orders, ADR-0041) | `so-not-found` | — |
+| 3 | refused by state (standing-order proposal, ADR-0041 §1 amendment D7) | `so-proposal-refused`: `so propose` opened no item; the body's reason is "duplicate" (an active fleet order says the same), "open-proposal" (a proposal of the same text is still open) or "no-orchestrator-run" (the proposer's workspace has no open run bound to its orchestrator) | after the state changes: strike the order, wait for the answer, or start or resume the Mission Control run |
 | 5 | not ready (D14, harness-flow-loop-2 story 05) | `startup-prompt`: `tab send` found the agent at a Claude Code startup dialog (folder trust, external CLAUDE.md imports) and typed nothing; the body names the dialog and the fix | after someone answers the dialog, or with a new tab at a trusted `--cwd`; never on a timer |
 
 3. stderr names the code and its class, e.g. `error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found`. A `readiness-timeout` names the waited milliseconds.

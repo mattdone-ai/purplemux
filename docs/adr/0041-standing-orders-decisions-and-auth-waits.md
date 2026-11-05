@@ -5,7 +5,8 @@ Accepted (2026-11-03, epic `harness-flow-loop`, story 14; architecture ADR-HFL-0
 (a fourth watch kind, `auth`), ADR-0035 (the wake kind `standing-order`, urgent) and ADR-0037 (a server producer of
 format-2 questions).
 Amended 2026-11-04 (defect D7, §1 Authority: the portfolio manager proposes a fleet order and the owner confirms it):
-see the amendment at the end. Its code is deferred to the follow-on harness epic.
+see the amendment at the end. Its code landed in epic `harness-flow-loop-2`, story 02 (`src/lib/so-proposal.ts`,
+`src/lib/so-proposal-service.ts`, `POST /api/cli/standing-orders/proposals`, `purplemux so propose`).
 
 ## Context
 The owner's 572 messages of 20 Oct-3 Nov (harness audit, 2026-11-03) repeat the same rules: access already given 14,
@@ -177,7 +178,11 @@ now. Sources: the triage `_output/harness-flow-loop/briefs/D1-D8-triage.md`, row
 `n-sqL9hVZwJY`, D7.
 
 **Deferred to the follow-on harness epic:** all the code and all the tests below (triage estimate: about 150 agent
-minutes). Until that epic lands, §1 applies unchanged, and the interim workaround below is in force.
+minutes). Until that epic lands, §1 applies unchanged, and the interim workaround below is in force. (Landed:
+`harness-flow-loop-2` story 02. The tests are `tests/unit/lib/so-proposal.test.ts`, `so-proposal-authority.test.ts`,
+`tests/unit/api/so-proposal-answer-route.test.ts`, the `so propose` case of `tests/unit/bin/cli-so-wait.test.ts` and the
+proposal cases of `tests/unit/components/mission-question-card.test.tsx`. The interim workaround ends when the library
+text changes, story 39.)
 
 **Context.** The Portfolio SM (`tab-9gEerd` in `ws-zOfVyu`) ran `so add --fleet` to record an owner rule for every
 seat. The server refused it: "a fleet order is added or struck with the admin token" (`mayChangeOrders`,

@@ -211,6 +211,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'so-not-found': EXIT.NOT_FOUND,
   'so-unreadable': EXIT.CONFLICT,
   'so-struck': EXIT.CONFLICT,
+  'so-proposal-refused': EXIT.CONFLICT,
 }));
 
 // Where the class alone does not tell the caller what happened.
@@ -1344,7 +1345,7 @@ const cmdWait = async (args) => {
 };
 
 // Standing orders (ADR-0041): the owner's rules, written into every Claude tab's workspace prompt file.
-const SO_USAGE = 'usage: so add (-w WS | --fleet) --text TEXT --source "OWNER MESSAGE ID, UTC DATE" [--scope S] [--check HOOK|TEST|prose]; so strike SO-N --reason TEXT; so list [-w WS] [--all] [--json]';
+const SO_USAGE = 'usage: so add (-w WS | --fleet) --text TEXT --source "OWNER MESSAGE ID, UTC DATE" [--scope S] [--check HOOK|TEST|prose]; so propose --text TEXT --why TEXT [--cites TEXT] [--scope S] [--check HOOK|TEST|prose]; so strike SO-N --reason TEXT; so list [-w WS] [--all] [--json]';
 
 const printOrders = (orders) => {
   if (!orders.length) {
@@ -1380,6 +1381,24 @@ const cmdSo = async (args) => {
       const { body } = await api('POST', '/api/cli/standing-orders', data);
       if (rest.includes('--json')) return out(body);
       process.stdout.write(`${body.order.id} added (${body.owner}); its prompt section is ${body.bytes} bytes of 8192; ${body.promptsWritten} prompt file(s) rewritten, ${body.tabsNotified} live tab(s) told\n`);
+      return;
+    }
+    case 'propose': {
+      // The selected portfolio manager proposes a fleet order; the owner's Yes in Mission Control files it (ADR-0041 §1 amendment D7).
+      const positional = stripBooleanFlags(stripFlags(rest, ['--text', '--why', '--cites', '--scope', '--check']), ['--json']);
+      if (positional.length || ws) die(SO_USAGE);
+      const text = flagValue(rest, '--text');
+      const why = flagValue(rest, '--why');
+      if (!text || !why) die(SO_USAGE);
+      const data = { text, why };
+      for (const flag of ['cites', 'scope', 'check']) {
+        const value = flagValue(rest, `--${flag}`);
+        if (value !== null) data[flag] = value;
+      }
+      requireEnv();
+      const { body } = await api('POST', '/api/cli/standing-orders/proposals', data);
+      if (rest.includes('--json')) return out(body);
+      process.stdout.write(`${body.itemId} opened for the owner in Mission Control: Yes files the fleet order as quoted; it reaches ${body.workspaces} workspace(s) and ${body.liveTabs} live agent tab(s); the largest prompt section would be ${body.bytes} bytes of 8192\n`);
       return;
     }
     case 'strike': {
@@ -3455,6 +3474,11 @@ Commands:
                                            every Claude tab it reaches, and one urgent line to each live tab. A
                                            fleet order needs the admin token. Over 8192 bytes of active orders for
                                            one workspace is refused with the measured size (exit 2 so-too-large)
+  so propose --text TEXT --why TEXT [--cites TEXT] [--scope S] [--check NAME|prose]
+                                           The selected portfolio manager only: open a Mission Control item (confirm,
+                                           class scope, no default) for a fleet order; the owner's Yes files it as
+                                           quoted, No or 72 h files nothing. 3 so-proposal-refused: duplicate,
+                                           open-proposal or no-orchestrator-run
   so strike SO-N --reason TEXT             Strike an order; it stays in its file, struck, and live tabs are told
   so list [-w WS] [--all] [--json]         The active orders you load (--all: struck ones too), with their sources
   api-guide                                Print full HTTP API reference

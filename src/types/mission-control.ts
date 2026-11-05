@@ -152,6 +152,33 @@ export interface IMissionAutoAnswer {
   note: string;
 }
 
+/** A fleet standing-order proposal's record (ADR-0041 §1 amendment D7). */
+export const SO_PROPOSAL_STATES = ['open', 'filed', 'declined', 'expired', 'withdrawn', 'not-filed'] as const;
+export type TSoProposalState = (typeof SO_PROPOSAL_STATES)[number];
+
+export interface IMissionSoProposalRecord {
+  itemId: string;
+  workspaceId: string;
+  proposerTabId: string;
+  text: string;
+  scope: string;
+  checkName: string;
+  cites: string | null;
+  state: TSoProposalState;
+  answerId: string | null;
+  orderId: string | null;
+  reason: string | null;
+  createdAt: number;
+  decidedAt: number | null;
+}
+
+/** What an item serves of its proposal: the outcome the owner reads on the card. */
+export interface IMissionSoProposalView {
+  state: TSoProposalState;
+  orderId: string | null;
+  reason: string | null;
+}
+
 export type TMissionHumanReviewInput =
   | {
       humanNeed: 'none';
@@ -202,6 +229,11 @@ export interface IMissionAttentionItem extends Omit<IMissionQuestion, 'evidence'
   blocked?: IMissionBlockedCost;
   /** Owner messages the curator read as an answer to this item (story 23): links, never answers. Absent when none. */
   suggestedAnswers?: IMissionAnswerSuggestion[];
+  /**
+   * The fleet standing-order proposal this item asks about (ADR-0041 §1 amendment D7); null on every other item.
+   * Optional only for an item built by a release that did not serve it.
+   */
+  proposal?: IMissionSoProposalView | null;
   createdAt: number;
   updatedAt: number;
 }

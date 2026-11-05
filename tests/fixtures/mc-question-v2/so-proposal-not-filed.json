@@ -1,0 +1,71 @@
+{
+  "id": "so-proposal-ae0b400994024045690a9380",
+  "workspaceId": "ws-fixture",
+  "runId": "run-fixture",
+  "revision": 2,
+  "state": "answered",
+  "storyIds": [],
+  "blockingScope": "none",
+  "canContinue": true,
+  "recommendation": null,
+  "context": "```text\nQuestions for the owner go to Mission Control first; the note to the Portfolio Scrum Master carries the item id.\n```\n\n- Scope: `fleet`; check: `prose`\n- Proposed by `ws-fixture/tab-sm`, the selected portfolio manager\n- Cites: owner message havmSUlPTFqnamLTshs1b of ws-zOfVyu, 2026-11-04T02:10Z\n- Reaches 9 workspaces and 14 live agent tabs\n- Largest prompt section after the add: 3120 bytes of 8192 (ws-fixture)\n\nYes files the order exactly as quoted. No, text alone, or no answer in 72 h files nothing.",
+  "evidence": {
+    "source": "agent",
+    "sourceId": "system:so-proposal:open:so-proposal-ae0b400994024045690a9380",
+    "observedAt": 1762128000000,
+    "confidence": "confirmed"
+  },
+  "answerId": "a6d1f0c2-1b5e-4c3a-9f0e-2d7b8c9e0a11",
+  "resolution": null,
+  "humanReview": {
+    "humanNeed": "decision",
+    "humanReason": "A fleet standing order reaches every Claude tab on this host; only your Yes files it.",
+    "handling": "Proposed by the selected portfolio manager; the purplemux server opened the item and files the order on your Yes.",
+    "reviewerTabId": "tab-sm",
+    "binding": {
+      "tabId": "tab-sm",
+      "providerId": "claude",
+      "sessionId": "session-1",
+      "generation": 1,
+      "runtimeGeneration": "launch-1"
+    },
+    "eventId": "system:so-proposal:open:so-proposal-ae0b400994024045690a9380",
+    "reviewedAt": 1762300800000
+  },
+  "candidateReason": null,
+  "class": "scope",
+  "defaultOptionId": null,
+  "autoAnswer": null,
+  "lint": [],
+  "changes": null,
+  "createdAt": 1762300800000,
+  "updatedAt": 1762301400000,
+  "formatVersion": 2,
+  "kind": "question",
+  "title": "Fleet standing order: Questions for the owner go to Mission Control first; the…",
+  "decision": "Add this fleet standing order? It reaches every Claude tab on this host.",
+  "whyNow": "The owner said this rule to 3 seats in one day; a fleet order reaches every seat.",
+  "answerType": "confirm",
+  "options": [
+    {
+      "id": "yes",
+      "label": "Yes, file it",
+      "consequence": "Files the order exactly as quoted; every Claude tab loads it until it is struck.",
+      "recommended": false,
+      "needsText": false
+    },
+    {
+      "id": "no",
+      "label": "No",
+      "consequence": "Nothing is filed.",
+      "recommended": false,
+      "needsText": false
+    }
+  ],
+  "evidenceLinks": [],
+  "proposal": {
+    "state": "not-filed",
+    "orderId": null,
+    "reason": "so-too-large: standing orders for ws-fixture would be 8301 bytes, at most 8192: strike an order or shorten this one"
+  }
+}

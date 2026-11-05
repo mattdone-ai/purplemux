@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import MissionControlAnswerCard from '@/components/features/mission-control/mission-control-answer-card';
+import MissionControlAnswerCard, { MissionControlDeliveryCard } from '@/components/features/mission-control/mission-control-answer-card';
+import { proposalOutcomeText } from '@/components/features/mission-control/proposal-outcome';
+import { buildProposalQuestion, proposalItemId } from '@/lib/so-proposal';
 import {
   createMissionDraft,
   editMissionDraft,
@@ -160,7 +162,8 @@ describe('question card layout per answer type (ADR-0037 §5)', () => {
 
 describe('Submit is never disabled without a visible reason (ADR-0037 §4)', () => {
   const drafts = (): Array<[string, IMissionDraft]> => {
-    const names = ['single.json', 'multi.json', 'confirm.json', 'text.json', 'action-done.json', 'needs-text.json', 'long-context.json', 'v1-item.json'];
+    const names = ['single.json', 'multi.json', 'confirm.json', 'text.json', 'action-done.json', 'needs-text.json', 'long-context.json', 'v1-item.json',
+      'so-proposal-open.json'];
     return names.flatMap((name) => {
       const source = item(name);
       const first = source.options[0]?.id;
@@ -410,5 +413,62 @@ describe('a suggested answer from an owner message (story 23 AC 2)', () => {
 
   it('an item without suggestions shows none', () => {
     expect(render(draftOf(item('single.json')))).not.toContain('data-suggested-answers');
+  });
+});
+
+// ADR-0041 §1 amendment D7 test 13: the fleet standing-order proposal card, driven by the so-proposal-* fixtures that the
+// phone reads too. Class Scope, no default, nothing recommended, the order quoted; after the answer, the outcome.
+describe('the fleet standing-order proposal card (so-proposal-*.json)', () => {
+  const fixtureInputs = (): Parameters<typeof buildProposalQuestion> => [
+    { text: 'Questions for the owner go to Mission Control first; the note to the Portfolio Scrum Master carries the item id.', scope: 'fleet',
+      check: 'prose', why: 'The owner said this rule to 3 seats in one day; a fleet order reaches every seat.',
+      cites: 'owner message havmSUlPTFqnamLTshs1b of ws-zOfVyu, 2026-11-04T02:10Z', workspaceId: 'ws-fixture', tabId: 'tab-sm' },
+    { workspaces: 9, liveTabs: 14, bytes: 3120, bytesWorkspace: 'ws-fixture' },
+  ];
+
+  it('the fixtures hold the question the server builds, with the reserved id of its text and open time', () => {
+    const built = buildProposalQuestion(...fixtureInputs());
+    for (const name of ['so-proposal-open.json', 'so-proposal-filed.json', 'so-proposal-not-filed.json']) {
+      const fixture = item(name) as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(built)) expect(fixture[key], `${name} ${key}`).toEqual(value);
+      expect(fixture.id).toBe(proposalItemId(fixtureInputs()[0].text, fixture.createdAt as number));
+      expect(fixture.defaultOptionId).toBeNull();
+    }
+  });
+
+  it('open: class Scope, no default line, no recommended mark, the order text quoted, and the proposal line', () => {
+    const question = item('so-proposal-open.json');
+    const html = render(draftOf(question));
+    expect(html).toContain('>Scope<');
+    expect(html).not.toContain('Default:');
+    expect(html).not.toContain('Recommended');
+    expect(html).toContain(fixtureInputs()[0].text);
+    expect(html).toContain('data-proposal-state="open"');
+    expect(html).toContain('Proposed fleet standing order: Yes files it exactly as quoted');
+    expect(html.match(/<button[^>]*data-option="(yes|no)"/g)).toHaveLength(2);
+  });
+
+  it('after the answer: "Filed as SO-n" or "Not filed: <reason>", on the answer card and the delivery card', () => {
+    const filed = item('so-proposal-filed.json');
+    const notFiled = item('so-proposal-not-filed.json');
+    expect(render(draftOf(filed))).toContain('Filed as SO-12');
+    const delivered = renderToStaticMarkup(<MissionControlDeliveryCard item={filed} answer={undefined} delivery={undefined} workspaceName="Fixture" />);
+    expect(delivered).toContain('Filed as SO-12');
+    const refused = renderToStaticMarkup(<MissionControlDeliveryCard item={notFiled} answer={undefined} delivery={undefined} workspaceName="Fixture" />);
+    expect(refused).toContain(`Not filed: ${notFiled.proposal!.reason}`);
+    expect(refused).toContain('data-proposal-state="not-filed"');
+  });
+
+  it('every other item renders no proposal line; a state this page does not know is said in words, never as its token', () => {
+    expect(render(draftOf(item('confirm.json')))).not.toContain('data-proposal-state');
+    const odd = proposalOutcomeText({ state: 'rescinded' as never, orderId: null, reason: null });
+    expect(odd).toEqual({ text: 'Proposal state not recognised by this page: reload it', tone: 'neutral', served: 'rescinded' });
+    const html = render(draftOf({ ...item('so-proposal-open.json'), proposal: { state: 'rescinded' as never, orderId: null, reason: null } }));
+    expect(html).toContain('data-proposal-state="unknown"');
+    expect(html.replace(/title="[^"]*"/g, '')).not.toContain('rescinded');
+    expect(proposalOutcomeText({ state: 'constructor' as never, orderId: null, reason: null }).served).toBe('constructor');
+    expect(proposalOutcomeText({ state: 'filed', orderId: null, reason: null }).text).toBe('Filed; the order id is not available');
+    expect(proposalOutcomeText({ state: 'not-filed', orderId: null, reason: null }).text).toBe('Not filed: no reason was recorded');
+    for (const state of ['declined', 'expired', 'withdrawn'] as const) expect(proposalOutcomeText({ state, orderId: null, reason: null }).text).toMatch(/nothing filed$/);
   });
 });

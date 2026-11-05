@@ -26,12 +26,15 @@ import type {
   IMissionRun,
   IMissionRunReboundPayload,
   IMissionSnapshot,
+  IMissionSoProposalRecord,
+  IMissionSoProposalView,
   IMissionWorkspaceView,
   TMissionProducerEvent,
   TMissionCandidateReason,
   TMissionHumanReview,
   TMissionItemState,
   TMissionRebindCause,
+  TSoProposalState,
 } from '@/types/mission-control';
 import { AUTO_ANSWERED_LIMIT } from '@/types/mission-control';
 import {
@@ -56,6 +59,7 @@ import {
   autoAnswerSubmissionId,
   type IAutoAnswerRule,
 } from '@/lib/mission-control-auto-answer';
+import { SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX } from '@/lib/mission-control-validation';
 
 const DEFAULT_DB_PATH = path.join(os.homedir(), '.purplemux', 'mission-control.sqlite');
 const SCHEMA_VERSION = 4;
@@ -351,11 +355,59 @@ interface ISuggestionRow {
 
 const suggestionFromRow = (row: ISuggestionRow): IMissionAnswerSuggestion => ({ entryId: row.entry_id, span: row.span, at: row.at });
 
+interface ISoProposalRow {
+  item_id: string;
+  workspace_id: string;
+  proposer_tab_id: string;
+  text: string;
+  scope: string;
+  check_name: string;
+  cites: string | null;
+  state: TSoProposalState;
+  answer_id: string | null;
+  order_id: string | null;
+  reason: string | null;
+  created_at: number;
+  decided_at: number | null;
+}
+
+const soProposalFromRow = (row: ISoProposalRow): IMissionSoProposalRecord => ({
+  itemId: row.item_id,
+  workspaceId: row.workspace_id,
+  proposerTabId: row.proposer_tab_id,
+  text: row.text,
+  scope: row.scope,
+  checkName: row.check_name,
+  cites: row.cites,
+  state: row.state,
+  answerId: row.answer_id,
+  orderId: row.order_id,
+  reason: row.reason,
+  createdAt: row.created_at,
+  decidedAt: row.decided_at,
+});
+
+const soProposalView = (row: ISoProposalRow | undefined): IMissionSoProposalView | null =>
+  (row ? { state: row.state, orderId: row.order_id, reason: row.reason } : null);
+
+/** The record a server proposal item opens with (ADR-0041 §1 amendment D7): written in the item's transaction. */
+export type TMissionSoProposalInput = Pick<IMissionSoProposalRecord, 'proposerTabId' | 'text' | 'scope' | 'checkName' | 'cites'>;
+
+/** A closed proposal's outcome: the step that decided it, with the answer and the order it names. */
+export interface IMissionSoProposalOutcome {
+  state: Exclude<TSoProposalState, 'open'>;
+  answerId?: string | null;
+  orderId?: string | null;
+  reason?: string | null;
+  decidedAt: number;
+}
+
 const itemFromRow = (
   row: IItemRow,
   autoAnswer: IMissionAutoAnswer | null = null,
   changes: IMissionQuestionChanges | null = null,
   suggestions: IMissionAnswerSuggestion[] = [],
+  proposal: IMissionSoProposalView | null = null,
 ): IMissionAttentionItem => {
   const { evidence: evidenceLinks, ...question } = JSON.parse(row.question_json) as TMissionStoredQuestion;
   return {
@@ -377,6 +429,7 @@ const itemFromRow = (
     class: question.class ?? null,
     defaultOptionId: question.defaultOptionId ?? null,
     autoAnswer,
+    proposal,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -465,7 +518,23 @@ export class MissionControlStore {
     this.ensureAutoAnswerTable();
     this.ensureChangesTable();
     this.ensureSuggestionTable();
+    this.ensureSoProposalTable();
   }
+
+  /**
+   * A fleet standing-order proposal (ADR-0041 §1 amendment D7): an unversioned side table like the openers, written in
+   * the item's transaction, so a release from before it still opens the file and ignores the table.
+   */
+  private ensureSoProposalTable = (): void => {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS mission_so_proposals (
+        item_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, proposer_tab_id TEXT NOT NULL, text TEXT NOT NULL,
+        scope TEXT NOT NULL, check_name TEXT NOT NULL, cites TEXT, state TEXT NOT NULL, answer_id TEXT, order_id TEXT,
+        reason TEXT, created_at INTEGER NOT NULL, decided_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS mission_so_proposals_state_idx ON mission_so_proposals(state);
+    `);
+  };
 
   /**
    * One `changes` record per `attention.updated` revision (ADR-0037 §4): an unversioned side table
@@ -661,8 +730,11 @@ export class MissionControlStore {
     (this.database.prepare('SELECT * FROM mission_answer_suggestions WHERE item_id = ? ORDER BY at, entry_id').all(itemId) as ISuggestionRow[])
       .map(suggestionFromRow);
 
+  private proposalRow = (itemId: string): ISoProposalRow | undefined =>
+    this.database.prepare('SELECT * FROM mission_so_proposals WHERE item_id = ?').get(itemId) as ISoProposalRow | undefined;
+
   private item = (row: IItemRow): IMissionAttentionItem =>
-    itemFromRow(row, this.autoAnswerOf(row.id), this.changesOf(row.id), this.suggestionsOf(row.id));
+    itemFromRow(row, this.autoAnswerOf(row.id), this.changesOf(row.id), this.suggestionsOf(row.id), soProposalView(this.proposalRow(row.id)));
 
   private insertEvent = (
     event: TMissionProducerEvent,
@@ -706,8 +778,11 @@ export class MissionControlStore {
       for (const row of this.database.prepare(`SELECT * FROM mission_answer_suggestions${where} ORDER BY at, entry_id`).all(...args) as ISuggestionRow[]) {
         suggestionsByItem.set(row.item_id, [...(suggestionsByItem.get(row.item_id) ?? []), suggestionFromRow(row)]);
       }
+      const proposalByItem = new Map((this.database.prepare(`SELECT * FROM mission_so_proposals${where}`).all(...args) as ISoProposalRow[])
+        .map((row) => [row.item_id, soProposalView(row)]));
       const items = (this.database.prepare(`SELECT * FROM attention_items${where} ORDER BY updated_at DESC`).all(...args) as IItemRow[])
-        .map((row) => itemFromRow(row, autoAnswerByItem.get(row.id) ?? null, changesByItem.get(row.id) ?? null, suggestionsByItem.get(row.id) ?? []));
+        .map((row) => itemFromRow(row, autoAnswerByItem.get(row.id) ?? null, changesByItem.get(row.id) ?? null, suggestionsByItem.get(row.id) ?? [],
+          proposalByItem.get(row.id) ?? null));
       const answersByClass = this.answersByClass(generatedAt, workspaceId);
       const autoAnswered = this.autoAnswered(generatedAt, workspaceId);
       const answers = (this.database.prepare(`SELECT * FROM answers${where} ORDER BY created_at DESC`).all(...args) as IAnswerRow[]).map(answerFromRow);
@@ -956,6 +1031,74 @@ export class MissionControlStore {
       AND state IN ('candidate','open') ORDER BY created_at, id`).all(workspaceId, prefix, prefix) as Array<{ id: string }>)
       .map((row) => row.id);
 
+  /** One served item by id, or null. */
+  attentionItem = (itemId: string): IMissionAttentionItem | null => {
+    const row = this.itemRow(itemId);
+    return row ? this.item(row) : null;
+  };
+
+  /** One proposal record, or null (ADR-0041 §1 amendment D7). */
+  soProposal = (itemId: string): IMissionSoProposalRecord | null => {
+    const row = this.proposalRow(itemId);
+    return row ? soProposalFromRow(row) : null;
+  };
+
+  /** Every proposal still `open`, oldest first: the 60 s pass settles each, whatever the auto-answer key holds. */
+  openSoProposals = (): IMissionSoProposalRecord[] =>
+    (this.database.prepare(`SELECT * FROM mission_so_proposals WHERE state = 'open' ORDER BY created_at, item_id`).all() as ISoProposalRow[])
+      .map(soProposalFromRow);
+
+  /** One answer by id, or null. */
+  answerById = (answerId: string): IMissionAnswer | null => {
+    const row = this.database.prepare('SELECT * FROM answers WHERE id = ?').get(answerId) as IAnswerRow | undefined;
+    return row ? answerFromRow(row) : null;
+  };
+
+  /**
+   * Close an open proposal record with its outcome. False when it was not open: another step decided it first, so the
+   * caller writes no second audit row and sends no second line.
+   */
+  settleSoProposal = (itemId: string, outcome: IMissionSoProposalOutcome): boolean =>
+    this.database.prepare(`UPDATE mission_so_proposals SET state=?, answer_id=COALESCE(?, answer_id), order_id=?, reason=?, decided_at=?
+      WHERE item_id=? AND state='open'`)
+      .run(outcome.state, outcome.answerId ?? null, outcome.orderId ?? null, outcome.reason ?? null, outcome.decidedAt, itemId).changes === 1;
+
+  /**
+   * The 72 h timeout (D7 rule 7): cancel the unanswered item with the server event `system:so-proposal:expire:<itemId>`
+   * and close its record as `expired`, in one transaction. False when the item is no longer open or the record is not
+   * open: an answer or a withdrawal came first.
+   */
+  expireSoProposal = (itemId: string, reason: string, now = Date.now()): boolean => {
+    const transaction = this.database.transaction((): boolean => {
+      const record = this.proposalRow(itemId);
+      const row = this.itemRow(itemId);
+      if (!record || record.state !== 'open' || !row || row.state !== 'open' || row.answer_id) return false;
+      const item = this.item(row);
+      const revision = item.revision + 1;
+      this.database.prepare(`UPDATE attention_items SET revision=?, state='cancelled', resolution=?, updated_at=? WHERE id=?`)
+        .run(revision, reason, now, item.id);
+      this.insertServerEvent({
+        id: `${SO_PROPOSAL_EVENT_PREFIX}expire:${item.id}`,
+        workspaceId: item.workspaceId,
+        runId: item.runId,
+        entityId: item.id,
+        revision,
+        type: 'attention.cancelled',
+        payload: this.eventPayloadWithRouting({ itemId: item.id, reason }, 'cancelled', item.candidateReason, item.humanReview),
+      }, now);
+      this.database.prepare(`UPDATE mission_so_proposals SET state='expired', reason=?, decided_at=? WHERE item_id=? AND state='open'`)
+        .run(reason, now, item.id);
+      return true;
+    });
+    try {
+      return transaction();
+    } catch (error) {
+      if (isMissionControlError(error)) throw error;
+      if (isSqliteFailure(error)) throw new MissionControlError(503, 'storage-unavailable', 'Mission Control storage unavailable');
+      throw error;
+    }
+  };
+
   /** Every open workspace item (candidate or open) with its recorded opener, if any (ADR-0023). */
   openItemOpeners = (): IMissionOpenItemOpener[] => {
     const rows = this.database.prepare(`SELECT a.id AS item_id, a.workspace_id, a.created_at,
@@ -1002,7 +1145,7 @@ export class MissionControlStore {
   applyEvents = (
     events: TMissionProducerEvent[],
     resolvedBindings: ReadonlyMap<string, TMissionIdentity | IMissionEventAuthority | null> = new Map(),
-    options: { questionMinVersion?: 1 | 2 } = {},
+    options: { questionMinVersion?: 1 | 2; soProposals?: ReadonlyMap<string, TMissionSoProposalInput> } = {},
   ): IMissionApplyEventsResult => {
     const transaction = this.database.transaction(() => {
       const committed: IMissionEvent[] = [];
@@ -1020,7 +1163,7 @@ export class MissionControlStore {
         const authority: IMissionEventAuthority = suppliedAuthority && 'resolvedIdentity' in suppliedAuthority
           ? suppliedAuthority
           : { resolvedIdentity: suppliedAuthority, configuredOrchestratorTabId: null };
-        committed.push(this.applyOneEvent(event, requestHash, authority, options.questionMinVersion ?? 1));
+        committed.push(this.applyOneEvent(event, requestHash, authority, options.questionMinVersion ?? 1, options.soProposals?.get(event.eventId) ?? null));
       }
       const cursor = Number((this.database.prepare('SELECT COALESCE(MAX(seq), 0) AS cursor FROM events').get() as { cursor: number }).cursor);
       return { events: committed, cursor, replayed: allReplayed };
@@ -1039,6 +1182,7 @@ export class MissionControlStore {
     requestHash: string,
     authority: IMissionEventAuthority,
     questionMinVersion: 1 | 2,
+    soProposal: TMissionSoProposalInput | null = null,
   ): IMissionEvent => {
     const now = Date.now();
     const resolvedIdentity = authority.resolvedIdentity;
@@ -1138,6 +1282,10 @@ export class MissionControlStore {
         missionConflict('attention item ID is already in use');
       }
       if (itemRow) missionConflict('attention item already exists', this.item(itemRow));
+      // A proposal item and its record are one write (ADR-0041 §1 amendment D7): neither exists without the other.
+      if (itemId.startsWith(SO_PROPOSAL_ITEM_PREFIX) !== (soProposal !== null)) {
+        invalidMissionRequest(`a ${SO_PROPOSAL_ITEM_PREFIX} item opens only with its proposal record, and a record only with that item`);
+      }
       const { itemId: ignored, humanReview: reviewInput, ...question } = event.payload;
       void ignored;
       const humanReview = reviewInput
@@ -1154,6 +1302,12 @@ export class MissionControlStore {
         this.database.prepare(`INSERT OR IGNORE INTO mission_item_openers
           (item_id,workspace_id,tab_id,identity,event_id,opened_at) VALUES (?,?,?,?,?,?)`)
           .run(itemId, event.workspaceId, authority.opener.tabId, authority.opener.identity, event.eventId, now);
+      }
+      if (soProposal) {
+        this.database.prepare(`INSERT INTO mission_so_proposals
+          (item_id,workspace_id,proposer_tab_id,text,scope,check_name,cites,state,answer_id,order_id,reason,created_at,decided_at)
+          VALUES (?,?,?,?,?,?,?,'open',NULL,NULL,NULL,?,NULL)`)
+          .run(itemId, event.workspaceId, soProposal.proposerTabId, soProposal.text, soProposal.scope, soProposal.checkName, soProposal.cites, now);
       }
       this.confirmBootstrap(run.id, now);
       return this.insertEvent(event, itemId, 1, now, requestHash,
