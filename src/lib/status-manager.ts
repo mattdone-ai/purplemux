@@ -49,6 +49,7 @@ import {
   longWaitDue,
   parseIdleNudgeMinutes,
   parseWaitBackstopHours,
+  readTurnEnd,
   reportOnAdmits,
 } from '@/lib/turn-end';
 import { NudgeDeduper } from '@/lib/nudge-dedupe';
@@ -2829,6 +2830,11 @@ export class StatusManager {
       liveRegisteredJobs,
       armedWatches,
     });
+    if (turnEnd.kind !== 'turn-marker') {
+      // One end line carries one marker (D28): a refused line opens nothing, and it is logged with its text.
+      const read = readTurnEnd(snapshot?.lastAssistantTail);
+      if (read?.kind === 'refused') log.warn({ tabId, line: read.line, reason: read.reason }, 'end line refused: it holds two turn markers, so it is no end line');
+    }
     // HANDOFF-READY answers a ROTATE; the check itself waits for the prompt (ADR-0036 §2).
     this.contextLifecycle.onTurnEnd(tabId, snapshot?.lastAssistantTail);
     // A replayed stop ended its turn when it happened, so the idle clocks start there.
@@ -2849,10 +2855,13 @@ export class StatusManager {
     }
     // Whatever its reportOn, a NEEDS-DECISION turn reaches the owner as a Mission Control item (ADR-0041). The item
     // opens before the nudge, so the nudge names it and the orchestrator never copies the question (review r1, R1).
+    // A tab with a reportsTo asks that tab, never the owner (D28, SO-6): only a tab with no reportsTo opens an item.
     let decision: INeedsDecisionResult = { note: '', mustReach: false, asker: null };
     const endLine = turnEnd.kind === 'turn-marker' ? turnEnd.lines.at(-1) : undefined;
     if (stopSeq !== undefined && endLine?.startsWith('NEEDS-DECISION:')) {
-      decision = await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at, previous?.at ?? entry.busySince ?? at);
+      decision = entry.reportsTo && entry.reportsTo !== tabId
+        ? await this.routeNeedsDecisionToReportsTo(tabId, entry, entry.reportsTo, snapshot?.lastAssistantTail, endLine)
+        : await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at, previous?.at ?? entry.busySince ?? at);
       if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
     }
     if (turnEnd.kind === 'turn-marker') {
@@ -2915,11 +2924,31 @@ export class StatusManager {
    */
   private tellAsker(tabId: string, entry: ITabStatusEntry, lineKey: string, notice: TNeedsDecisionAskerNotice): void {
     if (this.isRetired(tabId)) return;
-    const key = `${lineKey}:${notice.kind === 'item' ? 'item' : 'not-opened'}:${notice.itemId}`;
+    const key = `${lineKey}:${notice.kind}:${'itemId' in notice ? notice.itemId : ''}`;
     if (onceADay(needsDecisionAskerNotices(), key, Date.now()) !== null) return;
     void this.tabEvents.route({
       workspaceId: entry.workspaceId, tabId, kind: 'mission', text: needsDecisionAskerNotice(notice), class: classifyWake('mission'),
     }).catch((err) => log.warn(`NEEDS-DECISION notice to ${tabId} failed: ${err instanceof Error ? err.message : err}`));
+  }
+
+  /**
+   * A NEEDS-DECISION line of a tab with a reportsTo (D28): the question belongs to that tab, so no owner item opens and no
+   * owner push goes out. The nudge goes to the tab's escalation target (its live reportsTo, else the orchestrator) whatever
+   * its reportOn, and the asker hears of it only when no tab receives it.
+   */
+  private async routeNeedsDecisionToReportsTo(
+    tabId: string, entry: ITabStatusEntry, reportsTo: string, tail: string | null | undefined, markerLine: string,
+  ): Promise<INeedsDecisionResult> {
+    const full = lastTurnLine(tail);
+    const line = full?.line.startsWith('NEEDS-DECISION:') ? full.line : markerLine;
+    const ws = await getWorkspaceByIdCached(entry.workspaceId);
+    const target = ws ? this.escalationTarget(tabId, entry, ws) : null;
+    log.info({ tabId, reportsTo, target, line }, 'NEEDS-DECISION of a tab with reportsTo: sent to that tab, no owner item (D28)');
+    return {
+      note: ` [no owner item: this tab reports to ${reportsTo}, so its NEEDS-DECISION is answered by you, never sent to the owner (SO-6); answer it, or ask the owner on your own end line]`,
+      mustReach: true,
+      asker: { lineKey: needsDecisionLineKey(entry.workspaceId, tabId, line), notice: { kind: 'reports-to', reportsTo, target }, ifUnheard: true },
+    };
   }
 
   /**
@@ -2944,6 +2973,14 @@ export class StatusManager {
     }
     if (!outcome.opened && outcome.reason === 'not-needs-decision') return { note: '', mustReach: false, asker: null };
     const lineKey = needsDecisionLineKey(entry.workspaceId, tabId, line);
+    // No `?`: the opener refused and logged it (D28). No push and no "open it yourself" note: the line asks nothing.
+    if (!outcome.opened && outcome.reason === 'no-question') {
+      return {
+        note: ' [no MC item: the NEEDS-DECISION line holds no question mark, so the server opened nothing and told no one]',
+        mustReach: false,
+        asker: { lineKey, notice: { kind: 'no-question' }, ifUnheard: true },
+      };
+    }
     const ws = await getWorkspaceByIdCached(entry.workspaceId);
     // The note rides the nudge to the escalation target; when that nudge does not go out, the asker hears it itself.
     const itemNotice = (state: 'opened' | 'already-open', itemId: string): INeedsDecisionResult['asker'] =>

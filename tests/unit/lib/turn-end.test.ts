@@ -3,11 +3,14 @@ import {
   AGENT_STALL_WINDOW_MS,
   IDLE_NUDGE_DEFAULT_MS,
   SHELL_STALL_BACKSTOP_MS,
+  TURN_TAIL_CHARS,
   classifyTurnEnd,
   extractTurnMarker,
   holdsOffStall,
   isBackgroundWaitStalled,
+  lastTurnLine,
   parseIdleNudgeMinutes,
+  readTurnEnd,
 } from '@/lib/turn-end';
 
 const input = (tail: string | null | undefined, open = 0, jobs = 0, transcript = true, watches = 0) => ({
@@ -26,8 +29,11 @@ describe('extractTurnMarker', () => {
     },
   );
 
-  it('ignores a marker that is not on the last non-empty line', () => {
-    expect(extractTurnMarker('DONE: earlier\nstill working on the rest')).toBeNull();
+  // Story 09 AC 2 re-read: an EARLIER paragraph is never read. In ONE paragraph a marker first line now joins (R-09).
+  it('ignores a marker that is not in the last paragraph', () => {
+    expect(extractTurnMarker('DONE: earlier\n\nstill working on the rest')).toBeNull();
+    expect(extractTurnMarker('DONE: earlier\n\nstill working\non the rest')).toBeNull();
+    expect(extractTurnMarker('Intro.\n\nDONE: earlier\n\n> still working')).toBeNull();
   });
 
   it('ignores a marker word mid-line and lower-case forms', () => {
@@ -55,6 +61,85 @@ describe('extractTurnMarker', () => {
     const [line] = extractTurnMarker(`DONE: ${'x'.repeat(400)}`)!;
     expect(line).toHaveLength(301);
     expect(line.endsWith('…')).toBe(true);
+  });
+
+  describe('a wrapped end line (story 09, R-09)', () => {
+    // hfl-36's own end, 2026-11-04: the watchdog read no end line and sent idle-no-end-line.
+    const HFL36_FIRST = 'DONE: story 36 carries done (asker notice, one id per line key, the push body at 400 code points);';
+    const HFL36_SECOND = 'gate 36-r4 VALID TREE_START=4b1c0e9 TREE_END=4b1c0e9; not committed.';
+
+    it('joins the first line of the last paragraph with its continuation lines, by one space (hfl-36 fixture)', () => {
+      expect(extractTurnMarker(`Gate log read.\n\n${HFL36_FIRST}\n${HFL36_SECOND}\n`)).toEqual([`${HFL36_FIRST} ${HFL36_SECOND}`]);
+      expect(classifyTurnEnd(input(`${HFL36_FIRST}\n${HFL36_SECOND}`))).toEqual({ kind: 'turn-marker', lines: [`${HFL36_FIRST} ${HFL36_SECOND}`] });
+    });
+
+    it('joins three lines, strips emphasis on each, and clips the joined line at 300 chars', () => {
+      expect(extractTurnMarker('Report.\n\n**BLOCKED: gate red**\n  on lint\n_needs a rerun_')).toEqual(['BLOCKED: gate red on lint needs a rerun']);
+      const [line] = extractTurnMarker(`Report.\n\nDONE: ${'x'.repeat(200)}\n${'y'.repeat(200)}`)!;
+      expect(line).toHaveLength(301);
+      expect(line.startsWith(`DONE: ${'x'.repeat(200)} y`)).toBe(true);
+    });
+
+    it('returns no marker when the first line of the last paragraph has none', () => {
+      expect(extractTurnMarker('Report.\n\nThe gate is green and\nDONE is near.')).toBeNull();
+      expect(extractTurnMarker('Report.\n\nnot yet: DONE: x\nmore text')).toBeNull();
+    });
+
+    it('keeps a marker on the last non-empty line exactly as before, with its READY-TO-MERGE ride-along', () => {
+      expect(extractTurnMarker('Summary of the work\nDONE: x')).toEqual(['DONE: x']);
+      expect(extractTurnMarker(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2', 'DONE: both'].join('\n'))).toEqual(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2', 'DONE: both']);
+    });
+
+    it('lets READY-TO-MERGE lines that open the paragraph ride along above a wrapped DONE', () => {
+      expect(extractTurnMarker(['Report.', '', 'READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2', 'DONE: both PRs', 'are green.'].join('\n')))
+        .toEqual(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2', 'DONE: both PRs are green.']);
+      expect(extractTurnMarker(['READY-TO-MERGE: a#1', '', 'DONE: wrapped', 'line'].join('\n'))).toEqual(['READY-TO-MERGE: a#1', 'DONE: wrapped line']);
+    });
+
+    it('reads no marker from a paragraph that starts at the first character of a cut tail: its start may be missing', () => {
+      // The message said "the story is not DONE: x …"; the 600-char cut happens to start at the marker word.
+      const cut = `DONE: x ${'z'.repeat(TURN_TAIL_CHARS - 16)}\nwrapped`;
+      expect(cut.length).toBe(TURN_TAIL_CHARS);
+      expect(extractTurnMarker(cut)).toBeNull();
+      expect(readTurnEnd('DONE: x\nwrapped')).toEqual({ kind: 'marker', lines: ['DONE: x wrapped'], complete: true });
+      expect(readTurnEnd(`Report.\n\n${cut}`.slice(-TURN_TAIL_CHARS - 9))).toMatchObject({ kind: 'marker', complete: true });
+    });
+
+    it('gives lastTurnLine the joined line, unclipped', () => {
+      const long = `NEEDS-DECISION: ${'which rule do we ship '.repeat(14)}`;
+      expect(lastTurnLine(`Ok.\n\n${long}\n? (a) base (b) transaction`)).toEqual({ line: `${long.trim()} ? (a) base (b) transaction`, complete: true });
+      expect(lastTurnLine('Ok.\n\nno marker here')).toEqual({ line: 'no marker here', complete: true });
+    });
+  });
+
+  describe('one end line carries one marker, at its start (D28)', () => {
+    // v2-scope, ws-ldhziO, 2026-11-05: this line opened owner item nd-cf48b3c9f54f03b198611166b93df723.
+    const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: /home/mdone/.local/share/v2-scope/HANDOFF-SO9-1103.md …';
+
+    it('reads the D28 line as no marker, and says why', () => {
+      expect(extractTurnMarker(`Scope pass done.\n\n${D28}`)).toBeNull();
+      expect(readTurnEnd(`Scope pass done.\n\n${D28}`)).toEqual({ kind: 'refused', reason: 'two-markers', line: D28 });
+      expect(classifyTurnEnd(input(D28))).toEqual({ kind: 'ready-for-review', transcript: true });
+    });
+
+    it('refuses any two markers on one end line, also when the second arrives on a wrapped line', () => {
+      expect(readTurnEnd('DONE: x; BLOCKED: y')).toMatchObject({ kind: 'refused' });
+      expect(readTurnEnd('DONE: x\n(see READY-TO-MERGE: a#1)')).toMatchObject({ kind: 'refused', line: 'DONE: x (see READY-TO-MERGE: a#1)' });
+      expect(readTurnEnd('DONE: a\nBLOCKED: b\nmore')).toMatchObject({ kind: 'refused' });
+    });
+
+    it('does not count a marker word that is part of a longer token, nor a lower-case one', () => {
+      expect(extractTurnMarker('DONE: renamed XDONE: and PRE-DONE: keys; done: lower')).toEqual(['DONE: renamed XDONE: and PRE-DONE: keys; done: lower']);
+    });
+
+    it('never counts a marker quoted mid-sentence', () => {
+      expect(extractTurnMarker('The worker wrote NEEDS-DECISION: ship it?')).toBeNull();
+      expect(readTurnEnd('I will not send the NEEDS-DECISION: ORCH holds it.')).toBeNull();
+    });
+
+    it('stops the READY-TO-MERGE ride-along at a line that holds two markers', () => {
+      expect(extractTurnMarker(['READY-TO-MERGE: a#1', 'READY-TO-MERGE: b#2 DONE: soon', 'DONE: x'].join('\n'))).toEqual(['DONE: x']);
+    });
   });
 
   it('returns null for an empty or missing tail', () => {

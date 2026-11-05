@@ -289,7 +289,7 @@ describe('stop classification (ADR-0018)', () => {
     const ORCH_TAIL = ` You are the orchestrator: resume or start your Mission Control run, then open item ${ID} from your line with your human review.`;
     const pushes = () => alerts.dispatch.mock.calls.map(([draft]) => draft as { kind: string; title: string; body: string; tabId: string; workspaceId: string })
       .filter((draft) => draft.kind === 'needs-decision');
-    /** Workspace ws-1 with no orchestrator; the worker reports to root, so its nudge (and note) still has a reader. */
+    /** Workspace ws-1 with no orchestrator. The worker has no reportsTo (D28: a reportsTo tab never opens an owner item), so no nudge goes out and the asker hears the note. */
     const noOrchestrator = () => {
       const ws = { id: 'ws-1', name: 'ws', directories: [mockHome.value] };
       workspaceStore.getWorkspaceByIdCached.mockResolvedValue(ws);
@@ -325,11 +325,11 @@ describe('stop classification (ADR-0018)', () => {
       needsDecision.open.mockResolvedValueOnce({ opened: false, reason: 'no-orchestrator', itemId: ID });
       const { manager, paste } = await managerWithPaste();
       const line = `NEEDS-DECISION: [money] Pay the vendor the €${'9'.repeat(5)} invoice today or wait for the credit note that ${'x'.repeat(80)}?`;
-      manager.registerTab('worker', { ...worker('claude-code', await writeLines('claude/nd6.jsonl', [claudeEnd(`Ok.\n\n${line}`)])), reportsTo: 'root' });
+      manager.registerTab('worker', worker('claude-code', await writeLines('claude/nd6.jsonl', [claudeEnd(`Ok.\n\n${line}`)])));
       manager.updateTabFromHook('tmux-worker', 'stop');
-      await waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
       expect(sentTo(paste, 'tmux-worker')).toEqual([notOpened('no-orchestrator', 'owner push dispatched, delivery not confirmed')]);
-      expect(sentTo(paste, 'tmux-root')[0]).toContain(' [no MC item (no-orchestrator): owner push dispatched, delivery not confirmed] — read with');
+      expect(sentTo(paste, 'tmux-root')).toEqual([]);
       const [push] = pushes();
       expect(pushes()).toHaveLength(1);
       expect(push).toMatchObject({ title: 'Decision needed: no Mission Control item', tabId: 'worker', workspaceId: 'ws-1' });
@@ -343,33 +343,35 @@ describe('stop classification (ADR-0018)', () => {
       needsDecision.open.mockResolvedValue({ opened: false, reason: 'no-orchestrator', itemId: ID });
       const { manager, paste } = await managerWithPaste();
       const line = 'NEEDS-DECISION: Ship it?';
-      const entry = { ...worker('claude-code', await writeLines('claude/nd7.jsonl', [claudeEnd(`Ok.\n\n${line}`)])), reportsTo: 'root' };
+      const entry = worker('claude-code', await writeLines('claude/nd7.jsonl', [claudeEnd(`Ok.\n\n${line}`)]));
       manager.registerTab('worker', entry);
       manager.updateTabFromHook('tmux-worker', 'stop');
-      await waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+      // The asker's own notice is once a day per line; forget it, so the second stop shows the fate it carries.
+      delete (globalThis as { __ptNeedsDecisionAskerNotices?: unknown }).__ptNeedsDecisionAskerNotices;
       manager.updateTabFromHook('tmux-worker', 'prompt-submit');
       manager.updateTabFromHook('tmux-worker', 'stop');
-      await waitFor(() => expect(paste).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
       await settle();
-      expect(sentTo(paste, 'tmux-worker')).toHaveLength(1);
-      expect(sentTo(paste, 'tmux-root')[1]).toMatch(/ \[no MC item \(no-orchestrator\): owner push for this line already dispatched at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] — read with/);
+      expect(sentTo(paste, 'tmux-root')).toEqual([]);
+      expect(sentTo(paste, 'tmux-worker')[1]).toMatch(/; owner push for this line already dispatched at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\. Its id would be /);
       expect(pushes()).toHaveLength(1);
       needsDecision.open.mockReset();
       needsDecision.open.mockImplementation(async () => ({ opened: true, itemId: ID, runId: 'run-a' }));
     });
 
-    it('(ii): a dispatch that never settles does not hold the stop: the tab reaches ready-for-review and the nudge is sent', async () => {
+    it('(ii): a dispatch that never settles does not hold the stop: the tab reaches ready-for-review and the asker is told', async () => {
       noOrchestrator();
       needsDecision.open.mockResolvedValueOnce({ opened: false, reason: 'no-orchestrator', itemId: ID });
       alerts.dispatch.mockImplementationOnce(() => new Promise(() => {}));
       const { manager, paste } = await managerWithPaste();
       const line = 'NEEDS-DECISION: Ship it?';
-      const entry = { ...worker('claude-code', await writeLines('claude/nd8.jsonl', [claudeEnd(`Ok.\n\n${line}`)])), reportsTo: 'root' };
+      const entry = worker('claude-code', await writeLines('claude/nd8.jsonl', [claudeEnd(`Ok.\n\n${line}`)]));
       manager.registerTab('worker', entry);
       manager.updateTabFromHook('tmux-worker', 'stop');
-      await waitFor(() => expect(sentTo(paste, 'tmux-root')).toHaveLength(1));
+      await waitFor(() => expect(sentTo(paste, 'tmux-worker')).toHaveLength(1));
       expect(entry.cliState).toBe('ready-for-review');
-      expect(sentTo(paste, 'tmux-root')[0]).toContain('owner push dispatched, delivery not confirmed');
+      expect(sentTo(paste, 'tmux-worker')[0]).toContain('owner push dispatched, delivery not confirmed');
     });
 
     const askerIsOrchestrator = () => {
@@ -486,6 +488,98 @@ describe('stop classification (ADR-0018)', () => {
       expect(paste.mock.calls[1][1]).toContain('item-not-opened: no-orchestrator-run (worker)');
       needsDecision.open.mockReset();
       needsDecision.open.mockImplementation(async () => ({ opened: true, itemId: ID, runId: 'run-a' }));
+    });
+
+    describe('D28: a reportsTo tab asks its reportsTo; one marker per end line; no question, no item', () => {
+      const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: /home/mdone/.local/share/v2-scope/HANDOFF-SO9-1103.md …';
+      const ROUTED = ' [no owner item: this tab reports to root, so its NEEDS-DECISION is answered by you, never sent to the owner (SO-6); answer it, or ask the owner on your own end line]';
+
+      it('a tab with reportsTo: no owner item and no push; the nudge goes to its reportsTo whatever its reportOn', async () => {
+        const { manager, paste } = await managerWithPaste();
+        const line = 'NEEDS-DECISION: Ship it?';
+        manager.registerTab('worker', { ...worker('claude-code', await writeLines('claude/d28a.jsonl', [claudeEnd(`Ok.\n\n${line}`)])), reportsTo: 'root', reportOn: ['DONE'] as TTurnMarkerName[] });
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+        await settle();
+        expect(needsDecision.open).not.toHaveBeenCalled();
+        expect(pushes()).toEqual([]);
+        expect(sentTo(paste, 'tmux-root')).toEqual([`[orchestrator-watchdog] worker worker (w1) ended: ${line}${ROUTED} — read with: purplemux tab result -w ws-1 worker`]);
+        expect(sentTo(paste, 'tmux-worker')).toEqual([]);
+        expect(manager.getReportOnFilteredCount()).toBe(0);
+      });
+
+      it('a tab with no reportsTo still opens the owner item from the same line', async () => {
+        askerIsOrchestrator();
+        const { manager, paste } = await managerWithPaste();
+        manager.registerTab('worker', worker('claude-code', await writeLines('claude/d28b.jsonl', [claudeEnd('Ok.\n\nNEEDS-DECISION: Ship it?')])));
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+        expect(needsDecision.open).toHaveBeenCalledTimes(1);
+        expect(sentTo(paste, 'tmux-worker')[0]).toContain(`[MC item ${ID} opened for the owner by the server`);
+      });
+
+      it('the D28 line from v2-scope opens nothing: two markers on one line are no end line', async () => {
+        const { manager, paste } = await managerWithPaste();
+        const entry = { ...worker('claude-code', await writeLines('claude/d28c.jsonl', [claudeEnd(`Scope pass done.\n\n${D28}`)])), tabName: 'v2-scope', reportsTo: 'root' };
+        manager.registerTab('worker', entry);
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(entry.cliState).toBe('ready-for-review'));
+        await settle();
+        expect(needsDecision.open).not.toHaveBeenCalled();
+        expect(pushes()).toEqual([]);
+        expect(paste).not.toHaveBeenCalled();
+        expect(entry.turnEnd).toMatchObject({ kind: 'ready-for-review' });
+      });
+
+      it('a reportsTo that no tab can receive: still no owner item or push, and the asker is told', async () => {
+        noOrchestrator();
+        const { manager, paste } = await managerWithPaste();
+        manager.registerTab('worker', { ...worker('claude-code', await writeLines('claude/d28d.jsonl', [claudeEnd('Ok.\n\nNEEDS-DECISION: Ship it?')])), reportsTo: 'tab-gone' });
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+        expect(needsDecision.open).not.toHaveBeenCalled();
+        expect(pushes()).toEqual([]);
+        expect(sentTo(paste, 'tmux-worker')).toEqual([
+          '[needs-decision] item-not-opened: reports-to. You report to tab-gone, so your NEEDS-DECISION line goes to that tab, never to the owner\'s Mission Control; no tab received it: tab-gone is not a live agent tab and the workspace has no other orchestrator.',
+        ]);
+      });
+
+      it('no question mark: the server refuses the item, sends no push and no "open it yourself" note', async () => {
+        needsDecision.open.mockResolvedValueOnce({ opened: false, reason: 'no-question' });
+        const { manager, paste } = await managerWithPaste();
+        const line = 'NEEDS-DECISION: is not mine to send — ORCH holds it.';
+        manager.registerTab('worker', worker('claude-code', await writeLines('claude/d28e.jsonl', [claudeEnd(`Ok.\n\n${line}`)])));
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+        await settle();
+        expect(needsDecision.open.mock.calls[0][1]).toMatchObject({ line });
+        expect(pushes()).toEqual([]);
+        expect(sentTo(paste, 'tmux-root')).toEqual([`[orchestrator-watchdog] worker worker (w1) ended: ${line} [no MC item: the NEEDS-DECISION line holds no question mark, so the server opened nothing and told no one] — read with: purplemux tab result -w ws-1 worker`]);
+        expect(sentTo(paste, 'tmux-worker')).toEqual([]);
+      });
+
+      it('no question mark from the orchestrator itself: no push, and it is told why', async () => {
+        askerIsOrchestrator();
+        needsDecision.open.mockResolvedValueOnce({ opened: false, reason: 'no-question' });
+        const { manager, paste } = await managerWithPaste();
+        manager.registerTab('worker', worker('claude-code', await writeLines('claude/d28f.jsonl', [claudeEnd('Ok.\n\nNEEDS-DECISION: pick one (a) keep (b) revert')])));
+        manager.updateTabFromHook('tmux-worker', 'stop');
+        await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+        expect(pushes()).toEqual([]);
+        expect(sentTo(paste, 'tmux-worker')[0]).toMatch(/^\[needs-decision\] item-not-opened: no-question\. /);
+      });
+    });
+
+    it('reads a wrapped DONE line as the end line: the nudge carries it joined (story 09, hfl-36 fixture)', async () => {
+      const { manager, paste } = await managerWithPaste();
+      const first = 'DONE: story 36 carries done (asker notice, one id per line key, the push body at 400 code points);';
+      const second = 'gate 36-r4 VALID TREE_START=4b1c0e9 TREE_END=4b1c0e9; not committed.';
+      const entry = worker('claude-code', await writeLines('claude/wrap.jsonl', [claudeEnd(`Gate log read.\n\n${first}\n${second}`)]));
+      manager.registerTab('worker', entry);
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
+      expect(paste).toHaveBeenCalledWith('tmux-root', `[orchestrator-watchdog] worker worker (w1) ended: ${first} ${second} — read with: purplemux tab result -w ws-1 worker`);
+      expect(entry.turnEnd).toMatchObject({ kind: 'turn-marker', marker: [`${first} ${second}`] });
     });
 
     it('opens no item for another end line', async () => {

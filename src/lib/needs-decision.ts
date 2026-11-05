@@ -31,6 +31,9 @@ const clipAtWord = (text: string, max: number): string => {
 
 export const isNeedsDecisionLine = (line: string | undefined): line is string => !!line && line.trim().startsWith(MARKER);
 
+/** Whether the text after the marker asks something: it holds a question mark (D28 v2 addendum: no `?`, no item). */
+export const needsDecisionAsks = (line: string): boolean => /[?？]/.test(line.trim().slice(MARKER.length));
+
 /** The line without its marker and class tag, whitespace collapsed: the owner push's text (ADR-0041 §2). */
 export const needsDecisionText = (line: string): string =>
   line.trim().slice(MARKER.length).trim().replace(TAG, '').replace(/\s+/g, ' ').trim();
