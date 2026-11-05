@@ -85,7 +85,9 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
 
   it('the create tags the session in the same tmux command as new-session (review r2 nit 1)', async () => {
     const { buildRemoteCreateScript } = await import('@/lib/remote-kit');
-    const script = buildRemoteCreateScript({ nonce: 'N0nce', files: [], session: 'pt-ws-a-pane-p-tab-r', cols: 80, rows: 24, launch: 'sh -l' });
+    const { remoteKitFiles } = await import('@/lib/remote-kit');
+    const files = remoteKitFiles({ tmuxConf: '', cli: { 'cli.js': '' }, prompt: null });
+    const script = buildRemoteCreateScript({ nonce: 'N0nce', files, session: 'pt-ws-a-pane-p-tab-r', cols: 80, rows: 24, launch: 'sh -l' });
     const line = script.split('\n').find((l) => l.includes("'new-session'"));
     expect(line).toMatch(/'new-session' .* 'sh -l' ';' 'set-option' '-t' '=pt-ws-a-pane-p-tab-r:' '@pmux-create' 'N0nce'$/);
     expect(script.split('\n').filter((l) => l.includes('@pmux-create'))).toHaveLength(1);

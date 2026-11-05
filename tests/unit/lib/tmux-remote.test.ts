@@ -289,6 +289,36 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(remoteCommand(calls.list[1])).toBe(`[ "$('tmux' '-L' 'pmux-mdserver1' 'show-options' '-qv' '-t' '=${REMOTE}:' '@pmux-create' 2>/dev/null)" = '${nonce}' ] && 'tmux' '-L' 'pmux-mdserver1' 'kill-session' '-t' '=${REMOTE}'; true; rm -f "$HOME/.purplemux-remote/mdserver1/tabs/tab-remote1.env"`);
   });
 
+  // Story 12: the kit's CLI runs once on the host before any session starts; a CLI that does not run refuses the create.
+  it('a kit whose CLI does not run on the host refuses the create with remote-kit-broken, naming the module and the host, and removes the env file', async () => {
+    const stderr = "pmux-kit-probe: node:internal/modules/cjs/loader:1228\npmux-kit-probe:   throw err;\npmux-kit-probe: Error: Cannot find module './curator-spot-check-event.js'\npmux-kit-probe: Require stack:\n";
+    replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 18, stderr } : { stdout: '' });
+    const { createSession } = await import('@/lib/tmux');
+    const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await expect(creating).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: "Error: Cannot find module './curator-spot-check-event.js'" });
+    await expect(creating).rejects.toThrow("the CLI kit does not run on ai-server (Error: Cannot find module './curator-spot-check-event.js'); no agent started");
+    expect(calls.list).toHaveLength(2);
+    expect(remoteCommand(calls.list[1])).toContain('rm -f "$HOME/.purplemux-remote/mdserver1/tabs/tab-remote1.env"');
+  });
+
+  it('a CLI this server cannot read refuses the create before anything reaches the host, naming the module', async () => {
+    const fsModule = (await import('fs/promises')).default;
+    const realRead = fsModule.readFile.bind(fsModule);
+    const read = vi.spyOn(fsModule, 'readFile').mockImplementation(((file: Parameters<typeof realRead>[0], ...rest: unknown[]) => (
+      String(file).endsWith('/bin/curator-spot-check-event.js')
+        ? Promise.reject(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }))
+        : (realRead as (...a: unknown[]) => Promise<unknown>)(file, ...rest)
+    )) as typeof fsModule.readFile);
+    try {
+      const { createSession } = await import('@/lib/tmux');
+      const creating = createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+      await expect(creating).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server', line: 'this server could not read its CLI to ship it: bin/curator-spot-check-event.js: ENOENT' });
+      expect(calls.list.filter((c) => c.cmd === 'ssh')).toEqual([]);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it('a name that already exists on the host is refused before any file is written, and that session is never touched (review r1 B2)', async () => {
     replies.fn = (_cmd, args) => (args.at(-1) === 'sh -s' ? { code: 17, stderr: `pmux: session ${REMOTE} already exists` } : { stdout: '' });
     const { createSession } = await import('@/lib/tmux');
@@ -306,7 +336,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(remoteCommand(calls.list[0])).toBe('sh -s');
     const script = calls.list[0].input ?? '';
     const lines = script.trim().split('\n');
-    const order = ['has-session', 'put ', 'new-session', '@pmux-create', 'source-file'].map((word) => lines.findIndex((l) => l.includes(word)));
+    const order = ['has-session', 'put ', 'if ! pmux_probe=$(', 'new-session', '@pmux-create', 'source-file'].map((word) => lines.findIndex((l) => l.includes(word)));
     expect(order.every((i) => i >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(script).toContain(`'tmux' '-u' '-L' 'pmux-mdserver1' '-f' "$d/tmux.conf" 'new-session' '-d' '-s' '${REMOTE}' '-x' '120' '-y' '40' '-c' '/home/mdone/code/nomupay'`);
