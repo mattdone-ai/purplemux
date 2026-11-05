@@ -97,6 +97,18 @@ vi.mock('@/lib/fcm-channel', () => ({ registerFcmChannel: vi.fn() }));
 vi.mock('@/lib/claude-usage-poller', () => ({ createClaudeUsagePoller: () => ({ start: () => {}, stop: () => {} }) }));
 vi.mock('@/lib/rate-limits-watcher', () => ({ createRateLimitsWatcher: () => ({ start: () => {}, stop: () => {} }) }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await Promise.all([
+  import('@/lib/providers'),
+  import('@/lib/status-manager'),
+  import('@/lib/hook-dispatch'),
+  import('@/lib/hook-spool'),
+  import('@/lib/inbox-dispatcher'),
+  import('@/pages/api/health'),
+]);
+
 const g = globalThis as unknown as { __ptStatusManager?: StatusManager };
 
 const tab = (id: string): ITab => ({ id, name: id, order: 0, sessionName: `tmux-${id}`, panelType: 'claude-code' });

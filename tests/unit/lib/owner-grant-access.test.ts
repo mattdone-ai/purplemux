@@ -24,6 +24,18 @@ vi.mock('@/lib/caller', () => ({
   } : null)),
 }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await Promise.all([
+  import('@/lib/grant-store'),
+  import('@/lib/grant-service'),
+  import('@/lib/cli-utils'),
+  import('@/pages/api/cli/inbox/index'),
+  import('@/pages/api/cli/mission-control/events'),
+  import('@/pages/api/cli/workspaces/[workspaceId]/standup'),
+]);
+
 const HOUR = 60 * 60 * 1000;
 const OWNER: TCliScope = { type: 'workspace', workspaceId: 'ws-1', tabId: 'tab-o', tabVerified: true, tabIdentity: 'launch' };
 const OWNER_HOOK: TCliScope = { type: 'workspace', workspaceId: 'ws-1', tabId: 'tab-o', tabIdentity: 'hook' };

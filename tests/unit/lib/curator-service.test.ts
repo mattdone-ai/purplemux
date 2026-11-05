@@ -38,6 +38,14 @@ const HOUR = 3_600_000;
 const admin: ICaller = { scope: { type: 'admin' } as ICaller['scope'], workspaceId: null, tabId: null, tabName: null, verified: false, identity: 'none', admin: true };
 const authority = { isWorkspaceOrchestrator: vi.fn(async () => false), now: () => 1 };
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await Promise.all([
+  import('@/lib/curator-service'),
+  import('@/lib/fleet-config-http'),
+]);
+
 let directory = '';
 let home: ReturnType<typeof vi.spyOn>;
 let fetchMock: ReturnType<typeof vi.fn>;
