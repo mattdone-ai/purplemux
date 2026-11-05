@@ -951,7 +951,26 @@ const missionAsk = async (rest, wsId) => {
   if (!event || !['attention.opened', 'attention.updated'].includes(event.type) || !event.payload || typeof event.payload !== 'object') {
     die('mc ask takes one attention.opened or attention.updated event (or { "events": [that event] })');
   }
-  return out(await postAsk(event, wsId, rest.includes('--fix')));
+  // --follows-up (ADR-0037 amendment D2): the new item links to the answered item and resolves it.
+  const followsUp = flagValue(rest, '--follows-up');
+  if (rest.includes('--follows-up') && !followsUp) die('--follows-up takes the id of the answered item that this question follows up');
+  if (followsUp) {
+    if (event.type !== 'attention.opened') die('--follows-up applies to attention.opened only: a link is set when an item opens and never changes');
+    if (event.payload.followsUp !== undefined && event.payload.followsUp !== followsUp) {
+      die(`--follows-up ${followsUp} differs from the draft's followsUp ${event.payload.followsUp}; keep one`);
+    }
+    event.payload = { ...event.payload, followsUp };
+  }
+  const body = await postAsk(event, wsId, rest.includes('--fix'));
+  for (const entry of body.followedUps || (body.followedUp ? [body.followedUp] : [])) process.stderr.write(`${followedUpLine(entry)}\n`);
+  return out(body);
+};
+
+// The answer the follow-up acknowledged (ADR-0037 amendment D2, rule 4), on one line.
+const followedUpLine = (entry) => {
+  const labels = Array.isArray(entry.optionLabels) && entry.optionLabels.length ? entry.optionLabels.join(', ') : 'text only';
+  const state = entry.resolved ? `${entry.itemId} is resolved` : `${entry.itemId} was already resolved; only the link was written`;
+  return `follows up ${entry.itemId}: the owner answered ${labels}: ${JSON.stringify(entry.text || '')} (answer ${entry.answerId}); ${state}`;
 };
 
 // `--fix` (story 23 AC 3): the curator's reshape, accepted only past the preservation check and the format-2 validator.
@@ -969,8 +988,9 @@ const reshapeAsk = async (event, question, query) => {
   const { body: reshape } = await api('POST', `/api/cli/mission-control/questions/reshape?${query}`, { question });
   if (reshape.outcome === 'reshaped') {
     process.stderr.write(`--fix: the curator reshaped the draft (prompt ${reshape.promptVersion}); the original is kept in question_json.source\n`);
-    const { itemId, humanReview } = event.payload;
-    return { ...event, payload: { itemId, ...(humanReview ? { humanReview } : {}), ...reshape.question } };
+    const { itemId, humanReview, followsUp } = event.payload;
+    // --fix keeps the fields beside the question (ADR-0037 amendment D2, rule 2).
+    return { ...event, payload: { itemId, ...(humanReview ? { humanReview } : {}), ...(followsUp !== undefined ? { followsUp } : {}), ...reshape.question } };
   }
   const text = Object.hasOwn(RESHAPE_OUTCOME_TEXT, reshape.outcome) ? RESHAPE_OUTCOME_TEXT[reshape.outcome](reshape) : 'the curator answered an outcome this CLI does not know';
   process.stderr.write(`--fix: ${text}\n`);
@@ -979,13 +999,21 @@ const reshapeAsk = async (event, question, query) => {
 
 // The question check, then the event: what `mc ask` does with a draft, and what `curator spot-check open` posts.
 const postAsk = async (event, wsId, fix) => {
-  const { itemId: _itemId, humanReview, ...question } = event.payload;
+  const { itemId, humanReview, followsUp, ...question } = event.payload;
   const query = `workspaceId=${encodeURIComponent(wsId)}`;
   // The review rides beside the question so the check names a missing class (story 36, D6); it is not a question field.
-  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, { question, ...(humanReview ? { humanReview } : {}) });
+  // So does a follow-up, with the ids the store checks it against (ADR-0037 amendment D2, rule 2).
+  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, {
+    question,
+    ...(humanReview ? { humanReview } : {}),
+    ...(followsUp !== undefined ? { followsUp, itemId, runId: event.runId } : {}),
+  });
   if (!check.ok) {
     process.stderr.write(`question defects (${check.defects.length}, min-version ${check.minVersion}):\n${defectLines(check.defects)}\n`);
-    if (fix) {
+    // A refused follow-up is the store's refusal, not a wording defect: no reshape fixes it, and it exits by its own code.
+    const followUp = check.defects.find((d) => d.field === 'followsUp' && typeof d.code === 'string');
+    if (followUp && check.defects.length === 1) return fail(followUp.code, `${followUp.message}; nothing was posted`, followUp);
+    if (fix && !followUp) {
       const reshaped = await reshapeAsk(event, question, query);
       if (reshaped) return postAsk(reshaped, wsId, false);
     }
@@ -3358,14 +3386,19 @@ Commands:
   mission answers -w WS [--run ID] [--all] Read unacknowledged answers for current answered items, each with its ackCommand; --all includes history
   mission ack -w WS --run ID --answer ID --generation N --revision N --event-id ID --producer-at MS
                                            Acknowledge one persisted answer after reading and applying it
-  mc ask -w WS --json @DRAFT [--fix]      Check one attention.opened/attention.updated event's question against the
+  mc ask -w WS --json @DRAFT [--follows-up ID] [--fix]
+                                           Check one attention.opened/attention.updated event's question against the
                                            server's format rules (ADR-0037), then post it. Defects print one per line
                                            (field: measured, limit) and exit 2 with nothing posted; lint on an accepted
                                            v1 question prints to stderr. --fix asks the curator to reshape a refused
                                            draft: where reshape-question routes, a reshape that keeps every option id,
                                            count, order, recommended, answerType, class and evidence URL is checked and
                                            posted (the original kept in question_json.source); elsewhere it is logged,
-                                           the defects print and it exits 2. "mc" is "mission".
+                                           the defects print and it exits 2. --follows-up ID (attention.opened only,
+                                           ADR-0037 D2) links the new item to the answered item ID and resolves ID in
+                                           the same write; it prints "follows up ID: the owner answered ..." and refuses
+                                           an unanswered (exit 3), followed-up (exit 3), foreign (exit 3) or unknown
+                                           (exit 7) target with nothing posted. "mc" is "mission".
   portfolio board --workspaces WS,WS       Scoped release blockers for the explicitly selected workspaces (current manager tab and read grants)
   portfolio report -w WS --json '{...}'    Current orchestrator reports a revisioned blocker; see API guide for schema
   portfolio applied -w WS --json '{...}'   Current orchestrator records application of a routed note, not blocker resolution

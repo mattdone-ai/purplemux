@@ -73,5 +73,7 @@
     }
   ],
   "recommendationWhy": "Each has a measured cost per day while it waits.",
-  "evidenceLinks": []
+  "evidenceLinks": [],
+  "followsUp": null,
+  "followedBy": null
 }

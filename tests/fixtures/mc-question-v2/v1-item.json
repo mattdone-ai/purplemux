@@ -60,5 +60,7 @@
       "description": "All tenants at once"
     }
   ],
-  "evidenceLinks": []
+  "evidenceLinks": [],
+  "followsUp": null,
+  "followedBy": null
 }

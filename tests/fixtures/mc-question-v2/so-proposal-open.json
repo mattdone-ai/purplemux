@@ -67,5 +67,7 @@
     "state": "open",
     "orderId": null,
     "reason": null
-  }
+  },
+  "followsUp": null,
+  "followedBy": null
 }

@@ -47,5 +47,7 @@
   "whyNow": "The release is cut at 17:00 AEDT.",
   "answerType": "text",
   "options": [],
-  "evidenceLinks": []
+  "evidenceLinks": [],
+  "followsUp": null,
+  "followedBy": null
 }

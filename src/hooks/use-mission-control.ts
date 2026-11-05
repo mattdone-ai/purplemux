@@ -18,6 +18,9 @@ export const normalizeMissionItem = (item: IMissionAttentionItem): IMissionAtten
   evidenceLinks: item.evidenceLinks ?? [],
   lint: item.lint ?? [],
   changes: item.changes ?? null,
+  // A server older than the ADR-0037 D2 amendment omits both links.
+  followsUp: item.followsUp ?? null,
+  followedBy: item.followedBy ?? null,
 });
 
 /** The snapshot with this item replaced when it is newer than the one held; unchanged otherwise. */

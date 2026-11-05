@@ -123,6 +123,8 @@ const item = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionItem 
   evidenceLinks: [],
   lint: [],
   changes: null,
+  followsUp: null,
+  followedBy: null,
   createdAt: T0,
   updatedAt: T0,
   ...over,
