@@ -476,4 +476,57 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
     expect(response.statusCode).toBe(405);
     expect(response.headers.Allow).toBe('POST');
   });
+
+  describe('a terminal tab takes one shell command line (story 14, D30)', () => {
+    const brief = 'Watch the v2 QA load.\nReport each failed probe.\nStop at 06:00Z.';
+
+    it('refuses multi-line text with the tab type and the line count, and types nothing', async () => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+      const response = await call({ content: brief });
+      expect(response.statusCode).toBe(400);
+      expect(response.body).toEqual({
+        error: expect.stringContaining(`tab ${TAB_ID} is a terminal tab`),
+        code: 'terminal-not-command-line',
+        tabId: TAB_ID,
+        panelType: 'terminal',
+        lines: 3,
+      });
+      expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+      expect(ledger.store.tabEvents.list(WORKSPACE_ID, { since: 0, limit: 5 })).toEqual([]);
+    });
+
+    it('counts a tab without a panel type as a terminal tab', async () => {
+      const { panelType: _panelType, ...legacy } = tabWith(undefined, 'terminal');
+      cliUtils.findTab.mockResolvedValue(locate(legacy as ITab));
+      expect((await call({ content: brief })).body).toMatchObject({ code: 'terminal-not-command-line', panelType: 'terminal' });
+    });
+
+    it('types one command line, a trailing line break included', async () => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+      const response = await call({ content: 'tail -f /tmp/qa-load.log\n' });
+      expect(response.statusCode).toBe(200);
+      expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, 'tail -f /tmp/qa-load.log\n');
+    });
+
+    it('types multi-line text as is with raw: true', async () => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+      const heredoc = "cat <<'EOF' > /tmp/x\nline\nEOF";
+      const response = await call({ content: heredoc, raw: true });
+      expect(response.statusCode).toBe(200);
+      expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, heredoc);
+    });
+
+    it('types multi-line text into an agent tab: the check is for a shell only', async () => {
+      const response = await call({ content: brief });
+      expect(response.statusCode).toBe(200);
+      expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, brief);
+    });
+
+    it('refuses a raw value that is not a boolean', async () => {
+      const response = await call({ content: 'ls', raw: 'yes' });
+      expect(response.statusCode).toBe(400);
+      expect(response.body).toEqual({ error: 'raw must be a boolean', code: 'invalid-request' });
+      expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -12,6 +12,10 @@ const log = createLogger('steer');
  * tangent lands eighteen minutes too late. Steering interrupts first, so the
  * correction is the next thing the agent reads.
  *
+ * Whether a steer interrupts is the caller's decision, never a default here: the
+ * route decides it per caller (`@/lib/steer-policy`, harness-flow-loop-2 story 14),
+ * because an Escape abandons the target's turn.
+ *
  * Both supported CLIs treat Escape as "stop the current turn, keep the
  * session", which is why this works for claude-code and codex-cli alike
  * without either one exposing a control API to us.
@@ -29,16 +33,14 @@ export interface ISteerResult {
 export const steerSession = async (
   sessionName: string,
   message: string,
-  opts?: { interrupt?: boolean; beforeDeliver?: () => Promise<boolean> },
+  opts: { interrupt: boolean; beforeDeliver?: () => Promise<boolean> },
 ): Promise<ISteerResult> => {
   if (!message.trim()) return { ok: false, interrupted: false, reason: 'empty message' };
   if (!(await hasSession(sessionName))) {
     return { ok: false, interrupted: false, reason: 'session not found' };
   }
 
-  // Default to interrupting: a steer aimed at a busy worker is the whole point,
-  // and Escape on an already-idle agent is harmless.
-  const interrupt = opts?.interrupt !== false;
+  const { interrupt } = opts;
   if (interrupt) {
     try {
       await sendEscape(sessionName);
@@ -47,11 +49,11 @@ export const steerSession = async (
       // An interrupt that fails is not fatal — deliver the message anyway and
       // let it queue, which is still better than dropping the correction.
       log.warn(`interrupt failed for ${sessionName}: ${err instanceof Error ? err.message : err}`);
-      return { ok: await deliver(sessionName, message, opts?.beforeDeliver), interrupted: false, reason: 'interrupt failed' };
+      return { ok: await deliver(sessionName, message, opts.beforeDeliver), interrupted: false, reason: 'interrupt failed' };
     }
   }
 
-  return { ok: await deliver(sessionName, message, opts?.beforeDeliver), interrupted: interrupt };
+  return { ok: await deliver(sessionName, message, opts.beforeDeliver), interrupted: interrupt };
 };
 
 const deliver = async (

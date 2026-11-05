@@ -18,6 +18,7 @@ import { getLedgerStore } from '@/lib/ledger-store';
 import { appendDelivered } from '@/lib/tab-event-router';
 import { createLogger } from '@/lib/logger';
 import { startupPromptFix, startupPromptLabel } from '@/lib/startup-prompt';
+import { parseRawFlag, terminalInputRefusal } from '@/lib/terminal-command-line';
 
 const log = createLogger('tab-send');
 
@@ -59,10 +60,12 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
 
   if (!(await authorizeWorkspaceInput(req, res, workspaceId))) return;
 
-  const { content, waitMs } = (req.body ?? {}) as { content?: string; waitMs?: unknown };
+  const { content, waitMs, raw: rawFlag } = (req.body ?? {}) as { content?: string; waitMs?: unknown; raw?: unknown };
   if (!content) {
     return res.status(400).json({ error: 'content is required' });
   }
+  const raw = parseRawFlag(rawFlag);
+  if (raw === null) return res.status(400).json({ error: 'raw must be a boolean', code: 'invalid-request' });
   const timeoutMs = resolveSendWaitMs(waitMs);
   if (timeoutMs === null) {
     return res
@@ -146,6 +149,12 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     }
     if (!await hasSessionOrUnreachable(latest.tab.sessionName)) {
       res.status(409).json({ error: 'agent-not-ready', code: 'session-not-running', tabId, detail: 'session-not-running' });
+      return false;
+    }
+    // A shell runs each line as a command (D30): multi-line text into a terminal tab needs raw: true.
+    const refusal = terminalInputRefusal(latest.tab, content, raw);
+    if (refusal) {
+      res.status(400).json(refusal);
       return false;
     }
     const policy = await checkPolicy({ consumeBootstrapForTarget: true });

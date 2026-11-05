@@ -212,6 +212,8 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'so-unreadable': EXIT.CONFLICT,
   'so-struck': EXIT.CONFLICT,
   'so-proposal-refused': EXIT.CONFLICT,
+  'steer-reason-invalid': EXIT.USAGE,
+  'terminal-not-command-line': EXIT.USAGE,
 }));
 
 // Where the class alone does not tell the caller what happened.
@@ -1914,13 +1916,25 @@ const readStdin = () => new Promise((resolve, reject) => {
   process.stdin.on('error', reject);
 });
 
-// Same shape as tab send, but interrupts the current turn first so a busy
-// worker reads the correction now instead of after its tangent finishes.
+// Same shape as tab send, but it can interrupt the current turn first, so a busy worker reads the
+// correction now (story 14). The server decides the default: an agent tab does not interrupt unless
+// it passes --interrupt --reason; any other caller interrupts. The CLI refuses --interrupt without
+// --reason (exit 2) for every caller, because the server writes the reason to the audit line.
 const cmdTabSteer = async (args) => {
   requireEnv();
   const file = flagValue(args, '--file') || flagValue(args, '-f');
+  const reason = flagValue(args, '--reason');
   const noInterrupt = args.includes('--no-interrupt');
-  const rest = stripBooleanFlags(stripFlags(args, ['--workspace', '-w', '--file', '-f']), ['--no-interrupt']);
+  const interrupt = args.includes('--interrupt');
+  const raw = args.includes('--raw');
+  if (args.includes('--reason') && (reason === null || !reason.trim())) die('--reason needs a text');
+  if (interrupt && noInterrupt) die('--interrupt and --no-interrupt are mutually exclusive');
+  if (interrupt && reason === null) die('--interrupt needs --reason "<why the turn must stop>"');
+  if (reason !== null && !interrupt) die('--reason is read only with --interrupt');
+  const rest = stripBooleanFlags(
+    stripFlags(args, ['--workspace', '-w', '--file', '-f', '--reason']),
+    ['--no-interrupt', '--interrupt', '--raw'],
+  );
   const tabId = rest[0];
   let content = rest.slice(1).join(' ');
   if (!tabId) die('tab ID is required');
@@ -1932,7 +1946,11 @@ const cmdTabSteer = async (args) => {
   const { body } = await api(
     'POST',
     `/api/cli/tabs/${tabId}/steer?workspaceId=${encodeURIComponent(wsId)}`,
-    { content, ...(noInterrupt ? { interrupt: false } : {}) },
+    {
+      content,
+      ...(noInterrupt ? { interrupt: false } : interrupt ? { interrupt: true, reason } : {}),
+      ...(raw ? { raw: true } : {}),
+    },
   );
   out(body);
 };
@@ -1947,9 +1965,10 @@ const cmdTabSend = async (args) => {
   const file = flagValue(args, '--file') || flagValue(args, '-f');
   const waitMs = flagValue(args, '--wait-ms');
   const noWait = args.includes('--no-wait');
+  const raw = args.includes('--raw');
   const rest = stripBooleanFlags(
     stripFlags(args, ['--workspace', '-w', '--file', '-f', '--wait-ms']),
-    ['--no-wait'],
+    ['--no-wait', '--raw'],
   );
   const tabId = rest[0];
   let content = rest.slice(1).join(' ');
@@ -1976,7 +1995,11 @@ const cmdTabSend = async (args) => {
   const { body } = await api(
     'POST',
     `/api/cli/tabs/${tabId}/send?workspaceId=${encodeURIComponent(wsId)}`,
-    { content, ...(noWait ? { waitMs: 0 } : waitMs ? { waitMs: Number(waitMs) } : {}) },
+    {
+      content,
+      ...(noWait ? { waitMs: 0 } : waitMs ? { waitMs: Number(waitMs) } : {}),
+      ...(raw ? { raw: true } : {}),
+    },
   );
   out(body);
 };
@@ -3232,7 +3255,14 @@ Commands:
                   [--clear] [--on MARKERS] restores the workspace orchestrator. Cleared when TARGET closes.
                                            --on MARKERS (alone or with a target) forwards only those end lines,
                                            e.g. --on DONE,BLOCKED,NEEDS-DECISION; --on all lifts the filter
-  tab steer -w WS TAB_ID CONTENT...        Interrupt the current turn, then send CONTENT (use for a mid-turn correction; --no-interrupt to queue instead)
+  tab steer -w WS TAB_ID CONTENT...        Send CONTENT as a mid-turn correction. From an agent tab (claude-code,
+           [--interrupt --reason TEXT]     codex-cli, grok-cli) the default does NOT interrupt: the text waits for
+           [--no-interrupt] [--raw]        the turn to end. --interrupt --reason TEXT stops the turn first (Escape)
+           [-f FILE | -f -]                and writes one steer-interrupt audit line; --interrupt without --reason
+                                           exits 2. From any other caller the default interrupts, as before.
+                                           --no-interrupt is accepted from every caller. Into a terminal tab,
+                                           text with more than one line exits 2 (terminal-not-command-line)
+                                           unless --raw
   tab send -w WS TAB_ID CONTENT...         Send input to a tab and press Enter. Waits up to 60s
                                            for an agent tab to be able to accept a turn; --wait-ms N (max
                                            240000) changes the budget, --no-wait answers immediately. On timeout nothing is
@@ -3242,6 +3272,9 @@ Commands:
                                            Exit 4 (tab-not-found, session-not-running, target-changed) means
                                            the tab is gone: never retry it, and never loop on it.
            [-f FILE | -f -]                Send file contents (or stdin with '-') — use for multi-line briefs
+           [--raw]                         Into a terminal tab, text with more than one line exits 2
+                                           (terminal-not-command-line): a shell runs each line as a command.
+                                           --raw types the text as is (a heredoc)
   tab status -w WS TAB_ID                  Tab status (includes registered probes + background jobs)
   tab result -w WS TAB_ID                  Capture tab pane content. Dim text the agent shows on its composer line
              [--no-suggestions | --raw]    (a suggestion, never typed) reads "[suggestion] <text>" and is also in
