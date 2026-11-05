@@ -6,12 +6,12 @@ import type { ISpendRow, ISpendView } from '@/types/spend';
 
 const spendRow = (key: string, overrides: Partial<ISpendRow> = {}): ISpendRow => ({
   key, label: `${key} name`, providerId: 'claude', inputTokens: 1000, outputTokens: 500, cacheReadTokens: 2_000_000,
-  cacheCreationTokens: 3000, totalTokens: 2_004_500, sidechainTokens: 0, costUsd: 1.25, unpricedTokens: 0, ...overrides,
+  cacheCreationTokens: 3000, totalTokens: 2_004_500, sidechainTokens: 0, costUsd: 1.25, unpricedTokens: 0, cacheReadCostUsd: null, ...overrides,
 });
 
 const view = (overrides: Partial<ISpendView> = {}): ISpendView => ({
   workspaceId: 'all', from: '2026-10-20', to: '2026-10-26', by: 'tab', generatedAt: 1,
-  totals: spendRow('total', { label: 'Total', totalTokens: 12_400_000, sidechainTokens: 3_100_000, costUsd: 42.5 }),
+  totals: spendRow('total', { label: 'Total', totalTokens: 12_400_000, sidechainTokens: 3_100_000, costUsd: 42.5, cacheReadCostUsd: 17 }),
   rows: ['tab-1', 'tab-2', 'tab-3', 'tab-4', 'tab-5', 'tab-6'].map((key) => spendRow(key)),
   unattributed: spendRow('unattributed', { label: 'Not bound to a tab', totalTokens: 900_000 }),
   dayBasis: { claude: 'message', codex: 'session-start', grok: 'session-start' },
@@ -26,14 +26,16 @@ const render = (props: Partial<Parameters<typeof SpendTileContent>[0]>) =>
 
 describe('spend tile', () => {
   it('shows today and 7 days in tokens and estimated cost, and the top 5 tabs', () => {
-    const html = render({ today: view({ totals: spendRow('total', { totalTokens: 1_500_000, costUsd: 3.2 }) }), week: view() });
+    const html = render({ today: view({ totals: spendRow('total', { totalTokens: 2_000_000, cacheReadTokens: 2_000_000, costUsd: 3.2 }) }), week: view() });
     expect(html).toContain('Today (UTC)');
-    expect(html).toContain('1.5M');
+    expect(html).toContain('2.0M');
     expect(html).toContain('est. $3.20');
     expect(html).toContain('Last 7 days');
     expect(html).toContain('12.4M');
     expect(html).toContain('est. $42.50');
     expect(html).toContain('3.1M by subagents');
+    expect(html).toContain('2.0M cache reads (16% of tokens, est. 40% of cost)');
+    expect(html).toContain('2.0M cache reads (100% of tokens)</p>');
     expect(html).toContain('tab-5 name');
     expect(html).not.toContain('tab-6 name');
     expect(html).toContain('Not bound to a tab: 900.0K tokens');
@@ -49,6 +51,13 @@ describe('spend tile', () => {
     expect(html).toContain('est. $0.500');
     expect(html).toContain('4.0K tokens without a price');
     expect(html).not.toContain('Not bound to a tab');
+  });
+
+  it('shows no cache-read share for a period with no tokens, never 0%', () => {
+    const empty = view({ totals: spendRow('total', { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, totalTokens: 0, costUsd: null }), rows: [], unattributed: null });
+    const html = render({ today: empty, week: view() });
+    expect(html).toContain('0 cache reads</p>');
+    expect(html).not.toContain('0 cache reads (');
   });
 
   it('marks the numbers partial while the index builds', () => {

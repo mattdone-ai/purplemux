@@ -64,10 +64,36 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ host: 'ai-server' });
   });
 
+  it('sends --host auto as given: the server places the tab (ADR-0039)', async () => {
+    reply = { status: 201, body: { tabId: 'tab-new', host: 'ai-lan', placement: { host: 'ai-lan', local: false, reason: 'r', fallback: false } } };
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'auto']);
+    expect(result.code).toBe(0);
+    expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'auto' });
+    expect(JSON.parse(result.stdout)).toMatchObject({ placement: { host: 'ai-lan' } });
+  });
+
   it('sends --cwd with the create', async () => {
     reply = { status: 201, body: { tabId: 'tab-new' } };
     await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'ai-server', '--cwd', '/home/mdone/wt/x']);
     expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'ai-server', cwd: '/home/mdone/wt/x' });
+  });
+
+  it('sends --role with the create; the server picks the type (ADR-0040)', async () => {
+    reply = { status: 201, body: { tabId: 'tab-eval', panelType: 'claude-code', role: 'evaluator' } };
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '-n', 'eval', '--role', 'evaluator', '--preview-url', 'http://localhost:3100', '--pg-service', 'preview_42', '-m', 'claude-opus-5-5', '-r', 'xhigh']);
+    expect(result.code).toBe(0);
+    expect(requests[0].body).toEqual({ workspaceId: 'ws-a', name: 'eval', model: 'claude-opus-5-5', reasoning: 'xhigh', role: 'evaluator', previewUrl: 'http://localhost:3100', pgService: 'preview_42' });
+  });
+
+  it('a --role without a value is a usage error and sends nothing; a refused role exits 2', async () => {
+    expect((await cli(['tab', 'create', '-w', 'ws-a', '--role'])).code).toBe(2);
+    expect((await cli(['tab', 'create', '-w', 'ws-a', '--role', 'evaluator', '--preview-url'])).code).toBe(2);
+    expect((await cli(['tab', 'create', '-w', 'ws-a', '--role', 'evaluator', '--preview-url', 'http://localhost:3100', '--pg-service'])).code).toBe(2);
+    expect(requests).toEqual([]);
+    reply = { status: 400, body: { error: 'role must be one of evaluator', code: 'invalid-request', role: 'x' } };
+    const refused = await cli(['tab', 'create', '-w', 'ws-a', '--role', 'x']);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain('role must be one of evaluator');
   });
 
   it('a --host without a value is a usage error and sends nothing', async () => {

@@ -46,6 +46,16 @@ describe('guarded orchestration revision and recovery', () => {
     expect(fixture.runtime.mock.calls.map((c) => (c[0] as ITab).id)).not.toContain('tab-next');
   });
 
+  it('an evaluator tab is never designated coordinator, before any runtime proof is asked (ADR-0040)', async () => {
+    layout([tab('tab-old'), { ...tab('tab-next'), role: 'evaluator' }]);
+    const { changeOrchestration } = await load();
+    for (const mode of ['recover', 'handoff', 'replace'] as const) {
+      await expect(changeOrchestration('ws-a', { enabled: true, orchestratorTabId: 'tab-next' }, options({ mode, actor: { kind: 'human' } })))
+        .rejects.toMatchObject({ code: 'orchestrator-candidate-invalid', message: expect.stringContaining('evaluator') });
+    }
+    expect(fixture.runtime.mock.calls.map((c) => (c[0] as ITab).id)).not.toContain('tab-next');
+  });
+
   it('normalizes legacy zero on read without writes and preserves future fields on change', async () => {
     write({ enabled: false, orchestratorTabId: null, future: 'retained' } as IWorkspaceOrchestration);
     const original = fs.readFileSync(file(), 'utf8');

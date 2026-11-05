@@ -102,6 +102,23 @@ describe('automated prompt delivery', () => {
   });
 
   // L37 (27 Sep ~00:40Z): a nudge sat typed but unsubmitted in a worker's composer.
+  it('types nothing when the readiness check fails inside the lock, and checks it after the policy (ADR-0035)', async () => {
+    const paste = vi.fn(async () => {});
+    const order: string[] = [];
+    const dispatcher = new AutomatedPromptDispatcher({
+      findTarget: vi.fn(async () => target),
+      withPolicyLock: policyLock(async () => { order.push('policy'); return { ok: true }; }),
+      hasSession: vi.fn(async () => true),
+      paste,
+    });
+    const busy = await dispatcher.dispatch({ ...request('DIGEST 1 since x'), whenReady: () => { order.push('ready'); return false; } });
+    expect(busy).toEqual({ delivered: false, reason: 'not-ready' });
+    expect(paste).not.toHaveBeenCalled();
+    expect(order).toEqual(['policy', 'ready']);
+    expect(await dispatcher.dispatch({ ...request('DIGEST 1 since x'), whenReady: () => true })).toEqual({ delivered: true });
+    expect(paste).toHaveBeenCalledTimes(1);
+  });
+
   describe('the Enter a busy or booting agent swallowed (L37)', () => {
     const verified = (pending: boolean[]) => {
       const order: string[] = [];

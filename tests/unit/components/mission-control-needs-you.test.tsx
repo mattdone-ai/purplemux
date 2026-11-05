@@ -47,6 +47,9 @@ const question = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionI
   class: null,
   defaultOptionId: null,
   autoAnswer: null,
+  evidenceLinks: [],
+  lint: [],
+  changes: null,
   createdAt: now - 60_000,
   updatedAt: now,
   ...over,
@@ -99,19 +102,29 @@ const render = (props: Partial<Parameters<typeof MissionControlNeedsYou>[0]>) =>
   />,
 );
 
-describe('Needs you on the default Mission Control view', () => {
-  it('puts the Needs you section before the portfolio board on first load', () => {
-    const router = { pathname: '/mission-control', asPath: '/mission-control', query: {}, push: async () => true } as unknown as NextRouter;
+describe('Needs you on the Mission Control answers view', () => {
+  it('?view=answers shows Needs you, one tap from the board, with the view links and Mission records', () => {
+    const router = { pathname: '/mission-control', asPath: '/mission-control?view=answers', query: { view: 'answers' }, push: async () => true } as unknown as NextRouter;
     const html = renderToStaticMarkup(
       <RouterContext.Provider value={router}><MissionControlPage /></RouterContext.Provider>,
     );
 
-    const needsYou = html.indexOf('id="needs-you-heading"');
-    expect(needsYou).toBeGreaterThan(-1);
-    expect(needsYou).toBeLessThan(html.indexOf('>Portfolio board</h1>'));
+    expect(html.indexOf('id="needs-you-heading"')).toBeGreaterThan(-1);
     expect(html).toContain('Loading the questions that need you');
+    expect(html).toContain('href="/mission-control?view=board"');
     expect(html).toContain('Mission records');
+    expect(html).not.toContain('>Portfolio board</h1>');
     expect(html).not.toContain('>Mission Control</h1>');
+  });
+
+  it('?item=<id> rings that item\'s card and says so when it is no longer open', () => {
+    const items = [question({ id: 'pay-1', title: 'Pay question' }), question({ id: 'done', state: 'answered', title: 'Done already', answerId: 'a-1' })];
+    const ringed = render({ snapshot: snapshot(items), drafts: draftsFor(items), focusItemId: 'pay-1' });
+    expect(ringed).toMatch(/id="mission-item-pay-1" data-mission-item="pay-1" class="[^"]*ring-2/);
+    expect(ringed).not.toContain('data-focus-missing');
+    const gone = render({ snapshot: snapshot(items), drafts: draftsFor(items), focusItemId: 'done' });
+    expect(gone).toContain('data-focus-missing="done"');
+    expect(gone).toContain('&quot;Done already&quot; no longer needs an answer here (answered).');
   });
 
   it('shows every confirmed question as an answer card, grouped by workspace, oldest first, with a count', () => {
@@ -380,8 +393,8 @@ describe('Auto-answered section (ADR-0031)', () => {
 
 describe('MissionControlDeliveryCard: who answered', () => {
   const answer = (actor: string): IMissionAnswer => ({
-    id: 'a-1', workspaceId: 'ws-pay', runId: 'run-1', itemId: 'q-1', actor, submissionId: 's', expectedRevision: 1,
-    optionIds: ['staged'], text: 'Auto-answered under …', actionCompleted: false, createdAt: now,
+    id: 'a-1', workspaceId: 'ws-pay', runId: 'run-1', itemId: 'q-1', actor, submissionId: 's', expectedRevision: 1, appliedRevision: 1,
+    optionIds: ['staged'], text: 'Auto-answered under …', actionCompleted: false, source: null, createdAt: now,
   });
 
   it('shows "Answered by rule" for the rule\'s answer, never the actor token', () => {

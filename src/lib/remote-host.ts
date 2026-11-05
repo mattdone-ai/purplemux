@@ -1,8 +1,7 @@
 import { execFile } from 'child_process';
-import { readFileSync } from 'fs';
 import os from 'os';
-import path from 'path';
 import { readFleetConfig, valueOf } from '@/lib/fleet-config-store';
+import { readServerPort } from '@/lib/server-port';
 import type { IReapedProcess, IReapResult } from '@/lib/tab-reaper';
 
 /**
@@ -76,16 +75,6 @@ export const callbackUrlRefusal = (value: unknown, allowHosts: readonly string[]
   return `${REMOTE_CALLBACK_URL_KEY} over plain http must name loopback, a 100.64.0.0/10 address, a *.ts.net name or a bare name on ${REMOTE_CALLBACK_ALLOW_HOSTS_KEY}; use https otherwise`;
 };
 
-const serverPort = (): string => {
-  if (process.env.PORT && /^\d{1,5}$/.test(process.env.PORT)) return process.env.PORT;
-  try {
-    const port = readFileSync(path.join(os.homedir(), '.purplemux', 'port'), 'utf-8').trim();
-    if (/^\d{1,5}$/.test(port)) return port;
-  } catch {
-    // no port file: the default below
-  }
-  return '8022';
-};
 
 /**
  * Where a remote tab's hooks and CLI reach this server: fleet config
@@ -95,7 +84,7 @@ const serverPort = (): string => {
 export const resolveCallbackUrl = async (): Promise<string> => {
   const state = await readFleetConfig();
   const configured = valueOf(state, REMOTE_CALLBACK_URL_KEY)?.value;
-  const url = configured ?? `http://${os.hostname().toLowerCase()}:${serverPort()}`;
+  const url = configured ?? `http://${os.hostname().toLowerCase()}:${readServerPort()}`;
   const refusal = callbackUrlRefusal(url, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
   if (refusal) throw new Error(`${refusal} (${configured === undefined ? 'the default from this hostname' : 'fleet config'}: ${JSON.stringify(url)})`);
   return url;

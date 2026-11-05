@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import type { ITimelineEntry } from '@/types/timeline';
 
@@ -133,6 +133,10 @@ describe('GET /api/timeline/history', () => {
     home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-history-'));
     mockHome.value = home;
     ({ default: handler } = await import('@/pages/api/timeline/history'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(home, { recursive: true, force: true });
   });
 
   it('pages a workspace Claude session forward with no gap and no overlap', async () => {
@@ -371,6 +375,10 @@ describe('history auth', () => {
   beforeEach(async () => {
     vi.resetModules();
     mockHome.value = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-history-auth-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(mockHome.value, { recursive: true, force: true });
   });
 
   it('is covered by the proxy matcher, unlike the token-only /api/cli routes', async () => {

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { AlertCircle, RefreshCw, TriangleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -131,16 +132,44 @@ const HEADING_ID = 'needs-you-heading';
 const TITLE = 'Needs you';
 const DESCRIPTION = 'Decisions and actions explicitly escalated for you.';
 
+export const missionItemAnchor = (itemId: string): string => `mission-item-${itemId}`;
+
+const ITEM_STATE_WORDS: Readonly<Record<string, string>> = {
+  candidate: 'waiting for review before it reaches you',
+  open: 'open, not for you',
+  answered: 'answered',
+  resolved: 'resolved',
+  cancelled: 'cancelled',
+};
+
+const itemStateWords = (state: string): string => (Object.hasOwn(ITEM_STATE_WORDS, state) ? ITEM_STATE_WORDS[state] : 'in a state not in the label map');
+
+/** `?item=<id>` from the board: the card scrolls into view and is ringed; an item no longer open says so. */
+const FocusNotice = ({ snapshot, focusItemId, open }: { snapshot: IMissionSnapshot; focusItemId: string; open: boolean }) => {
+  useEffect(() => {
+    if (open) document.getElementById(missionItemAnchor(focusItemId))?.scrollIntoView({ block: 'start' });
+  }, [focusItemId, open]);
+  if (open) return null;
+  const item = snapshot.items.find((candidate) => candidate.id === focusItemId);
+  return (
+    <p role="status" className="rounded-md border border-dashed px-3 py-2 text-sm text-muted-foreground" data-focus-missing={focusItemId}>
+      {item ? `"${item.title}" no longer needs an answer here (${itemStateWords(item.state)}).` : `Item ${focusItemId} is not in this Mission Control snapshot.`}
+    </p>
+  );
+};
+
 const NeedsYouList = ({
   snapshot,
   drafts,
+  focusItemId,
   onDraftChange,
   onAdoptCurrent,
   onSubmit,
-}: INeedsYouHandlers & { snapshot: IMissionSnapshot }) => {
+}: INeedsYouHandlers & { snapshot: IMissionSnapshot; focusItemId: string | null }) => {
   const items = snapshot.items.filter(isMissionHumanInboxItem);
   return (
     <>
+      {focusItemId && <FocusNotice snapshot={snapshot} focusItemId={focusItemId} open={items.some((item) => item.id === focusItemId)} />}
       <div id={HEADING_ID}>
         <SectionHeading title={TITLE} count={items.length} description={DESCRIPTION} />
       </div>
@@ -160,14 +189,16 @@ const NeedsYouList = ({
                   const draft = drafts[item.id];
                   if (!draft) return null;
                   return (
-                    <MissionControlAnswerCard
-                      key={item.id}
-                      draft={draft}
-                      workspaceName={workspace?.name ?? item.workspaceId}
-                      onChange={(patch) => onDraftChange(item, patch)}
-                      onAdoptCurrent={() => onAdoptCurrent(item.id)}
-                      onSubmit={() => onSubmit(item)}
-                    />
+                    <div key={item.id} id={missionItemAnchor(item.id)} data-mission-item={item.id}
+                      className={item.id === focusItemId ? 'min-w-0 scroll-mt-4 rounded-lg ring-2 ring-ui-blue/60' : 'min-w-0'}>
+                      <MissionControlAnswerCard
+                        draft={draft}
+                        workspaceName={workspace?.name ?? item.workspaceId}
+                        onChange={(patch) => onDraftChange(item, patch)}
+                        onAdoptCurrent={() => onAdoptCurrent(item.id)}
+                        onSubmit={() => onSubmit(item)}
+                      />
+                    </div>
                   );
                 })}
               </div>
@@ -182,6 +213,8 @@ const NeedsYouList = ({
 
 interface IMissionControlNeedsYouProps extends INeedsYouHandlers {
   snapshot: IMissionSnapshot | null;
+  /** The item `?item=<id>` names: its card is scrolled to and ringed. */
+  focusItemId?: string | null;
   loading: boolean;
   unsupported: boolean;
   error: string | null;
@@ -196,6 +229,7 @@ const MissionControlNeedsYou = ({
   error,
   refreshing,
   onRetry,
+  focusItemId = null,
   ...handlers
 }: IMissionControlNeedsYouProps) => {
   let body: ReactNode;
@@ -208,7 +242,7 @@ const MissionControlNeedsYou = ({
             <span className="min-w-0 break-words">Live refresh failed: {error}. Showing the last confirmed snapshot.</span>
           </div>
         )}
-        <NeedsYouList snapshot={snapshot} {...handlers} />
+        <NeedsYouList snapshot={snapshot} focusItemId={focusItemId} {...handlers} />
       </>
     );
   } else {

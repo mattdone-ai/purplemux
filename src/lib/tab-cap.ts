@@ -18,46 +18,73 @@ export const DEFAULT_TAB_CAP = 8;
 const TAB_CAP_MAX = 200;
 export const OVER_CAP_REASON_MAX = 500;
 
-export type TTabCapSource = 'fleet-config' | 'default' | 'default-invalid';
+export type TTabCapSource = 'workspace-config' | 'workspace-config-invalid' | 'fleet-config' | 'default' | 'default-invalid';
+
+/** The per-workspace override of the fleet cap (v2 note n-xA8sc4Tr0X): `tabs.cap-per-workspace.<workspaceId>`. */
+export const workspaceTabCapKey = (workspaceId: string): string => `${TAB_CAP_KEY}.${workspaceId}`;
 
 export interface ITabCap {
   cap: number;
   capSource: TTabCapSource;
+  /** Why a stored workspace value was not used (capSource workspace-config-invalid). */
+  capReason?: string;
 }
 
 export interface ITabCountView extends IFleetWip {
   workspaceId: string;
   capSource: TTabCapSource;
+  capReason?: string;
 }
 
-export const parseTabCap = (raw: string | null): ITabCap & { reason: string | null } => {
+export const parseTabCap = (raw: string | null, key: string = TAB_CAP_KEY): ITabCap & { reason: string | null } => {
   if (raw === null) return { cap: DEFAULT_TAB_CAP, capSource: 'default', reason: null };
   const text = raw.trim();
   if (!/^\d+$/.test(text)) {
-    return { cap: DEFAULT_TAB_CAP, capSource: 'default-invalid', reason: `${TAB_CAP_KEY} is ${JSON.stringify(raw)}, not an integer` };
+    return { cap: DEFAULT_TAB_CAP, capSource: 'default-invalid', reason: `${key} is ${JSON.stringify(raw)}, not an integer` };
   }
   const value = Number(text);
   if (value < 1 || value > TAB_CAP_MAX) {
-    return { cap: DEFAULT_TAB_CAP, capSource: 'default-invalid', reason: `${TAB_CAP_KEY} is ${value}, outside 1..${TAB_CAP_MAX}` };
+    return { cap: DEFAULT_TAB_CAP, capSource: 'default-invalid', reason: `${key} is ${value}, outside 1..${TAB_CAP_MAX}` };
   }
   return { cap: value, capSource: 'fleet-config', reason: null };
 };
 
-const g = globalThis as unknown as { __ptTabCapLogged?: string };
+const g = globalThis as unknown as { __ptTabCapLogged?: Map<string, string> };
+if (!g.__ptTabCapLogged) g.__ptTabCapLogged = new Map();
+
+const logOnce = (scope: string, line: string, warn: boolean): void => {
+  if (g.__ptTabCapLogged!.get(scope) === line) return;
+  g.__ptTabCapLogged!.set(scope, line);
+  if (warn) log.warn(line);
+  else log.info(line);
+};
 
 /**
- * The cap and where it came from (ADR-0019: a tool states its source). Logged
- * when the answer changes, not on every read: the fleet view reads it each poll.
+ * The cap and where it came from (ADR-0019: a tool states its source). A
+ * workspace's own key wins over the fleet key; an invalid workspace value
+ * falls back to the fleet answer and is logged with its reason. Logged when
+ * the answer changes, not on every read: the fleet view reads it each poll.
  * A config read that fails is thrown, never read as "no cap".
  */
-export const readTabCap = async (config: (key: string) => Promise<string | null>): Promise<ITabCap> => {
-  const { cap, capSource, reason } = parseTabCap(await config(TAB_CAP_KEY));
-  const line = reason ? `WIP cap ${cap} (source ${capSource}: ${reason})` : `WIP cap ${cap} (source ${capSource})`;
-  if (g.__ptTabCapLogged !== line) {
-    g.__ptTabCapLogged = line;
-    if (reason) log.warn(line);
-    else log.info(line);
+export const readTabCap = async (config: (key: string) => Promise<string | null>, workspaceId?: string): Promise<ITabCap> => {
+  if (workspaceId) {
+    const key = workspaceTabCapKey(workspaceId);
+    const raw = await config(key);
+    if (raw !== null) {
+      const own = parseTabCap(raw, key);
+      if (own.capSource === 'fleet-config') {
+        logOnce(workspaceId, `WIP cap ${own.cap} for ${workspaceId} (source workspace-config)`, false);
+        return { cap: own.cap, capSource: 'workspace-config' };
+      }
+      // The stored value is wrong and the answer says so (review r2 F5): the cap is the fleet answer, the source is not.
+      const fleet = parseTabCap(await config(TAB_CAP_KEY));
+      const capReason = `${own.reason}; the ${fleet.capSource === 'fleet-config' ? 'fleet value' : 'default'} ${fleet.cap} applies`;
+      logOnce(workspaceId, `WIP cap ${fleet.cap} for ${workspaceId} (source workspace-config-invalid: ${capReason})`, true);
+      return { cap: fleet.cap, capSource: 'workspace-config-invalid', capReason };
+    }
   }
+  const { cap, capSource, reason } = parseTabCap(await config(TAB_CAP_KEY));
+  logOnce('*', reason ? `WIP cap ${cap} (source ${capSource}: ${reason})` : `WIP cap ${cap} (source ${capSource})`, !!reason);
   return { cap, capSource };
 };
 
@@ -68,6 +95,7 @@ export const wipOf = (count: number, cap: number): IFleetWip => ({ count, cap, o
 
 export const tabCountView = (workspaceId: string, count: number, tabCap: ITabCap): ITabCountView => ({
   workspaceId, count, cap: tabCap.cap, capSource: tabCap.capSource, overCap: count > tabCap.cap,
+  ...(tabCap.capReason ? { capReason: tabCap.capReason } : {}),
 });
 
 export class WipCapError extends Error {
@@ -86,6 +114,7 @@ export class WipCapError extends Error {
       count: this.count,
       cap: this.tabCap.cap,
       capSource: this.tabCap.capSource,
+      ...(this.tabCap.capReason ? { capReason: this.tabCap.capReason } : {}),
     };
   }
 }
@@ -148,23 +177,23 @@ export const OVER_CAP_FORBIDDEN = {
 };
 
 /** The cap from the fleet-config store; an unreadable store throws (fail closed). */
-export const readStoredTabCap = async (): Promise<ITabCap> => {
+export const readStoredTabCap = async (workspaceId?: string): Promise<ITabCap> => {
   const { readFleetConfig, valueOf } = await import('@/lib/fleet-config-store');
   const state = await readFleetConfig();
-  return readTabCap(async (key) => valueOf(state, key)?.value ?? null);
+  return readTabCap(async (key) => valueOf(state, key)?.value ?? null, workspaceId);
 };
 
 /** Outside the layout lock: an answer for a reader, never an admission. A workspace with no layout yet holds no tab. */
 export const readTabCount = async (workspaceId: string): Promise<ITabCountView> => {
   const { readWorkspaceLayout } = await import('@/lib/workspace-layout-read');
-  const [tabCap, layout] = await Promise.all([readStoredTabCap(), readWorkspaceLayout(workspaceId)]);
+  const [tabCap, layout] = await Promise.all([readStoredTabCap(workspaceId), readWorkspaceLayout(workspaceId)]);
   return tabCountView(workspaceId, layout ? countAgentTabs(layout) : 0, tabCap);
 };
 
 export interface IAgentCreateDeps {
   resolveCaller: (req: NextApiRequest) => Promise<ICaller | null>;
   isWorkspaceOrchestrator: (workspaceId: string, tabId: string) => Promise<boolean>;
-  readTabCap: () => Promise<ITabCap>;
+  readTabCap: (workspaceId: string) => Promise<ITabCap>;
 }
 
 const defaultDeps: IAgentCreateDeps = {
@@ -202,13 +231,13 @@ export const admitAgentCreate = async (
   if (!isAgentPanelType(panelType)) return { ok: true, admission: null, overCapReason: field.reason, caller };
   let tabCap: ITabCap;
   try {
-    tabCap = await deps.readTabCap();
+    tabCap = await deps.readTabCap(workspaceId);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
       status: 503,
-      body: { code: 'config-store-unreadable', error: `fleet config could not be read for ${TAB_CAP_KEY}; agent tabs are refused until it can (${detail})` },
+      body: { code: 'config-store-unreadable', error: `fleet config could not be read for ${TAB_CAP_KEY} or ${workspaceTabCapKey(workspaceId)}; agent tabs are refused until it can (${detail})` },
     };
   }
   return { ok: true, admission: wipAdmission(workspaceId, tabCap, field.reason !== null), overCapReason: field.reason, caller };

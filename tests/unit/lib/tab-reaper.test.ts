@@ -330,9 +330,15 @@ describe.runIf(process.platform === 'linux')('reapTabProcesses (real processes, 
     }
   };
 
+  // setsid(1) calls setsid() after exec, so for a moment its child is still in the pane's group: under load the
+  // reaper could scan in that window and rightly kill it as a group member. Wait until its session (field 6 of
+  // /proc/<pid>/stat) is no longer the shell's before announcing ready.
+  const SETSID_CHILD = 'setsid nohup sleep 120 >/dev/null 2>&1 & echo "setsid $!" >> "$PIDS_FILE"; '
+    + 'for _ in $(seq 500); do [ "$(cut -d" " -f6 /proc/$!/stat)" != "$(cut -d" " -f6 /proc/$$/stat)" ] && break; sleep 0.01; done';
+
   const JOBS = [
     '( sleep 120 & echo "disowned $!" >> "$PIDS_FILE"; disown )',
-    'setsid nohup sleep 120 >/dev/null 2>&1 & echo "setsid $!" >> "$PIDS_FILE"',
+    SETSID_CHILD,
     'bash -c \'trap "" TERM; for i in $(seq 120); do sleep 1; done\' & echo "ignores-term $!" >> "$PIDS_FILE"',
     'echo ready >> "$PIDS_FILE"',
   ].join('\n');
@@ -365,7 +371,7 @@ describe.runIf(process.platform === 'linux')('reapTabProcesses (real processes, 
 
   it('keepProcesses: the setsid child survives and only the pane group is killed', { timeout: 15_000 }, async () => {
     const id = tabId();
-    const mine = await pane(id, 'sleep 120 & echo "group $!" >> "$PIDS_FILE"\nsetsid nohup sleep 120 >/dev/null 2>&1 & echo "setsid $!" >> "$PIDS_FILE"\necho ready >> "$PIDS_FILE"');
+    const mine = await pane(id, `sleep 120 & echo "group $!" >> "$PIDS_FILE"\n${SETSID_CHILD}\necho ready >> "$PIDS_FILE"`);
     const result = await reapTabProcesses(paneDeps(), { tabId: id, panePid: mine.panePid, keepProcesses: true });
     const killed = result.killed.map((p) => p.pid);
     expect(killed).toContain(mine.pids.group);

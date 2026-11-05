@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // ADR-0023: the events route records who opened an item from the server-resolved
 // caller (ADR-0010), never from the payload, and only for `attention.opened`.
 
-const store = vi.hoisted(() => ({ applyEvents: vi.fn(), unreplayedEventIds: vi.fn(), humanInboxPolicy: vi.fn() }));
+// `itemStates`: the events route reads the touched items' states before applying (story 33 R2).
+const store = vi.hoisted(() => ({ applyEvents: vi.fn(), unreplayedEventIds: vi.fn(), humanInboxPolicy: vi.fn(), itemStates: vi.fn(() => new Map()) }));
 const scope = vi.hoisted(() => ({ resolveCliScope: vi.fn() }));
 
 vi.mock('@/lib/mission-control-store', () => ({ getMissionControlStore: () => store }));

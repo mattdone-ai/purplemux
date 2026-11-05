@@ -3,7 +3,9 @@ import os from 'os';
 import path from 'path';
 import { nanoid } from 'nanoid';
 import { brandCodedError } from '@/lib/coded-error';
+import { AWS_PROFILE } from '@/lib/aws-sso-cache';
 import { LEASE_NAME } from '@/lib/lease-policy';
+import { LEDGER_ITEM_TYPES } from '@/lib/ledger';
 import type { IWatch, IWatchesState, TWatchErrorCode, TWatchKind, TWatchUntil } from '@/types/watch';
 import type { TCallerIdentity } from '@/types/identity';
 
@@ -26,6 +28,9 @@ export const WATCH_DEFAULT_TTL_S = DAY;
 export const WATCH_MAX_TTL_S = 7 * DAY;
 export const WATCH_MIN_TTL_S = MIN;
 export const WATCH_DEFAULT_INTERVAL_S = 120;
+/** An auth watch reads the SSO cache every 60 s (ADR-HFL-05 decision 6). */
+export const WATCH_AUTH_INTERVAL_S = 60;
+export const AUTH_TARGET_PREFIX = 'aws-sso:';
 export const WATCH_MIN_INTERVAL_S = 60;
 export const WATCH_MAX_INTERVAL_S = HOUR;
 /** Active pr and ref watches on the host. */
@@ -53,7 +58,9 @@ const UNTIL: Record<TWatchKind, readonly TWatchUntil[]> = {
   pr: ['merged', 'closed', 'head-moved', 'checks-settled'],
   ref: ['moved'],
   lease: ['free'],
+  auth: ['signed-in'],
 };
+const LEDGER_ITEM_KEY = /^([a-z-]{1,16}):[^\s]{1,183}$/;
 
 export const isWatchId = (v: unknown): v is string => typeof v === 'string' && WATCH_ID.test(v);
 export const newWatchId = (): string => `w-${nanoid(10)}`;
@@ -79,7 +86,22 @@ export interface IWatchSpec {
   ttlSeconds: number;
   intervalS: number;
   label: string | null;
+  ledgerItem: string | null;
 }
+
+/** An auth watch's profile: its target without the `aws-sso:` prefix. */
+export const authProfile = (target: string): string =>
+  (target.startsWith(AUTH_TARGET_PREFIX) ? target.slice(AUTH_TARGET_PREFIX.length) : target);
+
+const ledgerItemOf = (kind: TWatchKind, raw: unknown): string | null => {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (kind !== 'auth') throw new WatchError('watch-invalid', 'ledgerItem belongs to an auth watch only');
+  const m = typeof raw === 'string' ? LEDGER_ITEM_KEY.exec(raw) : null;
+  if (!m || !(LEDGER_ITEM_TYPES as readonly string[]).includes(m[1])) {
+    throw new WatchError('watch-invalid', `ledgerItem is a ledger item key <type>:<id> with a type of ${LEDGER_ITEM_TYPES.join(', ')}, got ${JSON.stringify(raw)}`);
+  }
+  return raw as string;
+};
 
 const whole = (raw: unknown, name: string, min: number, max: number, fallback: number): number => {
   if (raw === undefined || raw === null) return fallback;
@@ -91,11 +113,15 @@ const whole = (raw: unknown, name: string, min: number, max: number, fallback: n
 
 export const checkSpec = (input: Record<string, unknown>): IWatchSpec => {
   const kind = input.kind;
-  if (kind !== 'pr' && kind !== 'ref' && kind !== 'lease') throw new WatchError('watch-invalid', `kind must be pr, ref or lease, got ${JSON.stringify(kind)}`);
-  const target = typeof input.target === 'string' ? input.target.trim() : '';
-  const valid = kind === 'pr' ? !!parsePr(target) : kind === 'ref' ? !!parseRef(target) : LEASE_NAME.test(target.toLowerCase());
+  if (kind !== 'pr' && kind !== 'ref' && kind !== 'lease' && kind !== 'auth') {
+    throw new WatchError('watch-invalid', `kind must be pr, ref, lease or auth, got ${JSON.stringify(kind)}`);
+  }
+  const raw = typeof input.target === 'string' ? input.target.trim() : '';
+  const target = kind === 'auth' ? `${AUTH_TARGET_PREFIX}${authProfile(raw)}` : kind === 'lease' ? raw.toLowerCase() : raw;
+  const valid = kind === 'pr' ? !!parsePr(target) : kind === 'ref' ? !!parseRef(target)
+    : kind === 'lease' ? LEASE_NAME.test(target) : AWS_PROFILE.test(authProfile(raw));
   if (!valid) {
-    const form = { pr: 'OWNER/REPO#N', ref: 'OWNER/REPO@REF', lease: 'a lease name (<kind>:<resource>)' }[kind];
+    const form = { pr: 'OWNER/REPO#N', ref: 'OWNER/REPO@REF', lease: 'a lease name (<kind>:<resource>)', auth: 'an AWS profile name (1-64 of A-Z a-z 0-9 . _ -)' }[kind];
     throw new WatchError('watch-invalid', `a ${kind} watch target is ${form}, got ${JSON.stringify(input.target)}`);
   }
   const until = input.until;
@@ -111,15 +137,17 @@ export const checkSpec = (input: Record<string, unknown>): IWatchSpec => {
   }
   return {
     kind,
-    target: kind === 'lease' ? target.toLowerCase() : target,
+    target,
     until: until as TWatchUntil,
     ttlSeconds: whole(input.ttlSeconds, 'ttlSeconds', WATCH_MIN_TTL_S, WATCH_MAX_TTL_S, WATCH_DEFAULT_TTL_S),
-    intervalS: whole(input.intervalS, 'intervalS', WATCH_MIN_INTERVAL_S, WATCH_MAX_INTERVAL_S, WATCH_DEFAULT_INTERVAL_S),
+    intervalS: whole(input.intervalS, 'intervalS', WATCH_MIN_INTERVAL_S, WATCH_MAX_INTERVAL_S,
+      kind === 'auth' ? WATCH_AUTH_INTERVAL_S : WATCH_DEFAULT_INTERVAL_S),
     label,
+    ledgerItem: ledgerItemOf(kind, input.ledgerItem),
   };
 };
 
-export const isGithub = (w: Pick<IWatch, 'kind'>): boolean => w.kind !== 'lease';
+export const isGithub = (w: Pick<IWatch, 'kind'>): boolean => w.kind === 'pr' || w.kind === 'ref';
 
 /** Reads per check: a PR, plus check runs and commit status for checks-settled; a ref, one. */
 export const readsPerCheck = (w: Pick<IWatch, 'kind' | 'until'>): number => (w.kind === 'pr' && w.until === 'checks-settled' ? 3 : 1);
@@ -165,7 +193,7 @@ export const createWatch = (
   expiresAt: now + spec.ttlSeconds * 1000,
   // The baseline read at creation is the first check of a GitHub watch, unless it already showed
   // the condition (a PR merged or closed): then the first pass reports it (review round 2).
-  lastCheckedAt: spec.kind === 'lease' || baselineHolds ? null : now,
+  lastCheckedAt: !isGithub(spec) || baselineHolds ? null : now,
   failures: 0,
   failingNotified: false,
   lastError: null,
@@ -173,10 +201,11 @@ export const createWatch = (
   verified: owner.verified,
   identity: owner.identity,
   pendingNotice: null,
+  ...(spec.ledgerItem ? { ledgerItem: spec.ledgerItem } : {}),
 });
 
 /**
- * A lease watch is evaluated every pass (a local read); a GitHub watch when its interval is due.
+ * A lease watch is evaluated every pass (a local read); a GitHub or auth watch when its interval is due.
  * Once the failing notice has gone out (WATCH_FAILURES_BEFORE_NOTICE failures), the interval doubles
  * per further failure up to WATCH_BACKOFF_MAX, so a broken watch does not hammer a rate-limited `gh`
  * while the first three reads stay prompt (review round 2). A pending notice is always due.
@@ -212,7 +241,7 @@ const isWatch = (v: unknown): v is IWatch => {
   if (!v || typeof v !== 'object') return false;
   const w = v as Record<string, unknown>;
   return isWatchId(w.id) && typeof w.workspaceId === 'string' && typeof w.tabId === 'string'
-    && (w.kind === 'pr' || w.kind === 'ref' || w.kind === 'lease') && typeof w.target === 'string'
+    && (w.kind === 'pr' || w.kind === 'ref' || w.kind === 'lease' || w.kind === 'auth') && typeof w.target === 'string'
     && Number.isSafeInteger(w.expiresAt) && Number.isSafeInteger(w.intervalS)
     && (w.pendingNotice === undefined || w.pendingNotice === null
       || (typeof w.pendingNotice === 'object' && typeof (w.pendingNotice as Record<string, unknown>).notice === 'string'));

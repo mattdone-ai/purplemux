@@ -25,6 +25,11 @@ The fork now has orchestration built into the app; no CLI or scripts needed:
 4. **Visibility**: the notification panel (bell) shows a *Watchdog activity*
    section with recent nudges (click to jump to the worker tab); tab strip
    shows per-tab state dots and the crown on the orchestrator.
+5. **WIP cap**: the one cap on work in progress is the per-workspace agent-tab
+   cap (ADR-0027): fleet config `tabs.cap-per-workspace` (default 8), overridden
+   by `tabs.cap-per-workspace.<workspaceId>`. An agent `tab create` at the cap
+   exits 3 `wip-cap`; `purplemux tab count -w WS` prints `<count> <cap>`, and
+   repository hooks read that instead of counting tmux sessions.
 
 Settings persist per workspace in `workspaces.json` under `orchestration:
 { enabled, orchestratorTabId, revision, kickoffTemplate }`. API: `PATCH
@@ -33,8 +38,9 @@ Settings persist per workspace in `workspaces.json` under `orchestration:
 
 Mapping writes and Start carry the revision displayed by the UI. A conflict refreshes state and requires a new explicit action. Replacing an incumbent requires human confirmation and leaves its process running. Local agents use `purplemux orchestration recover -w WS TAB` only when the mapping is vacant or its incumbent is positively absent; a launch-verified incumbent can use `handoff`. Unknown or pending runtime refuses recovery. A committed change of the coordinator moves the open Mission Control runs of the workspace to the new coordinator at the next binding generation (audit event `run.rebound`); the new coordinator reads its run and generation with `purplemux mission bootstrap -w WS`. Keep orchestration enabled while waiting for human input and post `state: "awaiting-human"`; idle heartbeats pause. Clear/off is permitted only when fresh evidence confirms all work finished.
 
-Everything below is the original CLI/script flow — still valid as a headless
-fallback (e.g. driving purplemux from outside the app).
+Everything below drives the same server watchdog from a plain shell instead of
+the UI (e.g. driving purplemux from outside the app): the kickoff's
+`purplemux orchestration on` is what the UI's Start does.
 
 ## How purplemux actually tracks agents (why things stall today)
 
@@ -50,20 +56,18 @@ which drives a per-tab **`cliState`** you can read any time:
 | `inactive` | CLI exited (codex) |
 | `unknown` | State lost (e.g. after crash); server has a recovery path but don't rely on it |
 
-Built-in stuck detection: `busy` with no events for **10 min** (`BUSY_STUCK_MS`)
-is flagged internally, but nothing *acts* on it for you.
-
 So "things just sit there" is almost always one of:
 1. a worker in `needs-input` that nobody answered,
 2. a worker in `ready-for-review` that the orchestrator never read,
 3. the **orchestrator itself** ended its turn (or asked *you* a question) and
    nothing ever woke it again.
 
-The fix for all three is the same: a dumb, deterministic watchdog outside any
-LLM — `pmux-watch.sh` — that polls tab states and **sends a nudge message into
-the orchestrator tab** on every transition. A `tab send` is a new user turn,
-so the orchestrator wakes up, reads the nudge, and acts. No model in the loop
-for the wake-up path = nothing to stall.
+The fix for all three is the server's watchdog, with no model in the wake-up
+path: on every transition it **sends a nudge message into the orchestrator
+tab**. A nudge is a new user turn, so the orchestrator wakes up, reads it, and
+acts. It nudges only while orchestration is enabled for the workspace with an
+orchestrator tab named: step 3 of the kickoff below turns it on. There is no
+process to start.
 
 ## Kickoff (step by step)
 
@@ -79,18 +83,16 @@ purplemux workspaces
 purplemux tab create -w WS_ID -n orchestrator -t claude-code
 # note the tabId it prints, e.g. tab-Abc123
 
-# 3. Start the watchdog in a plain terminal (same box; a purplemux terminal tab is fine)
-./orchestration/pmux-watch.sh -w WS_ID -o ORCH_TAB_ID
+# 3. Enable orchestration with that tab as orchestrator: until this, the server's
+#    watchdog nudges nobody (it reads the revision, then patches it)
+purplemux orchestration on -w WS_ID ORCH_TAB_ID
 
 # 4. Send the orchestrator its kickoff prompt (template below)
 purplemux tab send -w WS_ID ORCH_TAB_ID "$(cat kickoff-prompt.md)"
 ```
 
-The watchdog uses the same credential precedence as the CLI: injected tab token,
-injected workspace token, then the selected workspace token on disk for an
-unscoped shell. A missing credential or failed request stops the watchdog with
-an error. A failed nudge is not recorded as delivered; resolve the reported
-failure before restarting it.
+The CLI's credential precedence: injected tab token, injected workspace token,
+then the selected workspace token on disk for an unscoped shell.
 
 Watch progress any time:
 
@@ -103,7 +105,7 @@ watch -n 5 ~/code/ai-server/orchestration/pmux-board.sh -w WS_ID
 Fill in the ALL-CAPS parts and send as the first message. The two things that
 make this robust: the orchestrator gets the **full purplemux API up front**
 (so it never flails), and it is told its loop is **event-driven off
-`[pmux-watch]` nudges** (so it never needs to busy-wait or "remember" to check).
+`[orchestrator-watchdog]` nudges** (so it never needs to busy-wait or "remember" to check).
 
 ```
 You are the ORCHESTRATOR for epic EPIC_NAME. You delegate all implementation
@@ -116,7 +118,8 @@ Do not export the global cli-token; it cannot authorize workspace mutations.
 Workspace: WS_ID. Your own tab: ORCH_TAB_ID (never send to yourself).
 
 purplemux commands you use:
-- purplemux tab create -w WS_ID -n story-NN -t claude-code   (or -t codex-cli, -t grok-cli)
+- purplemux tab create -w WS_ID -n story-NN -t claude-code -m MODEL -r EFFORT
+  (or -t codex-cli, -t grok-cli; every worker carries explicit -m and -r)
 - purplemux tab send -w WS_ID TAB_ID "message"                (waits until the tab can accept
   a turn, then submits with Enter; fails with agent-not-ready and pastes nothing if it cannot)
 - purplemux tab status -w WS_ID TAB_ID                        (JSON incl. cliState)
@@ -124,7 +127,7 @@ purplemux commands you use:
 - purplemux tab close -w WS_ID TAB_ID
 
 ## Spawning a worker
-1. Create the tab (name it story-NN). For an Opus worker, first send: /model claude-opus-4-8
+1. Create the tab (name it story-NN) with its model and effort pinned by -m and -r.
 2. Send ONE self-contained brief: story goal, exact file paths, acceptance
    criteria, commands to run for verification, and this output protocol:
    "Work autonomously. Make reasonable assumptions and note them instead of
@@ -134,7 +137,7 @@ purplemux commands you use:
 3. Record TAB_ID -> story in your tracking table.
 
 ## Event loop (this is your whole job)
-A watchdog process sends you '[pmux-watch] ...' messages. On each one:
+purplemux's watchdog sends you '[orchestrator-watchdog] ...' messages. On each one:
 - NEEDS INPUT  -> tab result to read the question/prompt in full, answer it
   yourself from epic context via tab send. Only escalate to the human if it is
   a real product/scope decision; then say so in your reply and continue other work.
@@ -152,14 +155,15 @@ After handling every nudge, update STATUS_FILE (story -> state, tab, last event)
 and end your turn. Do not busy-wait; the watchdog will wake you.
 
 ## Rules
-- Max N_PARALLEL concurrent workers. One story per worker tab.
+- The workspace's WIP cap bounds concurrent workers: purplemux tab count -w WS_ID
+  prints "<count> <cap>", and tab create exits 3 wip-cap at the cap. One story per worker tab.
 - Each story runs in its own git worktree: WORKTREE_PATTERN.
 - Never assume a worker's state — always capture the pane before acting.
 - Every reply you produce must end with the current status table so the human
   can read progress from your tab at a glance.
 
 Epic context: EPIC_CONTEXT_PATHS (status file: STATUS_FILE).
-Begin: read the epic status, then spawn workers for the first N_PARALLEL stories.
+Begin: read the epic status, then spawn workers for the first stories, up to the cap.
 ```
 
 ## Stall playbook (symptom → action)
@@ -227,9 +231,7 @@ prompts (fine on a dedicated box; it's why the worktree-per-story isolation
 matters).
 
 Optional: set `notificationsEnabled: true` in `~/.purplemux/config.json` to
-get desktop notifications on needs-input; or add an ntfy/Telegram curl inside
-`pmux-watch.sh`'s `nudge()` for orchestrator-level `needs-input` (i.e. when
-the question is for *you*).
+get desktop notifications on needs-input.
 
 ## Visibility cheat-sheet
 

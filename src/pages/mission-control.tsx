@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import Head from 'next/head';
+import Link from 'next/link';
+import { useRouter } from 'next/router';
 import type { GetServerSideProps } from 'next';
 import { AlertCircle } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import PortfolioBoard from '@/components/features/mission-control/portfolio-board';
-import FlowPanel from '@/components/features/mission-control/flow-panel';
+import OwnerBoard from '@/components/features/mission-control/owner-board';
+import { boardItemOf, boardViewOf } from '@/components/features/mission-control/board-model';
+import type { TBoardView } from '@/components/features/mission-control/board-model';
 import { getPageShellWithTitlebarLayout } from '@/components/layout/page-shell';
 import MissionControlDashboard, {
   MissionControlDashboardSkeleton,
@@ -18,6 +22,7 @@ import {
   editMissionDraft,
   isMissionDraftEmpty,
   missionDraftRequest,
+  rebaseMissionDraft,
   reconcileMissionDraftWithItem,
 } from '@/components/features/mission-control/mission-control-utils';
 import type { IMissionDraft, IMissionDraftPatch } from '@/components/features/mission-control/mission-control-utils';
@@ -45,8 +50,17 @@ const parseError = async (response: Response): Promise<IMissionError> => {
 const isAttentionItem = (value: IMissionError['current']): value is IMissionAttentionItem =>
   Boolean(value && 'kind' in value && 'options' in value);
 
+const VIEWS: Array<{ view: TBoardView; label: string }> = [
+  { view: 'board', label: 'Board' },
+  { view: 'answers', label: 'Answers' },
+  { view: 'portfolio', label: 'Portfolio' },
+];
+
 const MissionControlPage = () => {
-  useBrowserTitle('Portfolio board');
+  const router = useRouter();
+  const view = boardViewOf(router.query);
+  const focusItemId = boardItemOf(router.query);
+  useBrowserTitle(view === 'portfolio' ? 'Portfolio board' : 'Mission Control');
   const [legacyOpen, setLegacyOpen] = useState(false);
   const selectWorkspace = useSelectWorkspace();
   const {
@@ -57,6 +71,7 @@ const MissionControlPage = () => {
     error,
     refresh,
     applyAnswer,
+    applyItem,
     applyBootstrap,
   } = useMissionControl();
   const [drafts, setDrafts] = useState<Record<string, IMissionDraft>>({});
@@ -120,6 +135,15 @@ const MissionControlPage = () => {
           const latest = isAttentionItem(responseBody.current)
             ? normalizeMissionItem(responseBody.current)
             : snapshot?.items.find((candidate) => candidate.id === item.id) ?? submittingDraft.item;
+          if (latest.state === 'open' && latest.revision > submittingDraft.expectedRevision) {
+            // ADR-0037 §4: the server found the change incompatible; answer the current revision.
+            applyItem(latest);
+            setDrafts((current) => ({
+              ...current,
+              [item.id]: rebaseMissionDraft({ ...(current[item.id] ?? submittingDraft), hasAttempted: true }, latest, responseBody.changes),
+            }));
+            return;
+          }
           setDrafts((current) => ({
             ...current,
             [item.id]: {
@@ -153,7 +177,7 @@ const MissionControlPage = () => {
         },
       }));
     }
-  }, [applyAnswer, drafts, snapshot?.items]);
+  }, [applyAnswer, applyItem, drafts, snapshot?.items]);
 
   const handleBootstrap = useCallback(async () => {
     const requestId = bootstrapId ?? createMissionSubmissionId();
@@ -184,28 +208,31 @@ const MissionControlPage = () => {
   }, [applyBootstrap, bootstrapId, refresh]);
 
   let content;
-  if (!legacyOpen) {
+  if (!legacyOpen && view === 'board') {
     content = (
-      <>
-        <div className="mx-auto w-full max-w-[1440px] px-3 pt-5 sm:px-5 lg:px-8">
-          <MissionControlNeedsYou
-            snapshot={snapshot}
-            loading={loading}
-            unsupported={unsupported}
-            error={error}
-            refreshing={refreshing}
-            drafts={drafts}
-            onRetry={() => void refresh()}
-            onDraftChange={handleDraftChange}
-            onAdoptCurrent={handleAdoptCurrent}
-            onSubmit={(item) => void handleSubmit(item)}
-          />
-        </div>
-        <div className="mx-auto w-full max-w-[1440px] px-3 pt-5 empty:hidden sm:px-5 lg:px-8">
-          <FlowPanel />
-        </div>
-        <PortfolioBoard />
-      </>
+      <div className="mx-auto w-full max-w-[1440px] px-3 pt-5 pb-8 sm:px-5 lg:px-8">
+        <OwnerBoard />
+      </div>
+    );
+  } else if (!legacyOpen && view === 'portfolio') {
+    content = <PortfolioBoard />;
+  } else if (!legacyOpen) {
+    content = (
+      <div className="mx-auto w-full max-w-[1440px] px-3 pt-5 pb-8 sm:px-5 lg:px-8">
+        <MissionControlNeedsYou
+          snapshot={snapshot}
+          loading={loading}
+          unsupported={unsupported}
+          error={error}
+          refreshing={refreshing}
+          drafts={drafts}
+          focusItemId={focusItemId}
+          onRetry={() => void refresh()}
+          onDraftChange={handleDraftChange}
+          onAdoptCurrent={handleAdoptCurrent}
+          onSubmit={(item) => void handleSubmit(item)}
+        />
+      </div>
     );
   } else if (loading) {
     content = <MissionControlDashboardSkeleton />;
@@ -236,11 +263,21 @@ const MissionControlPage = () => {
 
   return (
     <>
-      <Head><title>Portfolio board · PurpleMux</title></Head>
+      <Head><title>{view === 'portfolio' ? 'Portfolio board' : 'Mission Control'} · PurpleMux</title></Head>
       <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-[1440px] justify-end px-3 pt-3 sm:px-5 lg:px-8">
+        <div className="mx-auto flex w-full max-w-[1440px] flex-wrap items-center justify-between gap-2 px-3 pt-3 sm:px-5 lg:px-8">
+          <nav aria-label="Mission Control views" className="flex gap-1">
+            {VIEWS.map((entry) => (
+              <Link key={entry.view} href={`/mission-control?view=${entry.view}`} shallow
+                className={buttonVariants({ size: 'sm', variant: !legacyOpen && view === entry.view ? 'secondary' : 'ghost' })}
+                aria-current={!legacyOpen && view === entry.view ? 'page' : undefined}
+                onClick={() => setLegacyOpen(false)} data-view-link={entry.view}>
+                {entry.label}
+              </Link>
+            ))}
+          </nav>
           <Button size="sm" variant="ghost" onClick={() => setLegacyOpen((open) => !open)}>
-            {legacyOpen ? 'Portfolio board' : 'Mission records'}
+            {legacyOpen ? 'Back to the board' : 'Mission records'}
           </Button>
         </div>
         {content}

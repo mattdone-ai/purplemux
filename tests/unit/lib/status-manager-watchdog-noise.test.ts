@@ -6,6 +6,7 @@ import { AutomatedPromptDispatcher, type IAutomatedPromptDispatcherDeps } from '
 import type { ITabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
 import type { IBackgroundJob, TLivenessEvent } from '@/types/liveness';
+import { memoryLedgerTables, memoryTabEvents } from './tab-events-harness';
 
 // Watchdog noise (h-selfimprove item 3; L38, L49, L37):
 //  - L38: a tab closed through the API raises no INACTIVE; a tab whose agent dies unclosed still does.
@@ -81,6 +82,9 @@ const MIN = 60 * 1000;
 const timers = (manager: unknown, now: number) =>
   (manager as { runWatchdogTimers: (n: number) => Promise<void> }).runWatchdogTimers(now);
 
+const routed = (tabEvents: ReturnType<typeof memoryTabEvents>) => tabEvents().list('ws-1', { since: 0, limit: 100 })
+  .filter((row) => row.class !== 'log').map((row) => ({ to: row.tabId, message: row.text }));
+
 const setup = async (worker: Partial<ITabStatusEntry> = {}) => {
   state.tabs = [tab('w')];
   const paste = vi.fn(async (_session: string, _message: string) => {});
@@ -92,7 +96,8 @@ const setup = async (worker: Partial<ITabStatusEntry> = {}) => {
   });
   await import('@/lib/providers');
   const { StatusManager } = await import('@/lib/status-manager');
-  const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}));
+  const tabEvents = memoryTabEvents();
+  const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), tabEvents, memoryLedgerTables()[1]);
   const alerts = vi.fn(async (_params: { kind: string }) => {});
   (manager as unknown as { dispatchAlert: typeof alerts }).dispatchAlert = alerts;
   manager.registerTab('root', { cliState: 'idle', workspaceId: 'ws-1', tabName: 'root', tmuxSession: 'tmux-root', panelType: 'claude-code' });
@@ -106,7 +111,8 @@ const setup = async (worker: Partial<ITabStatusEntry> = {}) => {
     tabs: Map<string, ITabStatusEntry>;
     handleLivenessEvent: (e: TLivenessEvent) => Promise<void>;
   };
-  const sent = () => paste.mock.calls.map(([session, message]) => ({ to: session.replace('tmux-', ''), message }));
+  // What each tab was sent, typed now or held for its digest (ADR-0035): the watchdog's decision, not the paste.
+  const sent = () => routed(tabEvents);
   return { manager, entry, paste, alerts, internals, sent };
 };
 
@@ -432,11 +438,12 @@ describe('the idle nudge survives a server restart (review r1 finding 2)', () =>
       hasSession: vi.fn(async () => true),
       paste,
     });
-    const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}));
+    const tabEvents = memoryTabEvents();
+    const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), tabEvents, memoryLedgerTables()[1]);
     manager.registerTab('root', { cliState: 'idle', workspaceId: 'ws-1', tabName: 'root', tmuxSession: 'tmux-root', panelType: 'claude-code' });
     state.running = true;
     await manager.poll();
-    return { manager, paste };
+    return { manager, paste, sent: () => routed(tabEvents).map((row) => row.message) };
   };
 
   it('a manager rebuilt from the persisted stop sends exactly one nudge once the window passes, and none across a second rebuild', async () => {
@@ -449,17 +456,17 @@ describe('the idle nudge survives a server restart (review r1 finding 2)', () =>
     expect(restored.cliState).toBe('ready-for-review');
     expect(restored.lastEvent).toMatchObject({ name: 'stop', at: stopAt });
     await timers(second.manager, stopAt + 15 * MIN - 1);
-    expect(second.paste).not.toHaveBeenCalled();
+    expect(second.sent()).toEqual([]);
     await timers(second.manager, stopAt + 15 * MIN);
     await timers(second.manager, stopAt + 30 * MIN);
-    expect(second.paste.mock.calls.map(([, m]) => m)).toEqual([expect.stringContaining('idle without an end line')]);
+    expect(second.sent()).toEqual([expect.stringContaining('idle without an end line')]);
     await vi.waitFor(() => expect(state.tabs[0].watchdogTurnEnd?.idleNudgeSentSeq).toBe(state.tabs[0].watchdogTurnEnd?.seq));
     second.manager.shutdown();
 
     // Restart 2: the sent marker came back from disk, so nothing is sent again.
     const third = await rebuild();
     await timers(third.manager, stopAt + 60 * MIN);
-    expect(third.paste).not.toHaveBeenCalled();
+    expect(third.sent()).toEqual([]);
     third.manager.shutdown();
   });
 
@@ -467,8 +474,8 @@ describe('the idle nudge survives a server restart (review r1 finding 2)', () =>
     const { stopAt } = await stopAndPersist();
     const later = await rebuild();
     await timers(later.manager, stopAt + 3 * 60 * MIN);
-    expect(later.paste).toHaveBeenCalledTimes(1);
-    expect(later.paste.mock.calls[0][1]).toContain('it stopped 180 min ago');
+    expect(later.sent()).toHaveLength(1);
+    expect(later.sent()[0]).toContain('it stopped 180 min ago');
     later.manager.shutdown();
   });
 
@@ -481,7 +488,7 @@ describe('the idle nudge survives a server restart (review r1 finding 2)', () =>
     expect(restored.turnEnd ?? null).toBeNull();
     expect(restored.lastEvent).toBeNull();
     await timers(next.manager, stopAt + 60 * MIN);
-    expect(next.paste).not.toHaveBeenCalled();
+    expect(next.sent()).toEqual([]);
     expect(layout.updateTabWatchdogTurnEnd).toHaveBeenLastCalledWith('tmux-w', null);
     expect(state.tabs[0].watchdogTurnEnd).toBeUndefined();
     next.manager.shutdown();

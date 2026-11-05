@@ -49,21 +49,91 @@ export interface IMissionRun {
   updatedAt: number;
 }
 
+/** How the owner answers a format-2 question (ADR-0037 §1). A v1 item has none; see `effectiveAnswerType`. */
+export type TMissionAnswerType = 'single' | 'multi' | 'confirm' | 'text' | 'action-done';
+
 export interface IMissionOption {
   id: string;
   label: string;
+  /** v1 only. */
   description?: string;
+  /** v2: one line, what choosing this option does. */
+  consequence?: string;
+  /** v2: the asking agent's pick; at most one on `single` and `confirm`. */
+  recommended?: boolean;
+  /** v2: choosing this option requires text. */
+  needsText?: boolean;
+}
+
+export interface IMissionEvidenceLink {
+  label: string;
+  url: string;
 }
 
 export interface IMissionQuestion {
+  /** 2 for the ADR-0037 format; absent on a v1 question. */
+  formatVersion?: 2;
   kind: 'question' | 'action';
   title: string;
   context: string;
   storyIds: string[];
   options: IMissionOption[];
+  /** v1 free text; a v2 question stores null and states `recommendationWhy` instead. */
   recommendation: string | null;
   blockingScope: 'none' | 'story' | 'run';
   canContinue: boolean;
+  decision?: string;
+  whyNow?: string;
+  answerType?: TMissionAnswerType;
+  recommendationWhy?: string;
+  evidence?: IMissionEvidenceLink[];
+  /** The draft as the agent wrote it, kept when the curator reshaped it (ADR-0037 §3). */
+  source?: Record<string, unknown>;
+}
+
+/** One rule a question breaks: the field, what was measured, and the limit (ADR-0037 §2). */
+export interface IMissionQuestionDefect {
+  field: string;
+  measured: string;
+  limit: string;
+  message: string;
+}
+
+/**
+ * What one `attention.updated` changed (ADR-0037 §4). `compatible` holds when the decision and the
+ * answer type are unchanged and no option was removed; only then does an answer made on an older
+ * revision still apply.
+ */
+export interface IMissionQuestionChanges {
+  fromRevision: number;
+  toRevision: number;
+  compatible: boolean;
+  decision: { from: string; to: string } | null;
+  answerType: { from: TMissionAnswerType; to: TMissionAnswerType } | null;
+  options: {
+    added: string[];
+    removed: string[];
+    /** Wording changes of a kept option: its label or consequence, and `needsText` when that flipped. */
+    relabelled: Array<{ id: string; from: string; to: string; needsText?: { from: boolean; to: boolean } }>;
+  };
+  /** The recommended option ids, when they moved. */
+  recommended: { from: string[]; to: string[] } | null;
+  /** `recommendationWhy` on v2, `recommendation` on v1. */
+  recommendation: boolean;
+  whyNow: boolean;
+  /** The v2 title (on v1 the title is the decision). */
+  title: boolean;
+  context: boolean;
+  evidence: boolean;
+  /** Revisions in the range with no stored record (written before ADR-0037, or by the server); each counts as incompatible. */
+  unrecorded: number[];
+}
+
+/** What waiting on this item costs, from the ledger (ADR-HFL-11 §1); absent until the ledger serves it, never 0. */
+export interface IMissionBlockedCost {
+  items: number;
+  hours: number;
+  critical: boolean;
 }
 
 /** Optional producer fields of `attention.opened` / `attention.updated` (ADR-0031); stored inside `question_json`. */
@@ -107,7 +177,8 @@ export interface IMissionHumanInboxPolicy {
   guidance?: string;
 }
 
-export interface IMissionAttentionItem extends IMissionQuestion {
+/** A served item: the question with its evidence links as `evidenceLinks`, since `evidence` is the item's provenance. */
+export interface IMissionAttentionItem extends Omit<IMissionQuestion, 'evidence'> {
   id: string;
   workspaceId: string;
   runId: string;
@@ -122,9 +193,29 @@ export interface IMissionAttentionItem extends IMissionQuestion {
   defaultOptionId: string | null;
   /** The bookkeeping rule's record when the rule answered this item (ADR-0031 §7); null otherwise. */
   autoAnswer: IMissionAutoAnswer | null;
+  /** The question's `evidence` links (ADR-0037 §1); empty on a v1 question. */
+  evidenceLinks: IMissionEvidenceLink[];
+  /** Format-2 findings on a v1 question (ADR-0037 §2); empty on a v2 question. */
+  lint: IMissionQuestionDefect[];
+  /** The latest `attention.updated` record (ADR-0037 §4); null when the item was never updated since ADR-0037. */
+  changes: IMissionQuestionChanges | null;
+  blocked?: IMissionBlockedCost;
+  /** Owner messages the curator read as an answer to this item (story 23): links, never answers. Absent when none. */
+  suggestedAnswers?: IMissionAnswerSuggestion[];
   createdAt: number;
   updatedAt: number;
 }
+
+export interface IMissionAnswerSuggestion {
+  /** The message-history entry id of the owner's message. */
+  entryId: string;
+  /** The curator's quote from it; null when it gave none or it was withheld. */
+  span: string | null;
+  at: number;
+}
+
+/** Where an owner answer was made (story 33, the epic's Measure). */
+export type TMissionAnswerSource = 'web' | 'phone' | 'notification';
 
 export interface IMissionAnswerRequest {
   submissionId: string;
@@ -132,9 +223,15 @@ export interface IMissionAnswerRequest {
   optionIds: string[];
   text: string;
   actionCompleted: boolean;
+  /** Recorded in the stored request, outside its content hash; absent from an older client. */
+  source?: TMissionAnswerSource;
 }
 
-export interface IMissionAnswer extends IMissionAnswerRequest {
+export interface IMissionAnswer extends Omit<IMissionAnswerRequest, 'source'> {
+  /** Null: not recorded (an older client, an auto-answer, or a row from before story 33). */
+  source: TMissionAnswerSource | null;
+  /** The item revision the answer applied to; above `expectedRevision` when compatible revisions came between (ADR-0037 §4). */
+  appliedRevision: number;
   id: string;
   workspaceId: string;
   runId: string;
@@ -312,6 +409,22 @@ export interface IMissionAnswerResponse {
 
 export interface IMissionError {
   error: string;
-  code: 'invalid-request' | 'unauthorized' | 'forbidden' | 'not-found' | 'conflict' | 'storage-unavailable';
+  code: 'invalid-request' | 'question-invalid' | 'unauthorized' | 'forbidden' | 'not-found' | 'conflict' | 'storage-unavailable';
   current?: IMissionAttentionItem | IMissionRun;
+  /** On 400 question-invalid: every defect of every refused event. */
+  defects?: IMissionEventDefect[];
+  /** On a 409 answer conflict: what changed between the answered revision and the current one. */
+  changes?: IMissionQuestionChanges;
+}
+
+export interface IMissionEventDefect extends IMissionQuestionDefect {
+  eventId: string;
+  itemId: string;
+}
+
+/** The format-2 findings of one accepted attention event (ADR-0037 §2). */
+export interface IMissionEventLint {
+  eventId: string;
+  itemId: string;
+  findings: IMissionQuestionDefect[];
 }

@@ -1,5 +1,5 @@
 import type { ISessionInfo } from '@/types/timeline';
-import type { ITab, TPanelType, IWorkspace } from '@/types/terminal';
+import type { ITab, TPanelType, IWorkspace, TTabRole } from '@/types/terminal';
 import type { ICurrentAction } from '@/types/status';
 import type { IPermissionRequest } from '@/types/codex-permission';
 
@@ -7,12 +7,22 @@ export interface IAgentResumeCommandOptions {
   workspaceId?: string;
   model?: string;
   effort?: string;
+  /** Claude only: the tab's role tool configuration and its preview origin (ADR-0040). */
+  role?: TTabRole;
+  previewOrigin?: string;
+  /** An evaluator's libpq service, exported as PGSERVICE (ADR-0040). */
+  pgService?: string;
 }
 
 export interface IAgentLaunchCommandOptions {
   workspaceId?: string;
   model?: string;
   effort?: string;
+  /** Claude only: the tab's role tool configuration and its preview origin (ADR-0040). */
+  role?: TTabRole;
+  previewOrigin?: string;
+  /** An evaluator's libpq service, exported as PGSERVICE (ADR-0040). */
+  pgService?: string;
 }
 
 export interface IAgentSessionWatchOptions {
@@ -115,6 +125,8 @@ export interface IAgentRuntimeSnapshot {
    * provider cannot read it.
    */
   lastAssistantTail?: string | null;
+  /** The transcript uuid of the entry `lastAssistantTail` was read from (Claude only): the curator's source id. */
+  lastAssistantUuid?: string | null;
   /** The current turn's terminal provider error; null for a clean end; absent when the provider cannot tell. */
   lastTurnError?: ITurnError | null;
 }
@@ -178,7 +190,8 @@ export type THookEventKind = typeof HOOK_EVENT_KINDS[number];
  */
 export type TAgentWorkStateEvent =
   | { kind: 'session-start'; source?: TSessionStartSource }
-  | { kind: 'prompt-submit' }
+  /** `fromTool`: a Codex PreToolUse or PostToolUse, read as prompt-submit by the work-state machine; it starts no turn. */
+  | { kind: 'prompt-submit'; fromTool?: true }
   | { kind: 'notification'; notificationType?: string }
   | { kind: 'stop' }
   | { kind: 'interrupt' }

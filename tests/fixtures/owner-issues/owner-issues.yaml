@@ -1,0 +1,32 @@
+# Synthetic rows in the shape of treasury-v2 `.v2/owner-issues.yaml` (raised = an AEDT date, no time).
+# The file's mtime in the test is 2026-11-03T13:22:33Z (4 Nov 00:22 AEDT), the live feed's first pass.
+updated: 4 Nov 00:22 AEDT
+issues:
+- id: 25-I1
+  raised: 25 Oct
+  title: 'Fixture issue raised before the window'
+  status: building
+- id: 28-I1
+  raised: 28 Oct
+  title: 'Fixture issue raised on the day the window starts'
+  status: fixed, awaiting your check
+- id: 30-I1
+  raised: 30 Oct
+  title: 'Fixture issue inside the window'
+  status: building
+- id: 01-I1
+  raised: 1 Nov
+  title: 'Fixture issue inside the window'
+  status: deferred-by-owner
+- id: 02-I1
+  raised: 2 Nov (see the note)
+  title: 'Fixture issue whose raised field carries trailing text'
+  status: building
+- id: 03-I1
+  raised: 3 Nov
+  title: 'Fixture issue inside the window'
+  status: building
+- id: 04-I1
+  raised: 4 Nov
+  title: 'Fixture issue raised on the day of the pass'
+  status: not started

@@ -7,7 +7,8 @@ import type { IAgentPreflight, IAgentProvider } from '@/lib/providers/types';
 import { getChildPids, getProcessArgs } from '@/lib/process-utils';
 import { createLogger } from '@/lib/logger';
 import { launchAgentInTab } from '@/lib/agent-launch';
-import type { IAgentLaunchConfig } from '@/types/terminal';
+import { agentLaunchConfigFromOptions, agentLaunchOptionsForTab } from '@/lib/agent-launch-policy';
+import type { IAgentLaunchOptions } from '@/types/terminal';
 
 const log = createLogger('auto-resume');
 
@@ -25,7 +26,8 @@ interface IAutoResumeTarget {
   tmuxSession: string;
   sessionId: string;
   provider: IAgentProvider;
-  agentLaunchConfig?: IAgentLaunchConfig;
+  /** From the tab, through the one reader every launch path uses: the pins and the role (ADR-0040). */
+  launchOptions: IAgentLaunchOptions;
 }
 
 const findAutoResumeTargets = async (): Promise<IAutoResumeTarget[]> => {
@@ -68,7 +70,7 @@ const findAutoResumeTargets = async (): Promise<IAutoResumeTarget[]> => {
         tmuxSession: tab.sessionName,
         sessionId,
         provider,
-        agentLaunchConfig: tab.agentLaunchConfig,
+        launchOptions: agentLaunchOptionsForTab(tab),
       });
     }
   }
@@ -110,11 +112,13 @@ const sendResumeKeys = async (target: IAutoResumeTarget): Promise<boolean> => {
     }
 
     log.debug(`Sending resume: ${target.tmuxSession} → ${target.sessionId}`);
+    const { model, effort, ...roleOptions } = target.launchOptions;
     const launched = await launchAgentInTab({
       workspaceId: target.workspaceId,
       tabId: target.tabId,
       sessionName: target.tmuxSession,
-      agentLaunchConfig: target.agentLaunchConfig,
+      agentLaunchConfig: agentLaunchConfigFromOptions(model, effort),
+      ...roleOptions,
     }, { provider: target.provider, resumeSessionId: target.sessionId });
     if (launched.kind === 'codex' && !launched.outcome.ok) {
       log.warn(`${CODEX_RESUME_FAILURE[launched.outcome.step]}: ${target.tmuxSession} — ${launched.outcome.reason}`);

@@ -2,7 +2,7 @@
 // consults, plus the alert builder. No node-only imports — the server dispatches
 // from status-manager and the Electron/toast hooks apply the same rule client-side.
 import type { IWorkspace } from '@/types/terminal';
-import type { IAlert, IAlertFlag, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
+import type { IAlert, IAlertFlag, IAlertQuestion, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
 
 export const ALERTS_ORCHESTRATOR_ONLY_DEFAULT = true;
 
@@ -91,6 +91,12 @@ export interface IAlertSource {
   detail?: string | null;
   /** Kind `flag` only: the raised flag, carried on the alert as served (ADR-0032). */
   flag?: IAlertFlag;
+  /** Kind `attention-opened` only: the opened Mission Control item, carried on the alert. */
+  itemId?: string;
+  /** Kind `attention-opened` only: the item's title, the alert body. */
+  itemTitle?: string | null;
+  /** Kind `attention-opened` only: the question summary a notification answers from (story 33). */
+  question?: IAlertQuestion | null;
 }
 
 export type TAlertDraft = Omit<IAlert, 'id' | 'seq'>;
@@ -114,6 +120,9 @@ const titleFor = (kind: TAlertKind): string => {
     case 'bg-job-died': return 'Background Job Died';
     case 'bg-job-unknown': return 'Background Job Status Unknown';
     case 'flag': return 'Flag Raised';
+    case 'attention-opened': return 'Mission Control: answer needed';
+    // A NEEDS-DECISION line no Mission Control item could take, and no orchestrator can act on (ADR-0041 §2).
+    case 'needs-decision': return 'Decision needed: no Mission Control item';
   }
 };
 
@@ -134,6 +143,10 @@ const bodyFor = (source: IAlertSource): string => {
       return source.detail?.slice(0, MAX_BODY) || source.tabName || source.tabId;
     case 'flag':
       return cutBody(source.detail || source.flag?.text || source.tabName || source.tabId);
+    case 'attention-opened':
+      return cutBody(source.itemTitle?.trim() || source.workspaceName || source.tabName || source.tabId);
+    case 'needs-decision':
+      return cutBody(source.detail || source.tabName || source.tabId);
   }
 };
 
@@ -149,4 +162,6 @@ export const alertFor = (source: IAlertSource): TAlertDraft => ({
   body: bodyFor(source),
   at: source.at,
   ...(source.kind === 'flag' && source.flag ? { flag: { ...source.flag } } : {}),
+  ...(source.kind === 'attention-opened' && source.itemId ? { itemId: source.itemId } : {}),
+  ...(source.kind === 'attention-opened' && source.question ? { question: source.question } : {}),
 });

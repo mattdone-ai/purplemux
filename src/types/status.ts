@@ -1,7 +1,9 @@
+import type { TWakeClass } from '@/types/tab-events';
 import type { TCliState, TToolName } from '@/types/timeline';
 import type { TPanelType } from '@/types/terminal';
 import type { ISessionHistoryEntry } from '@/types/session-history';
 import type { IPermissionRequest } from '@/types/codex-permission';
+import type { TMissionAnswerType } from '@/types/mission-control';
 
 export type TTerminalStatus = 'idle' | 'running' | 'server';
 
@@ -53,6 +55,10 @@ export interface ITabStatusEntry {
   reportsTo?: string | null;
   /** The markers whose end lines are forwarded (ADR-0025); mirrors ITab.reportOn. Null: every marker. */
   reportOn?: import('@/lib/turn-end').TTurnMarkerName[] | null;
+  /** The seat's handoff file (ADR-0036); mirrors ITab.handoffPath. Null: not a seat. */
+  handoffPath?: string | null;
+  /** Mirrors ITab.rotateAt. */
+  rotateAt?: import('@/types/context-lifecycle').TRotateAt | null;
   /** How the watchdog classified the last `stop` (ADR-0018). Runtime only. */
   turnEnd?: ITurnEndRecord | null;
   /** The provider-error episode this tab is in; a clean stop ends it (story 26). Runtime only. */
@@ -222,6 +228,8 @@ export interface IOrchestrationNudge {
   message: string;
   at: number;
   delivered: boolean;
+  /** How it reaches the tab (ADR-0035): a digest nudge is undelivered until the tab's next digest. */
+  wakeClass?: TWakeClass;
 }
 
 export interface IOrchestrationNudgeMessage {
@@ -229,7 +237,7 @@ export interface IOrchestrationNudgeMessage {
   nudge: IOrchestrationNudge;
 }
 
-export type TAlertKind = 'needs-input' | 'review' | 'standup-needs-human' | 'orchestrator-stalled' | 'orchestrator-missing' | 'work-stalled' | 'bg-job-died' | 'bg-job-unknown' | 'flag';
+export type TAlertKind = 'needs-input' | 'review' | 'standup-needs-human' | 'orchestrator-stalled' | 'orchestrator-missing' | 'work-stalled' | 'bg-job-died' | 'bg-job-unknown' | 'flag' | 'attention-opened' | 'needs-decision';
 
 export type TAlertProviderId = 'claude' | 'codex' | 'grok';
 
@@ -248,9 +256,35 @@ export interface IAlert {
   at: number;
   /** Kind `flag` only (ADR-0032): the raised fleet or flow flag. */
   flag?: IAlertFlag;
+  /** Kind `attention-opened` only: the Mission Control item that was opened for the human. */
+  itemId?: string;
+  /**
+   * Kind `attention-opened` only (story 33, ADR-HFL-11 decision 6): what a notification needs to
+   * answer the item in place. Additive (ADR-0004): a client that does not read it opens the item.
+   */
+  question?: IAlertQuestion;
 }
 
-export type TAlertFlagSource = 'fleet' | 'flow';
+/** The item's question as the alert carries it: the decision, how it is answered, and the revision shown. */
+export interface IAlertQuestion {
+  /** 2 for the ADR-0037 format, 1 for an item without it. */
+  formatVersion: 1 | 2;
+  /** `decision` on v2, `title` on v1, trimmed. */
+  decision: string;
+  /** The type the answer route judges the answer by (`effectiveAnswerType`). */
+  answerType: TMissionAnswerType;
+  options: IAlertQuestionOption[];
+  /** The item revision this summary describes: the `expectedRevision` an answer from it carries. */
+  revision: number;
+}
+
+export interface IAlertQuestionOption {
+  id: string;
+  label: string;
+  needsText: boolean;
+}
+
+export type TAlertFlagSource = 'fleet' | 'flow' | 'ledger';
 
 export interface IAlertFlag {
   source: TAlertFlagSource;

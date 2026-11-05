@@ -15,7 +15,17 @@ export const normalizeMissionItem = (item: IMissionAttentionItem): IMissionAtten
   class: item.class ?? null,
   defaultOptionId: item.defaultOptionId ?? null,
   autoAnswer: item.autoAnswer ?? null,
+  evidenceLinks: item.evidenceLinks ?? [],
+  lint: item.lint ?? [],
+  changes: item.changes ?? null,
 });
+
+/** The snapshot with this item replaced when it is newer than the one held; unchanged otherwise. */
+export const mergeMissionItem = (snapshot: IMissionSnapshot, item: IMissionAttentionItem): IMissionSnapshot => {
+  const held = snapshot.items.find((candidate) => candidate.id === item.id);
+  if (!held || held.revision >= item.revision) return snapshot;
+  return { ...snapshot, items: snapshot.items.map((candidate) => candidate.id === item.id ? item : candidate) };
+};
 
 export const normalizeMissionSnapshot = (snapshot: IMissionSnapshot): IMissionSnapshot => ({
   ...snapshot,
@@ -81,6 +91,7 @@ interface IMissionControlState {
   error: string | null;
   refresh: () => Promise<void>;
   applyAnswer: (response: IMissionAnswerResponse) => void;
+  applyItem: (item: IMissionAttentionItem) => void;
   applyBootstrap: (bootstrap: IMissionBootstrap) => void;
 }
 
@@ -189,6 +200,11 @@ const useMissionControl = (enabled = true): IMissionControlState => {
     });
   }, []);
 
+  /** A newer item the server answered with (a 409's `current`), so the card and its draft agree at once. */
+  const applyItem = useCallback((item: IMissionAttentionItem) => {
+    setSnapshot((current) => current ? mergeMissionItem(current, normalizeMissionItem(item)) : current);
+  }, []);
+
   const applyBootstrap = useCallback((bootstrap: IMissionBootstrap) => {
     bootstrapMutationEpoch.current += 1;
     setSnapshot((current) => current ? { ...current, bootstrap } : current);
@@ -202,6 +218,7 @@ const useMissionControl = (enabled = true): IMissionControlState => {
     error,
     refresh,
     applyAnswer,
+    applyItem,
     applyBootstrap,
   };
 };

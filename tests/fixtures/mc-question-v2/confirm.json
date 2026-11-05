@@ -1,0 +1,67 @@
+{
+  "id": "q-confirm",
+  "workspaceId": "ws-fixture",
+  "runId": "run-fixture",
+  "revision": 1,
+  "state": "open",
+  "storyIds": [],
+  "blockingScope": "story",
+  "canContinue": true,
+  "recommendation": null,
+  "context": "",
+  "evidence": {
+    "source": "agent",
+    "sourceId": "evt-q-confirm",
+    "observedAt": 1762128000000,
+    "confidence": "confirmed"
+  },
+  "answerId": null,
+  "resolution": null,
+  "humanReview": {
+    "humanNeed": "decision",
+    "humanReason": "Only the owner can choose this.",
+    "handling": "The orchestrator checked the epic documents; they leave this open.",
+    "reviewerTabId": "tab-orch",
+    "binding": {
+      "tabId": "tab-orch",
+      "providerId": "claude",
+      "sessionId": "session-1",
+      "generation": 1,
+      "runtimeGeneration": "launch-1"
+    },
+    "eventId": "evt-review",
+    "reviewedAt": 1762128000000
+  },
+  "candidateReason": null,
+  "class": null,
+  "defaultOptionId": null,
+  "autoAnswer": null,
+  "lint": [],
+  "changes": null,
+  "createdAt": 1762124400000,
+  "updatedAt": 1762128000000,
+  "formatVersion": 2,
+  "kind": "question",
+  "title": "Deploy to live",
+  "decision": "Deploy release 0.31.0 to the live server now?",
+  "whyNow": "The dry run passed and the queue is empty.",
+  "answerType": "confirm",
+  "options": [
+    {
+      "id": "yes",
+      "label": "Yes",
+      "consequence": "Deploys now; about 40 s of restart.",
+      "recommended": true,
+      "needsText": false
+    },
+    {
+      "id": "no",
+      "label": "No",
+      "consequence": "Waits for your next window.",
+      "recommended": false,
+      "needsText": false
+    }
+  ],
+  "recommendationWhy": "No owner session is active.",
+  "evidenceLinks": []
+}

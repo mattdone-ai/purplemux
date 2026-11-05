@@ -5,6 +5,11 @@ import {
 } from '@/lib/providers/codex/hook-handler';
 
 describe('processCodexHookPayload', () => {
+  it.each(['PreToolUse', 'PostToolUse'])('reads %s as a prompt-submit from a tool, which starts no turn (story 15, review R5)', (name) => {
+    expect(processCodexHookPayload({ hook_event_name: name, session_id: 's', tool_name: 'exec_command' }).translation.event)
+      .toEqual({ kind: 'prompt-submit', fromTool: true });
+  });
+
   it('translates Codex prompt hooks into provider-neutral meta and events', () => {
     const { result, translation } = processCodexHookPayload({
       hook_event_name: 'UserPromptSubmit',

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { isBurndownStale } from '@/lib/burndown';
 import { formatTokenCount } from '@/lib/claude-tokens';
+import { formatCacheReads } from '@/lib/spend/spend-model';
 import type { IBurndownEpic, IBurndownHistoryRow, IMissionBurndownResponse } from '@/types/burndown';
 import type { ISpendTokensByDay } from '@/types/spend';
 
@@ -67,8 +68,9 @@ export const BurndownChart = ({ rows, tokensByDay }: { rows: IBurndownHistoryRow
     x: x(at), y: round(CHART_HEIGHT - CHART_PAD - (entry.totalTokens / topTokens) * (CHART_HEIGHT - 2 * CHART_PAD)),
   }));
   const tokenTotal = tokenDays.reduce((sum, { entry }) => sum + entry.totalTokens, 0);
+  const cacheReads = formatCacheReads({ totalTokens: tokenTotal, cacheReadTokens: tokenDays.reduce((sum, { entry }) => sum + entry.cacheReadTokens, 0) });
   const label = `Remaining ${last.remaining} of ${last.total} points across ${plural(rows.length, 'snapshot', 'snapshots')}`
-    + (tokenDays.length ? `; workspace ${formatTokenCount(tokenTotal)} tokens over ${plural(tokenDays.length, 'day', 'days')}, peak ${formatTokenCount(topTokens)} a day` : '');
+    + (tokenDays.length ? `; workspace ${formatTokenCount(tokenTotal)} tokens over ${plural(tokenDays.length, 'day', 'days')}, peak ${formatTokenCount(topTokens)} a day, ${cacheReads}` : '');
 
   return (
     <figure className="space-y-1">
@@ -87,7 +89,7 @@ export const BurndownChart = ({ rows, tokensByDay }: { rows: IBurndownHistoryRow
         <span className="flex gap-3">
           <span className="text-ui-blue">— Remaining</span>
           <span>- - Total</span>
-          {tokenPoints.length > 0 && <span className="text-ui-purple">— Workspace tokens/day (own scale, peak {formatTokenCount(topTokens)})</span>}
+          {tokenPoints.length > 0 && <span className="text-ui-purple">— Workspace tokens/day (own scale, peak {formatTokenCount(topTokens)}) · {cacheReads}</span>}
         </span>
         <span>{dayjs(end).format('MMM D HH:mm')}</span>
       </figcaption>

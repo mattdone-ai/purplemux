@@ -79,8 +79,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       if (panelType !== undefined) {
         // A remote tab is a terminal in this release (ADR-0022 §12): an agent
         // launched there would post its hooks to the remote host's own server.
-        if (panelType !== 'terminal' && (await findTab(wsId, tabId))?.tab.host) {
+        const current = (await findTab(wsId, tabId))?.tab;
+        if (panelType !== 'terminal' && current?.host) {
           return res.status(409).json({ error: 'only terminal tabs run on a remote host (ADR-0022)', code: 'remote-type-unsupported', panelType });
+        }
+        // Another engine would launch without the role's tool configuration (ADR-0040).
+        if (current?.role && panelType !== current.panelType) {
+          return res.status(409).json({ error: `a ${current.role} tab stays ${current.panelType}: its role fixes the engine (ADR-0040)`, code: 'conflict', role: current.role, panelType });
         }
         patch.panelType = panelType;
       }

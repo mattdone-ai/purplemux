@@ -1,0 +1,96 @@
+{
+  "id": "q-long-context",
+  "workspaceId": "ws-fixture",
+  "runId": "run-fixture",
+  "revision": 1,
+  "state": "open",
+  "storyIds": [],
+  "blockingScope": "story",
+  "canContinue": true,
+  "recommendation": null,
+  "context": "## What the data says\n\nThe lane wait splits as follows ([research 3.1](https://example.com/research#3.1)):\n\n- reason 1: 3% of the wait, see [run 1](https://example.com/runs/1)\n- reason 2: 6% of the wait, see [run 2](https://example.com/runs/2)\n- reason 3: 9% of the wait, see [run 3](https://example.com/runs/3)\n- reason 4: 12% of the wait, see [run 4](https://example.com/runs/4)\n- reason 5: 15% of the wait, see [run 5](https://example.com/runs/5)\n- reason 6: 18% of the wait, see [run 6](https://example.com/runs/6)\n- reason 7: 21% of the wait, see [run 7](https://example.com/runs/7)\n- reason 8: 24% of the wait, see [run 8](https://example.com/runs/8)\n- reason 9: 27% of the wait, see [run 9](https://example.com/runs/9)\n- reason 10: 30% of the wait, see [run 10](https://example.com/runs/10)\n- reason 11: 33% of the wait, see [run 11](https://example.com/runs/11)\n- reason 12: 36% of the wait, see [run 12](https://example.com/runs/12)\n- reason 13: 39% of the wait, see [run 13](https://example.com/runs/13)\n- reason 14: 42% of the wait, see [run 14](https://example.com/runs/14)\n\n| Measure | Value |\n|---|---|\n| p50 | 1.7 h |\n| p90 | 11.8 h |\n\n<script>alert('raw html is not rendered')</script>\n\nFurther reading: https://example.com/autolink",
+  "evidence": {
+    "source": "agent",
+    "sourceId": "evt-q-long-context",
+    "observedAt": 1762128000000,
+    "confidence": "confirmed"
+  },
+  "answerId": null,
+  "resolution": null,
+  "humanReview": {
+    "humanNeed": "decision",
+    "humanReason": "Only the owner can choose this.",
+    "handling": "The orchestrator checked the epic documents; they leave this open.",
+    "reviewerTabId": "tab-orch",
+    "binding": {
+      "tabId": "tab-orch",
+      "providerId": "claude",
+      "sessionId": "session-1",
+      "generation": 1,
+      "runtimeGeneration": "launch-1"
+    },
+    "eventId": "evt-review",
+    "reviewedAt": 1762128000000
+  },
+  "candidateReason": null,
+  "class": null,
+  "defaultOptionId": null,
+  "autoAnswer": null,
+  "lint": [],
+  "changes": null,
+  "createdAt": 1762124400000,
+  "updatedAt": 1762128000000,
+  "formatVersion": 2,
+  "kind": "question",
+  "title": "Queue first or lock first",
+  "decision": "Which constraint do we attack first?",
+  "whyNow": "The improvement seat starts tomorrow.",
+  "answerType": "single",
+  "options": [
+    {
+      "id": "queue",
+      "label": "The queue",
+      "recommended": true,
+      "needsText": false
+    },
+    {
+      "id": "lock",
+      "label": "The lock",
+      "recommended": false,
+      "needsText": false
+    }
+  ],
+  "recommendationWhy": "Queued is 45% of the lane wait.",
+  "source": {
+    "title": "(a) attack the queue first because the lock is held 91% of queued time; (b) the lock",
+    "context": "Original long free text.",
+    "options": [
+      {
+        "id": "queue",
+        "label": "(a) Queue first, which removes most of the wait as measured"
+      },
+      {
+        "id": "lock",
+        "label": "(b) Lock"
+      }
+    ]
+  },
+  "evidenceLinks": [
+    {
+      "label": "Evidence 1",
+      "url": "https://example.com/e/1"
+    },
+    {
+      "label": "Evidence 2",
+      "url": "https://example.com/e/2"
+    },
+    {
+      "label": "Evidence 3",
+      "url": "https://example.com/e/3"
+    },
+    {
+      "label": "Evidence 4",
+      "url": "https://example.com/e/4"
+    }
+  ]
+}

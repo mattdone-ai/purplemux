@@ -96,7 +96,9 @@ describe('fleet config transitions (ADR-0019)', () => {
 
   it('checks keys, values and expected versions', () => {
     expect(checkKey('gate.slots')).toBe('gate.slots');
-    for (const bad of ['Gate.slots', 'g', '1gate', 'gate slots', 'gate/slots', `g${'a'.repeat(64)}`, 7]) {
+    expect(checkKey('tabs.cap-per-workspace.ws-ldhziO')).toBe('tabs.cap-per-workspace.ws-ldhziO');
+    expect(checkKey('tabs.cap-per-workspace.ws-a_B-9z')).toBe('tabs.cap-per-workspace.ws-a_B-9z');
+    for (const bad of ['Gate.slots', '_gate', 'g', '1gate', 'gate slots', 'gate/slots', `g${'a'.repeat(64)}`, 7]) {
       expect(codeOf(() => checkKey(bad))).toBe('config-invalid');
     }
     expect(checkValue('x'.repeat(256))).toHaveLength(256);

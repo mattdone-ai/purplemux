@@ -16,10 +16,13 @@ File permissions are `0600` for anything containing a secret (config, tokens, la
 │   └── {wsId}/
 │       ├── layout.json           # pane/tab tree
 │       ├── message-history.json  # per-workspace input history
-│       ├── claude-prompt.md      # --append-system-prompt-file content
+│       ├── claude-prompt.md      # --append-system-prompt-file content, with the active standing orders
+│       ├── standing-orders.md    # the workspace's standing orders SO-<n> (ADR-0041; 0600)
+│       ├── spec-queue.md         # product rules the curator filed from owner messages, by message id (ADR-0042; 0600)
 │       ├── standups.json         # orchestrator standup ticks (latest + history)
 │       ├── burndown.json         # latest published epic burndown (Scrum Master)
 │       ├── flow.json             # latest published pipeline flow + server history (ADR-0026)
+│       ├── board-goal.json       # the board's goal, `purplemux board goal set` (ADR-0034 §10)
 │       ├── liveness.json         # the tabs' liveness probes and background jobs (0600)
 │       ├── codex-prompt.md       # Codex developer_instructions content
 │       ├── claude-home/          # per-workspace CLAUDE_CONFIG_DIR
@@ -29,6 +32,11 @@ File permissions are `0600` for anything containing a secret (config, tokens, la
 ├── codex-hook.sh            # Codex hook → POST /api/status/hook?provider=codex (generated, 0700)
 ├── grok-hook.sh             # Grok hook → POST /api/status/hook?provider=grok (generated, 0700)
 ├── statusline.sh            # statusline → POST /api/status/statusline (generated, 0755)
+├── bin/
+│   ├── evaluator-sql        # an evaluator tab's one read-only SQL probe (generated, 0755; ADR-0040)
+│   ├── evaluator-chrome-mcp # an evaluator tab's chrome-devtools MCP launcher (generated, 0755; ADR-0040)
+│   └── evaluator-mcp-filter.cjs # drops the client's MCP roots for that launcher (generated, 0644; ADR-0040)
+├── evaluator/               # evaluator screenshots and files, one {tabId}/ per tab, outside every repository (ADR-0040)
 ├── rate-limits.json         # latest statusline JSON written by statusline.sh
 ├── session-history.json     # completed Claude session log (cross-workspace)
 ├── session-tabs.json        # agent session → tab bindings for spend (ADR-0030; 0600)
@@ -42,12 +50,23 @@ File permissions are `0600` for anything containing a secret (config, tokens, la
 ├── leases.json              # held leases (ADR-0011; 0600)
 ├── notes.json               # coordinator notes (ADR-0013; 0600)
 ├── watches.json             # harness watches (ADR-0015; 0600)
+├── standing-orders.md       # the fleet's standing orders SO-<n>, seeded with the W8 orders (ADR-0041; 0600)
+├── standing-orders-seq.json # the highest SO-<n> ever handed out, so no id is reused (ADR-0041; 0600)
 ├── inbox.json               # server notices queued or held for tabs (ADR-0012; 0600)
 ├── fleet-config.json        # fleet config keys, versions and history (ADR-0019; 0600)
 ├── deploy-announcements.json # deploy announcements and their recipients, 7 days (ADR-0017; 0600; coordination `deploys` reads the last 24 h)
 ├── tab-tokens.json          # per-tab CLI tokens (0600)
 ├── workspace-tokens.json    # per-workspace CLI tokens (0600)
 ├── mission-control.sqlite   # Mission Control and portfolio database: runs, items, answers, deliveries, events (0600; WAL)
+├── ledger.sqlite            # work-item ledger: events, items, wait intervals, rollups, tab events and turns, experiments (ADR-0033; 0600; WAL)
+├── curator/                 # the local curator (ADR-0038; 0700): state.json (kodit anchor, per-version shadow clocks, task states),
+│   └── eval/                #   labelled sets {task}.json (ids, labels, times, twin locators; no text), {task}.shadow.json,
+│                            #   {task}.queue.json, match-standing-order.orders.json, spot-check.{task}.json (N -> id),
+│                            #   results/{task}.json (held-out counts) and results/{task}.{train|all}.json,
+│                            #   reshape-question.json (MC item ids), results/reshape-question{,.judge}.json (0600)
+├── ledger-tokens.json       # SHA-256 of each ledger producer token: scope ledger:emit on one workspace (ADR-0033; 0600)
+├── ledger-tokens/           # producer token files the CLI writes: {wsId}/{producer}.json (0700 dir, 0600 files)
+├── ledger-spool/            # events `ledger emit` could not deliver: {producer}.jsonl, {producer}.rejected.jsonl, lock dirs (0700)
 ├── audit/
 │   └── coordination.jsonl   # coordination audit lines: leases, notes, grants, deploys, restarts (0600; rotated at 10 MiB, 3 kept)
 ├── session-stats/           # per-session statusline usage {sessionId}.json (0600)
@@ -149,6 +168,10 @@ When no server answers (no port or token file, a refused or never-finished conne
 
 Do not edit these by hand — they are rewritten on startup when content differs.
 
+### `bin/evaluator-sql`, `bin/evaluator-chrome-mcp`, `bin/evaluator-mcp-filter.cjs`, `evaluator/` — `src/lib/tab-role.ts`
+
+Written (one rename each, only when the content differs) whenever an evaluator tab's launch command is built ([ADR-0040](adr/0040-evaluator-tab-role.md)). `evaluator-sql` runs one statement through the user-space psql 18 at `~/.local/lib/pg-client` (outside `~/.purplemux`), with a scrubbed environment, `-X`, `-d service=$PGSERVICE` (the tab's `--pg-service`) and a read-only transaction. It refuses a second argument, a backslash, a second statement, a missing or bad `PGSERVICE`, and a missing psql. `evaluator-chrome-mcp` starts the pinned `chrome-devtools-mcp` on `~/.local/bin/headless-chrome` through `evaluator-mcp-filter.cjs`, which removes the client's `roots` capability so claude's working directory (the repository) is not a file root. It takes the tab's preview URL pattern as its one argument (`--allowedUrlPattern`) and refuses to start without it or on a headless Chrome under 149. Its only file roots are `evaluator/{tabId}/` and `evaluator/{tabId}/tmp/` (its `TMPDIR`), which it creates; nothing prunes them, so screenshots outlive the tab.
+
 ### `workspaces/{wsId}/grok-home/` and `$GROK_HOME/hooks/purplemux.json`
 
 Grok Build reads `GROK_HOME` instead of `~/.grok` when it is set, so each workspace pane launches
@@ -190,11 +213,13 @@ Cross-workspace log of completed Claude sessions (max 200 entries, version 1). K
 ### `session-tabs.json` — `src/lib/spend/session-tabs-store.ts`
 
 Which tab ran which agent session, for the spend read model (ADR-0030). `{version: 1, bindings:
-{"<provider>:<sessionId>": {workspaceId, tabId, firstSeenAt, lastSeenAt}}}`, mode 0600, written by
+{"<provider>:<sessionId>": {workspaceId, tabId, tabName?, firstSeenAt, lastSeenAt}}}`, mode 0600, written by
 tmp + rename under one lock. Both session-id writers in `src/lib/layout-store.ts`,
 `updateTabAgentSessionId` and `updateTabAgentState` (the status manager's hook, launch and poll saves),
 record each non-null session after their layout write (a failure is logged and never fails the hook path); the spend indexer seeds it once per boot
-from `session-history.json` and every layout's current session ids. A session moves to another tab
+from `session-history.json` and every layout's current session ids. `tabName` is the tab's name at the
+newest sighting that named one: a sighting under a new name is written even inside the hourly touch interval, and a
+sighting without a name keeps the stored one. It names the seat of a tab closed since (harness-flow-loop 04). A session moves to another tab
 only on a newer sighting. Bindings last seen before the spend floor (today − 91, UTC) are pruned. A malformed file is refused, never
 read as empty or overwritten: spend then attributes no usage to a tab and says why. While the file is
 refused, the hook path reads it at most once every 60 s and logs one warning per read, with the path
@@ -309,10 +334,63 @@ rolled back onto the file still opens it and ignores them:
 - `mission_auto_answers` — one row per bookkeeping auto-answer (ADR-0031): `answer_id` (primary key), `item_id`,
   `workspace_id`, `rule`, `rule_version`, `applied_option_id`, `at`, `note`. Written in the answer's transaction. The
   rule's answers are also audit lines (`attention-auto-answer`) in `audit/coordination.jsonl`.
+- `mission_item_changes` — one row per `attention.updated` (ADR-0037): `item_id` and `revision` (primary key),
+  `workspace_id`, `changes_json` (what the revision changed and whether it is compatible), `at`. The answer route reads
+  it to accept an answer made on an older compatible revision.
+- `mission_answer_suggestions` — an owner message the curator read as an answer (ADR-0042): `item_id` and `entry_id`
+  (primary key), `workspace_id`, `span` (the curator's quote, null when withheld), `at`. Served on the item as
+  `suggestedAnswers`; never an answer, and the item's revision does not move.
 - the `portfolio_*` tables, added by `portfolio-store.ts`, which opens the same file (selection, impacts, events, watch
   uses, watch history unknown, actions, wakes, escalations, milestones).
 
 Not regeneratable: deleting the file loses every run, attention item, answer history and portfolio selection.
+
+### `ledger.sqlite` — `src/lib/ledger-store.ts`
+
+The work-item ledger (ADR-0033; better-sqlite3, WAL, 0600, `user_version` 1; a newer version is refused). A separate
+file from `mission-control.sqlite`, so the high-volume feed never couples to the attention store's schema version.
+Tables: `events` (append-only; `event_key`, 12 bytes of SHA-256 over the workspace, the producer and its `event_id`, is unique, so a replayed batch or spool is skipped), `items`
+(the projection per `(workspace_id, item_key)`), `intervals` (one row per finished wait, written in the transaction of
+the event that ends it), `rollups_daily` (per UTC day, item type and reason), `tab_events` (ADR-0035: every nudge, notice, tab send and digest
+a tab was sent, with its wake class, its source tab, a flag's rule, and when and in which digest it was delivered; read
+with `purplemux events show`), `tab_turns` (story 15, ADR-0035 §7: one row per finished turn of an agent tab, its start
+when seen and its acting tool calls; with `tab_events` the input of `purplemux effects show`), `experiments` (ADR-HFL-03), `landings` (one row per range landing the projection applied,
+written in the event's transaction; created and filled once from the stored events on the first open of a ledger
+without it; harness-flow-loop 04) and `ledger_meta` (rollup progress, each workspace's longest interval, when the first
+turn was recorded). A daily job,
+10 min after boot and then every 24 h, rolls up every day not yet rolled and every day a newly finished wait covers,
+then deletes events, intervals and landings older than 92 days, tab events and tab turns older than 30 days, items closed before
+then, and rollups older than 400 days, in chunks of 5,000 rows. Not regeneratable: the events are the record.
+
+`ledger-tokens.json` (`src/lib/ledger-token.ts`) keeps `{ version: 1, tokens: [{ hash, workspaceId, producer,
+issuedAt }] }`; the token itself is never stored. Issuing a producer again replaces its entry. The CLI writes the token
+to `ledger-tokens/{wsId}/{producer}.json` (or `--out`) and spools undelivered events per producer in `ledger-spool/`;
+the next `ledger emit` sends the spool first, and an event the server refuses moves alone to
+`{producer}.rejected.jsonl`. `{producer}.drain.lock/` (one drainer, refreshed every batch, stale after 60 s) and
+`{producer}.jsonl.lock/` (every change to the spool file, stale after 10 s) are lock directories.
+
+### `curator/` — `src/lib/curator-store.ts`
+
+The local curator (ADR-0038). `state.json`: `{ version: 1, liveSince, tasks: { <task>: { state, promotedAt,
+promotedPromptVersion, shadowSince: { <promptVersion>: ms } } }, kodit, rateLimitMs }`. `liveSince` (the first start
+of a server carrying the client) anchors the kodit window; each prompt version's 72 h shadow clock is its own first
+live call. `eval/<task>.json` holds `{ task, labelledBy, labelledAt, items: [{ id, label, at?, alt? }] }` and never
+message text: an id is `<wsId>/<historyEntryId>` (an owner message, read from `message-history.json`, else from `alt`,
+its transcript twin `{ ref: <ws>/<session>/<userUuid>, start, length, mode: raw | collapsed, sha }`, a 16-hex
+sha256), `<wsId>/<sessionId>/<assistantUuid>` (a turn ending, read from the Claude transcript) or `<wsId>/mc/<itemId>`
+(an agent's ask in `mission-control.sqlite`). `at` is the source time; an unreadable item older than 30 days has aged
+out. The held-out 30% is a hash of the id, so no split is stored. `eval/<task>.shadow.json` holds `{ rows: [{ id,
+promptVersion, predicted, outcome, at }] }`, the predictions of labelled shadow calls; `eval/<task>.queue.json` the
+label queue (ids and predictions, plus `excluded`: ids a pass marked no permission ask; the CLI shows ids only). `eval/results/<task>.json` is the latest held-out
+evaluation (per-class counts, no per-id prediction); `results/<task>.train.json` and `.all.json` keep the rows of training ids only.
+`eval/spot-check.<task>.json` maps the owner's spot-check numbers to ids, written only after the item exists. Every
+curator call is also a `tab_events` row (class `log`, kind `curator`) in `ledger.sqlite`; each routing decision once a
+task routes is one more (kind `curator-route`, ids and actions only, ADR-0042). `eval/reshape-question.json` holds `{
+task, builtBy, builtAt, items: [{ id: <wsId>/mc/<itemId>, at }] }` (`scripts/curator/reshape-set.ts`, read-only on
+`mission-control.sqlite`); `results/reshape-question.json` the last reshape evaluation (ids, labels, defect field
+names, each draft's sha256, never its text) and `results/reshape-question.judge.json` the judge's verdicts bound to that
+run, written only by `curator judge-import`. Regeneratable except the labelled sets and the shadow evidence, which are
+labelling passes' output.
 
 ### `audit/coordination.jsonl` — `src/lib/coordination-audit.ts`
 
@@ -386,13 +464,38 @@ Per-workspace input history for Claude tabs. Capped at 500 entries. Locks are ke
 
 ### `claude-prompt.md` — `src/lib/claude-prompt.ts`
 
-The `--append-system-prompt-file` content passed to every Claude tab in the workspace. Regenerated whenever the workspace is created, renamed, or its directories change. Contains workspace ID + CLI quick-reference.
+The `--append-system-prompt-file` content passed to every Claude tab in the workspace. Regenerated whenever the workspace is created, renamed, or its directories change, before every Claude launch (tab create, restart, resume), and when a standing order changes. Contains workspace ID + CLI quick-reference + the active standing orders (ADR-0041).
+
+### `workspaces/{wsId}/spec-queue.md` — `src/lib/spec-queue.ts`
+
+Product rules the owner stated in chat, filed by the curator once `classify-owner-message` routes in that workspace
+(ADR-0042; ADR-HFL-05 decision 7). A header, then one block per message: `## <historyEntryId>`, `- at: <UTC>`,
+`- source: owner message <ws>/<id>`, and the message as a blockquote. Appends go through one host lock; a repeated id is
+left as it is. Read by hand and by the next slice contract (ADR-HFL-07). Not regeneratable.
+
+### `standing-orders.md` — `src/lib/standing-orders-store.ts`
+
+The owner's standing orders (ADR-0041), one file for the fleet (`~/.purplemux/standing-orders.md`) and one per
+workspace. Each `## SO-<n>` block carries `text`, `source` (the owner message and its UTC date), `scope`, `check` (a
+hook or test, or `prose`), `state` (`active` or `struck`), `added`, and `struck` once struck. Ids are unique across
+every file. The active orders of the fleet and the workspace are written into `claude-prompt.md`; together they may
+take at most 8 KB there. A missing fleet file is created with the W8 seed orders; a missing workspace file holds
+none; a file in another layout (or empty, or without its `# Standing orders:` header) is refused, never read as empty. The seed is
+written under the host lock, every write is tmp + rename with a name of its own, and `standing-orders-seq.json`
+(`{ "high": n }`) keeps the highest id ever handed out, so an id is never reused even when its workspace directory
+is removed. Written with `purplemux so add|strike`.
 
 ### `standups.json` — `src/lib/standup-store.ts`
 
 Orchestrator standup ticks, newest first, capped at 50. The latest tick renders in the
 workspace sidebar; `StatusManager` hydrates from this file on boot so "where are things
 at" survives a server restart. See STATUS.md → Standup Ticks for the full flow.
+
+### `board-goal.json` — `src/lib/board-goal-store.ts`
+
+The workspace's goal (`{ label, items, setAt, setBy }`, mode 0600), written by `purplemux board goal set` and removed
+by `board goal clear`. The constraint finder reads it on each tick and forecasts the on-track line from it. A file that
+does not hold a goal is an error the tick logs; it is never read as "no goal set" by the store.
 
 ### `burndown.json` — `src/lib/burndown-store.ts`
 
@@ -466,7 +569,7 @@ Claude usage statistics cache. Derived from `{home}/projects/**/*.jsonl` across 
 | File | Contents |
 | --- | --- |
 | `cache.json` | `IStatsFileCache` — per-day aggregates (messages, sessions, tool calls, hourly counts, per-model token usage). Cache version `3` (`CACHE_VERSION` in `stats-cache.ts`). Main transcripts only: subagent transcripts are not counted here. |
-| `spend-index.json` | The spend read model's index (`src/lib/spend/spend-index.ts`, version 1, 0600, tmp + rename). Per transcript: `size`, `mtimeMs`, `ino`, the byte `offset` after the last complete line, the last 256 message ids, and usage buckets per UTC day, model and session; Codex and Grok sessions keep one usage figure. Covers the main transcripts, the subagent transcripts (any `.jsonl` below `<project>/<sessionId>/subagents/`), `~/.codex/sessions` and every grok home. Built in the background (first pass 120 s after boot, newest file first, one file at a time; rescan every 5 min; written at most every 60 s and at the end of a pass). A transcript that leaves the disk (`ENOENT`/`ENOTDIR` on its own stat; any other error changes nothing) keeps its entry with `goneAt` set and its usage, until its days pass the spend floor (today − 91, UTC); a path that comes back is read again from 0. So this file is **not** purely regeneratable: deleting it loses the usage of transcripts already deleted (at most 92 days). A damaged file is moved to `spend-index.json.corrupt-<ms>` and rebuilt from the transcripts still on disk; until the rebuild ends spend reports `indexing`. |
+| `spend-index.json` | The spend read model's index (`src/lib/spend/spend-index.ts`, version 1, 0600, tmp + rename). Per transcript: `size`, `mtimeMs`, `ino`, the byte `offset` after the last complete line, the last 256 message ids, and usage buckets per UTC day, model, session and UTC 5-minute `slot` (harness-flow-loop 04; a live entry indexed before slots, without `slotted: true`, is read again from 0 once, and a gone one keeps its day buckets with no slot); Codex and Grok sessions keep one usage figure. Covers the main transcripts, the subagent transcripts (any `.jsonl` below `<project>/<sessionId>/subagents/`), `~/.codex/sessions` and every grok home. Built in the background (first pass 120 s after boot, newest file first, one file at a time; rescan every 5 min; written at most every 60 s and at the end of a pass). A transcript that leaves the disk (`ENOENT`/`ENOTDIR` on its own stat; any other error changes nothing) keeps its entry with `goneAt` set and its usage, until its days pass the spend floor (today − 91, UTC); a path that comes back is read again from 0. So this file is **not** purely regeneratable: deleting it loses the usage of transcripts already deleted (at most 92 days). A damaged file is moved to `spend-index.json.corrupt-<ms>` and rebuilt from the transcripts still on disk; until the rebuild ends spend reports `indexing`. |
 | `uptime-cache.json` | Per-day uptime/active-minutes roll-up. |
 | `daily-reports/{date}.json` | AI-generated daily brief (`IDailyReportDay`) keyed by `YYYY-MM-DD`. |
 

@@ -8,7 +8,7 @@ const item = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionItem 
   id: 'q', workspaceId: 'ws', runId: 'run', revision: 1, state: 'open', kind: 'question', title: 'T', context: 'C',
   storyIds: [], options: [{ id: 'yes', label: 'Yes' }], recommendation: null, blockingScope: 'none', canContinue: true,
   evidence: { source: 'agent', sourceId: 'e', observedAt: 1, confidence: 'confirmed' }, answerId: null, resolution: null,
-  humanReview: null, candidateReason: null, class: null, defaultOptionId: null, autoAnswer: null, createdAt: 1, updatedAt: 1, ...over,
+  humanReview: null, candidateReason: null, class: null, defaultOptionId: null, autoAnswer: null, evidenceLinks: [], lint: [], changes: null, createdAt: 1, updatedAt: 1, ...over,
 });
 
 const legacy = (): IMissionAttentionItem => {

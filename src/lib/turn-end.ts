@@ -100,6 +100,21 @@ export const extractTurnMarker = (tail: string | null | undefined): string[] | n
 };
 
 /**
+ * The last non-empty line of the tail, unclipped (ADR-0041: a NEEDS-DECISION question is built from all of it).
+ * The tail is the END of the message, so a line that starts inside it is whole; `complete` is false only when the
+ * line runs from the first character of a tail cut at TURN_TAIL_CHARS, where its start may be missing.
+ */
+export const lastTurnLine = (tail: string | null | undefined): { line: string; complete: boolean } | null => {
+  if (!tail) return null;
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = bare(lines[i]);
+    if (line) return { line, complete: i > 0 || tail.length < TURN_TAIL_CHARS };
+  }
+  return null;
+};
+
+/**
  * A marker wins: the worker said what it is. Without one, open background work
  * (the provider's own tasks, a registered `tab bg` job, or an armed `purplemux
  * watch`) means the harness wakes the worker later, so the stop is WAITING.

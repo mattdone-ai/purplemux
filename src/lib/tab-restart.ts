@@ -34,13 +34,20 @@ const RESTART_UNSUPPORTED: ReadonlySet<TPanelType> = new Set(['web-browser', 'di
 
 export type TRestartActor =
   | { kind: 'agent'; workspaceId: string; tabId: string | null; identity: TCallerIdentity }
-  | { kind: 'human'; actor: string };
+  | { kind: 'human'; actor: string }
+  /** The server itself: a seat's rotation (ADR-0036). */
+  | { kind: 'server'; reason: 'context-rotation' };
 
 export interface IRestartTabInput {
   workspaceId: string;
   tabId: string;
   clear: boolean;
   interrupt: boolean;
+  /**
+   * Decided inside the dispatch lock when the tab is busy: true proceeds as `interrupt` (a rotation of a seat whose
+   * stop waits only on watches, ADR-0036). Read after the lock is taken, so no paste lands between it and the kill.
+   */
+  interruptIf?: (tab: ITab) => boolean;
   by: TRestartActor;
 }
 
@@ -79,6 +86,8 @@ interface ILaunchedRestart {
   abandoned: IAbandonedWork | null;
   resumeSkipped?: TRestartResumeSkipped;
   launched: TAgentLaunchResult | null;
+  /** The interrupt as decided inside the lock (`interrupt`, or `interruptIf` on a busy tab). */
+  interrupt: boolean;
 }
 
 /** Busy (ADR-0028 §3): the agent is mid-turn, or the tab holds a pending launch or turn. */
@@ -123,12 +132,14 @@ interface IRestartRun {
   endPhase: 'restarted' | 'failed';
 }
 
-const restartLocked = async (input: IRestartTabInput, run: IRestartRun): Promise<ILaunchedRestart | TRestartRefusal> => {
-  const { workspaceId, tabId, clear, interrupt } = input;
+const restartLocked = async (request: IRestartTabInput, run: IRestartRun): Promise<ILaunchedRestart | TRestartRefusal> => {
+  const { workspaceId, tabId, clear } = request;
   const found = await findTab(workspaceId, tabId);
   if (!found) return { status: 404, body: { ...TAB_NOT_FOUND_BODY } };
   const { tab, paneId } = found;
   const abandoned = busyWork(tab);
+  const interrupt = request.interrupt || (abandoned !== null && request.interruptIf?.(tab) === true);
+  const input: IRestartTabInput = { ...request, interrupt };
   if (abandoned && !interrupt) {
     return {
       status: 409,
@@ -163,12 +174,12 @@ const restartLocked = async (input: IRestartTabInput, run: IRestartRun): Promise
     const provider = getProviderByPanelType(tab.panelType);
     const launched = provider
       ? await launchAgentInTab(
-        { workspaceId, tabId, sessionName: tab.sessionName, panelType: tab.panelType, host: tab.host, agentLaunchConfig: tab.agentLaunchConfig },
+        { workspaceId, tabId, sessionName: tab.sessionName, panelType: tab.panelType, host: tab.host, agentLaunchConfig: tab.agentLaunchConfig, role: tab.role, previewOrigin: tab.previewOrigin, pgService: tab.pgService },
         { provider, resumeSessionId, targetLockHeld: true, resetAgentSession: resumeSessionId === null },
       )
       : null;
     await markTabRestarted(workspaceId, tabId, Date.now());
-    return { sessionName: tab.sessionName, reaped, abandoned, ...(resumeSkipped ? { resumeSkipped } : {}), launched };
+    return { sessionName: tab.sessionName, reaped, abandoned, ...(resumeSkipped ? { resumeSkipped } : {}), launched, interrupt };
   } catch (err) {
     // Past the kill a silent host is no longer "nothing killed": the restart is unconfirmed (ADR-0028 §4).
     if (err instanceof RemoteHostError) return notConfirmed(err.message, 'failed');
@@ -240,11 +251,11 @@ const finishRestart = async (input: IRestartTabInput, run: IRestartRun, locked: 
       resumed = locked.launched.resumed;
     }
   } catch (err) {
-    await audit(input, { outcome: 'failed', error: err instanceof Error ? err.message : String(err), reaped: locked.reaped, abandoned: locked.abandoned });
+    await audit({ ...input, interrupt: locked.interrupt }, { outcome: 'failed', error: err instanceof Error ? err.message : String(err), reaped: locked.reaped, abandoned: locked.abandoned });
     throw err;
   }
   run.endPhase = launchState === 'held' ? 'failed' : 'restarted';
-  await audit(input, { outcome: 'restarted', reaped: locked.reaped, abandoned: locked.abandoned, resumed });
+  await audit({ ...input, interrupt: locked.interrupt }, { outcome: 'restarted', reaped: locked.reaped, abandoned: locked.abandoned, resumed });
   return {
     status: 200,
     body: {

@@ -44,9 +44,10 @@ export const translateCodexHookEvent = (
     case 'SessionStart':
       return { kind: 'session-start' };
     case 'UserPromptSubmit':
+      return { kind: 'prompt-submit' };
     case 'PreToolUse':
     case 'PostToolUse':
-      return { kind: 'prompt-submit' };
+      return { kind: 'prompt-submit', fromTool: true };
     case 'Stop':
       return { kind: 'stop' };
     case 'PermissionRequest':

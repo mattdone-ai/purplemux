@@ -721,14 +721,21 @@ describe('checks-wip-cap.cjs (story 20)', () => {
   });
 
   it('parseArgs accepts --only-wave 1..WAVE_COUNT only, naming the range', () => {
-    expect(checks.WAVE_COUNT).toBe(7);
+    expect(checks.WAVE_COUNT).toBe(15);
     expect(checks.parseArgs(['--state', 's', '--only-wave', '1']).onlyWave).toBe(1);
-    expect(checks.parseArgs(['--state', 's', '--only-wave', '7']).onlyWave).toBe(7);
-    for (const bad of ['0', '8', '1.5', '-1', 'x', '']) {
-      expect(() => checks.parseArgs(['--state', 's', '--only-wave', bad])).toThrow(`--only-wave takes an integer 1..7, not ${JSON.stringify(bad)}`);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '9']).onlyWave).toBe(9);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '10']).onlyWave).toBe(10);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '11']).onlyWave).toBe(11);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '12']).onlyWave).toBe(12);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '13']).onlyWave).toBe(13);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '14']).onlyWave).toBe(14);
+    expect(checks.parseArgs(['--state', 's', '--only-wave', '15']).onlyWave).toBe(15);
+    for (const bad of ['0', '16', '1.5', '-1', 'x', '']) {
+      expect(() => checks.parseArgs(['--state', 's', '--only-wave', bad])).toThrow(`--only-wave takes an integer 1..15, not ${JSON.stringify(bad)}`);
     }
-    expect(() => checks.parseArgs(['--state', 's', '--only-wave'])).toThrow('--only-wave takes an integer 1..7, not null');
+    expect(() => checks.parseArgs(['--state', 's', '--only-wave'])).toThrow('--only-wave takes an integer 1..15, not null');
   });
+
 
   describe('checks.cjs runs the gate first (spawned against a fake candidate)', () => {
     // The fake CLI answers config and tab count; every other command fails, so wave 1 stops at tab-create.
@@ -794,9 +801,9 @@ process.exit(1);
     });
 
     it('an out-of-range --only-wave is refused with exit 2 and runs nothing', () => {
-      const r = runChecks('ok', ['--only-wave', '9']);
+      const r = runChecks('ok', ['--only-wave', '16']);
       expect(r.status).toBe(2);
-      expect(r.stderr).toContain('--only-wave takes an integer 1..7, not "9"');
+      expect(r.stderr).toContain('--only-wave takes an integer 1..15, not "16"');
       expect(r.calls).toEqual([]);
     });
 
@@ -813,13 +820,54 @@ process.exit(1);
 describe('checks-mission-control-page.cjs', () => {
   const wave7 = createRequire(import.meta.url)(path.join(ROOT, 'scripts/acceptance/checks-mission-control-page.cjs'));
 
-  it('passes only when the Needs you section precedes the portfolio board heading', () => {
+  it('tells the board view from the answers view, and neither from a page with both or none', () => {
     const section = '<section aria-labelledby="needs-you-heading"><div id="needs-you-heading"></div></section>';
-    const board = '<h1 class="text-xl font-semibold">Portfolio board</h1>';
-    expect(wave7.pageOrder(`<title>Portfolio board · PurpleMux</title>${section}${board}`).first).toBe(true);
-    expect(wave7.pageOrder(`${board}${section}`).first).toBe(false);
-    expect(wave7.pageOrder(board)).toMatchObject({ needsYou: -1, first: false });
-    expect(wave7.pageOrder(section)).toMatchObject({ board: -1, first: false });
+    const board = '<div class="space-y-5" data-owner-board="">';
+    expect(wave7.pageView(`<title>Mission Control · PurpleMux</title>${board}`).view).toBe('board');
+    expect(wave7.pageView(section).view).toBe('answers');
+    expect(wave7.pageView(`${board}${section}`).view).toBe('unknown');
+    expect(wave7.pageView('<h1>Portfolio board</h1>')).toMatchObject({ needsYou: -1, board: -1, view: 'unknown' });
+  });
+});
+
+describe('checks-board.cjs (story 12)', () => {
+  const wave10 = createRequire(import.meta.url)(path.join(ROOT, 'scripts/acceptance/checks-board.cjs'));
+
+  it('accepts a served pulse and names each contract break', async () => {
+    const { derivePulse } = await import('@/lib/pulse');
+    const pulse = derivePulse({
+      workspaceId: 'ws-a', now: Date.UTC(2026, 10, 3, 6), staleSince: null, oldestStuck: null,
+      reads: [{ id: 'commits', events: [{ at: Date.UTC(2026, 10, 3, 5) }], reason: null, from: [] }],
+      wip: { count: 0, basis: 'agent-tabs', basisReason: 'x', sources: { ledger: 'no-events', agentTabs: 'measured', missionControl: 'measured' } },
+      priority: { basis: 'none', needsYou: 0, text: 'nothing waited in 24 h · needs you: 0' },
+    });
+    expect(wave10.pulseDefects(pulse)).toEqual([]);
+    const zeroForUnknown = { ...pulse, sources: pulse.sources.map((source: { id: string }) => (source.id === 'gates' ? { ...source, count: 0 } : source)) };
+    expect(wave10.pulseDefects(zeroForUnknown)).toEqual(['gates: unknown with count 0 and reason no reader']);
+    expect(wave10.pulseDefects({ ...pulse, hours: [] })).toEqual(['hours: 0, expected 48 or null']);
+    expect(wave10.pulseDefects(null)).toEqual(['no pulse']);
+    const withShared = { ...pulse, sources: [...pulse.sources, { ...pulse.sources[1], sharedWith: ['Audit'] }] };
+    expect(wave10.pulseDefects(withShared)).toEqual([]);
+  });
+});
+
+describe('checks-mc-question-v2.cjs (ADR-0037)', () => {
+  const wave8 = createRequire(import.meta.url)(path.join(ROOT, 'scripts/acceptance/checks-mc-question-v2.cjs'));
+
+  it('drafts one readable and one unreadable question, the second with exactly the defect the checks expect', async () => {
+    const { validateMissionQuestion } = await import('@/lib/mission-question-format');
+    const question = (options: unknown[]) => {
+      const { itemId: _itemId, ...payload } = wave8.askDraft('ws-a', 'run-a', options).payload;
+      return payload;
+    };
+    expect(validateMissionQuestion(question(wave8.READABLE), 2).ok).toBe(true);
+    const refused = validateMissionQuestion(question(wave8.UNREADABLE), 2);
+    expect(refused.ok ? [] : refused.defects.map((entry: { message: string }) => entry.message)).toEqual([wave8.ONE_OPTION_DEFECT]);
+  });
+
+  it('expects the reason the CLI prints for a draft no reshape can fix (story 23)', () => {
+    const cli = fs.readFileSync(path.join(ROOT, 'bin/cli.js'), 'utf8');
+    expect(cli).toContain(wave8.RESHAPE_REASON);
   });
 });
 
@@ -1367,4 +1415,51 @@ it('isolated intentional ownership changes send one human CAS replacement with t
   expect(await inst.designate('ws-a', 'next')).toMatchObject({ rc: 1 });
   expect(inst.cli).toHaveBeenCalledOnce(); expect(inst.human).toHaveBeenCalledOnce();
   expect(inst.human).toHaveBeenCalledWith('PATCH', '/api/workspace/ws-a', { orchestration: { enabled: true, orchestratorTabId: 'next' }, expectedRevision: 7, mode: 'replace' });
+});
+
+describe('wave 12: one attention alert per item that becomes owner-visible (story 33 round 2)', () => {
+  const alertWave = createRequire(import.meta.url)(path.join(ROOT, 'scripts/acceptance/checks-attention-alert.cjs'));
+  const frame = (itemId: string, revision: number) => ({ type: 'notification:alert', alert: { kind: 'attention-opened', itemId, question: { revision } } });
+  const base = {
+    socketOpen: true, sends: { started: 0, opened: 0, candidate: 0, promoted: 0 }, states: { opened: 'open', promoted: 'open' },
+    openedId: 'acc-alert-x-opened', promotedId: 'acc-alert-x-promoted', runPrefix: 'acc-alert-x',
+  };
+
+  it('passes on exactly one alert for each item at revisions 1 and 2', () => {
+    const judged = alertWave.judgeAttentionAlerts({ ...base, frames: [{ type: 'status:sync' }, frame('acc-alert-x-opened', 1), frame('acc-alert-x-promoted', 2), frame('other-ws-item', 1)] });
+    expect(judged).toMatchObject({ ok: true });
+    expect(judged.measured).toContain('opened x1 (revision 1), promoted x1 (revision 2), other items of this run x0');
+  });
+
+  it('fails on a missing promotion alert, a duplicate, a wrong revision, a stray item, a closed socket or a refused send', () => {
+    const ok = [frame('acc-alert-x-opened', 1), frame('acc-alert-x-promoted', 2)];
+    expect(alertWave.judgeAttentionAlerts({ ...base, frames: [frame('acc-alert-x-opened', 1)] }).ok).toBe(false);
+    expect(alertWave.judgeAttentionAlerts({ ...base, frames: [...ok, frame('acc-alert-x-opened', 1)] }).ok).toBe(false);
+    expect(alertWave.judgeAttentionAlerts({ ...base, frames: [frame('acc-alert-x-opened', 1), frame('acc-alert-x-promoted', 3)] }).ok).toBe(false);
+    expect(alertWave.judgeAttentionAlerts({ ...base, frames: [...ok, frame('acc-alert-x-cancel', 1)] }).ok).toBe(false);
+    expect(alertWave.judgeAttentionAlerts({ ...base, socketOpen: false, frames: ok }).ok).toBe(false);
+    expect(alertWave.judgeAttentionAlerts({ ...base, sends: { ...base.sends, promoted: 3 }, frames: ok }).ok).toBe(false);
+    expect(alertWave.judgeAttentionAlerts({ ...base, states: { opened: 'open', promoted: 'candidate' }, frames: ok }).ok).toBe(false);
+  });
+
+  it('runs twelfth, after the context lifecycle wave and before the effects wave (story 15 merge, M2)', () => {
+    expect(fs.readFileSync(path.join(ROOT, 'scripts/acceptance/checks.cjs'), 'utf8'))
+      .toMatch(/\(\) => wave11\(inst, helpers\), \(\) => waveAttentionAlert\(inst, helpers\),\n {2}\(\) => wave13\(inst, helpers\), \(\) => wave14\(inst, helpers\),/);
+  });
+
+  it('the local curator runs fourteenth, after the effects wave (story 16 merge, M3)', () => {
+    const text = fs.readFileSync(path.join(ROOT, 'scripts/acceptance/checks.cjs'), 'utf8');
+    expect(text).toMatch(/\(\) => wave13\(inst, helpers\), \(\) => wave14\(inst, helpers\),/);
+    expect(text).toContain("const { wave14 } = require('./checks-curator.cjs');");
+    expect(fs.readFileSync(path.join(ROOT, 'scripts/acceptance/checks-curator.cjs'), 'utf8')).toMatch(/^\/\/ Wave-14 acceptance checks/m);
+  });
+
+  it('curator routing runs fifteenth, last, after the curator wave (story 23)', () => {
+    const text = fs.readFileSync(path.join(ROOT, 'scripts/acceptance/checks.cjs'), 'utf8');
+    expect(text).toMatch(/\(\) => wave14\(inst, helpers\),\n {2}\(\) => wave15\(inst, helpers\)\];/);
+    expect(text).toContain("const { wave15 } = require('./checks-curator-routing.cjs');");
+    const wave = createRequire(import.meta.url)(path.join(ROOT, 'scripts/acceptance/checks-curator-routing.cjs'));
+    expect(fs.readFileSync(path.join(ROOT, 'scripts/acceptance/checks-curator-routing.cjs'), 'utf8')).toMatch(/^\/\/ Wave-15 acceptance checks/m);
+    expect(wave.RESHAPE_DRAFT('ws-a').payload.options.map((o: { id: string }) => o.id)).toEqual(['friday', 'tonight']);
+  });
 });

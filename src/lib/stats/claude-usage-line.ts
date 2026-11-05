@@ -6,6 +6,8 @@ export interface IClaudeUsageLine {
   sidechain: boolean;
   /** UTC `YYYY-MM-DD` of the line's `timestamp`. */
   day: string;
+  /** The line's `timestamp` in ms; null when it does not parse. */
+  at: number | null;
   input: number;
   output: number;
   cacheRead: number;
@@ -44,6 +46,7 @@ export const readClaudeUsage = (entry: Record<string, unknown>): IClaudeUsageLin
     sessionId: String(entry.sessionId ?? ''),
     sidechain: entry.isSidechain === true,
     day: timestamp.slice(0, 10),
+    at: Number.isFinite(Date.parse(timestamp)) ? Date.parse(timestamp) : null,
     input: Number(usage.input_tokens ?? 0),
     output: Number(usage.output_tokens ?? 0),
     cacheRead: Number(usage.cache_read_input_tokens ?? 0),

@@ -183,6 +183,33 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'flow-too-large': EXIT.USAGE,
   'flow-unreadable': EXIT.UNEXPECTED,
   'flow-not-found': EXIT.NOT_FOUND,
+  'question-invalid': EXIT.USAGE,
+  'ledger-event-invalid': EXIT.USAGE,
+  'ledger-reason-invalid': EXIT.USAGE,
+  'ledger-experiment-invalid': EXIT.USAGE,
+  'ledger-query-invalid': EXIT.USAGE,
+  'ledger-token-invalid': EXIT.USAGE,
+  'ledger-too-large': EXIT.USAGE,
+  'ledger-type-reserved': EXIT.USAGE,
+  'ledger-event-conflict': EXIT.CONFLICT,
+  'ledger-experiment-cap': EXIT.CONFLICT,
+  'ledger-experiment-closed': EXIT.CONFLICT,
+  'ledger-experiment-extended': EXIT.CONFLICT,
+  'ledger-experiment-not-found': EXIT.NOT_FOUND,
+  'pool-invalid': EXIT.USAGE,
+  'pool-full': EXIT.CONFLICT,
+  'pool-unreadable': EXIT.CONFLICT,
+  'pool-timeout': EXIT.UNREACHABLE,
+  'curator-task-invalid': EXIT.USAGE,
+  'curator-workspace-invalid': EXIT.USAGE,
+  'curator-gate-refused': EXIT.CONFLICT,
+  'curator-unavailable': EXIT.CONFLICT,
+  'curator-refused': EXIT.CONFLICT,
+  'so-invalid': EXIT.USAGE,
+  'so-too-large': EXIT.USAGE,
+  'so-not-found': EXIT.NOT_FOUND,
+  'so-unreadable': EXIT.CONFLICT,
+  'so-struck': EXIT.CONFLICT,
 }));
 
 // Where the class alone does not tell the caller what happened.
@@ -195,6 +222,8 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'wip-cap': "refused by state — close an agent tab first; only the workspace's orchestrator may pass --over-cap --reason",
   'tab-busy': 'the tab is mid-turn — retry when it is idle, or restart with --interrupt to abandon the turn',
   'restart-not-confirmed': 'a process or the session outlived the reap; nothing was relaunched — inspect the tab before a retry',
+  'pool-timeout': 'the pool did not answer in 2 s — do what you do without the pool and log it (a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here); a lease the late answer took expires at its TTL',
+  'pool-full': 'no host has a free slot, the memory or the disk — wait for a release; a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here',
 }));
 
 const exitFor = (code) => (code && Object.hasOwn(CODE_EXIT, code) ? CODE_EXIT[code] : EXIT.UNEXPECTED);
@@ -301,8 +330,11 @@ const legacyCode = (body) => {
   return null;
 };
 
+const defectLines = (defects) => defects.map((d) => `  ${d.eventId ? `${d.eventId} ` : ''}${d.message}`).join('\n');
+
 const failFromResponse = (resp, body) => {
   if (!body || typeof body !== 'object') return fail(null, `HTTP ${resp.status}`);
+  if (Array.isArray(body.defects) && body.defects.length) process.stderr.write(`question defects:\n${defectLines(body.defects)}\n`);
   const code = typeof body.code === 'string' ? body.code : legacyCode(body);
   const message = typeof body.error === 'string' ? body.error : `HTTP ${resp.status}`;
   return fail(code, code ? message : `${message} (HTTP ${resp.status})`, body);
@@ -646,8 +678,9 @@ const cmdFlow = async (args) => {
   process.stdout.write(`ok ${body.receivedAt} ${body.historyRows}\n`);
 };
 
-const SPEND_USAGE = 'usage: spend show -w WS [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--by tab|day|model|role] [--json]';
-const SPEND_VALUE_FLAGS = ['-w', '--workspace', '--since', '--until', '--by'];
+const SPEND_USAGE = 'usage: spend show -w WS [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--by tab|day|model|role|seat|phase|item] [--json]'
+  + ' | spend phases -w WS [--day YYYY-MM-DD] [--json]';
+const SPEND_VALUE_FLAGS = { show: ['-w', '--workspace', '--since', '--until', '--by'], phases: ['-w', '--workspace', '--day'] };
 const SPEND_BOOL_FLAGS = ['--json'];
 
 // A cost the server could not price is null: it prints as "—", never as $0.
@@ -656,14 +689,39 @@ const spendCost = (row) => {
   return row.unpricedTokens > 0 && row.costUsd !== null ? `${cost} (+${row.unpricedTokens} unpriced)` : cost;
 };
 
-const printSpend = (view) => {
-  const columns = ['KEY', 'LABEL', 'INPUT', 'OUTPUT', 'CACHE-READ', 'CACHE-CREATE', 'TOTAL', 'SUBAGENTS', 'COST'];
-  const line = (row) => [row.key, row.label, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheCreationTokens,
-    row.totalTokens, row.sidechainTokens, spendCost(row)].map(String);
-  const table = [columns, ...view.rows.map(line), ...(view.unattributed ? [line(view.unattributed)] : []), line(view.totals)];
-  const widths = columns.map((_, i) => Math.max(...table.map((cells) => cells[i].length)));
-  process.stdout.write(`spend ${view.workspaceId} ${view.from}..${view.to} UTC by ${view.by} (cost is an estimate)\n`);
+// A row with no tokens has no share: "—", never 0%.
+const cacheReadShare = (row) => (row.totalTokens > 0 ? `${Math.round((row.cacheReadTokens / row.totalTokens) * 100)}%` : '—');
+// The cache reads' part of the estimated cost; "—" when the cost or its cache-read part is not known.
+const cacheReadCostShare = (row) => (row.cacheReadCostUsd !== null && row.cacheReadCostUsd !== undefined && row.costUsd
+  ? `est. ${Math.round((row.cacheReadCostUsd / row.costUsd) * 100)}%` : '—');
+
+const writeTable = (table) => {
+  const widths = table[0].map((_, i) => Math.max(...table.map((cells) => cells[i].length)));
   for (const cells of table) process.stdout.write(cells.map((cell, i) => cell.padEnd(widths[i])).join('  ').trimEnd() + '\n');
+};
+
+// The unattributed row, then (phase and item) one indented row per reason, which sum to it.
+const unattributedRows = (view, line) => (view.unattributed
+  ? [line(view.unattributed), ...(view.unattributedReasons || []).map((row) => line({ ...row, key: `  ${row.key}` }))] : []);
+
+const phaseNote = (view) => {
+  if (!view.phaseBasis) return;
+  const { ledgerHorizon: horizon, ledgerReadable } = view.phaseBasis;
+  const ledger = ledgerReadable === false ? 'the ledger could not be read, so no phase is known (see the error note)'
+    : horizon === null ? 'the ledger holds no items for this workspace yet' : `no history before ${new Date(horizon).toISOString()}`;
+  process.stdout.write(`note: phase is the ledger item the tab held at each message's 5-min slot; ${ledger}\n`);
+};
+
+const printSpend = (view) => {
+  const columns = ['KEY', 'LABEL', 'INPUT', 'OUTPUT', 'CACHE-READ', 'CACHE-CREATE', 'TOTAL', 'CACHE-READ-SHARE', 'SUBAGENTS', 'COST',
+    'CACHE-READ-COST-SHARE'];
+  const line = (row) => [row.key, row.label, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheCreationTokens,
+    row.totalTokens, cacheReadShare(row), row.sidechainTokens, spendCost(row), cacheReadCostShare(row)].map(String);
+  process.stdout.write(`spend ${view.workspaceId} ${view.from}..${view.to} UTC by ${view.by} (cost is an estimate)\n`);
+  writeTable([columns, ...view.rows.map(line), ...unattributedRows(view, line), line(view.totals)]);
+  process.stdout.write(`cache reads: ${view.totals.cacheReadTokens} of ${view.totals.totalTokens} tokens (${cacheReadShare(view.totals)}); `
+    + `${cacheReadCostShare(view.totals)} of the est. cost\n`);
+  phaseNote(view);
   if (view.roleBasis === 'current-orchestrator') process.stdout.write('note: role uses the current orchestrator mapping, not the one at the time of use\n');
   process.stdout.write('note: Codex and Grok usage counts on the session start day\n');
   const index = view.index || {};
@@ -672,27 +730,57 @@ const printSpend = (view) => {
   if (index.error) process.stdout.write(`note: ${index.error}\n`);
 };
 
+// Distinct 5-min slots with usage, as "1h 05m"; null (no message time) prints "—".
+const wallTime = (ms) => {
+  if (ms === null || ms === undefined) return '—';
+  const minutes = Math.round(ms / 60_000);
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m` : `${minutes}m`;
+};
+
+const landingLine = (metric) => {
+  const window = metric.window === 'day' ? 'day' : `7d (${metric.from}..${metric.to})`;
+  const value = metric.value === null
+    ? `— (${metric.reason}; ${metric.cacheReadTokens} cache reads)`
+    : `${Math.round(metric.value)} (${metric.cacheReadTokens} cache reads / ${metric.landedItems} landed)`;
+  return `cache_read_tokens_per_landed_item ${window}: ${value}\n`;
+};
+
+const printSpendPhases = (view) => {
+  const columns = ['PHASE', 'LABEL', 'WALL', 'INPUT', 'OUTPUT', 'CACHE-READ', 'CACHE-CREATE', 'TOTAL', 'CACHE-READ-SHARE', 'COST',
+    'CACHE-READ-COST-SHARE'];
+  const line = (row) => [row.key, row.label, wallTime(row.wallMs), row.inputTokens, row.outputTokens, row.cacheReadTokens,
+    row.cacheCreationTokens, row.totalTokens, cacheReadShare(row), spendCost(row), cacheReadCostShare(row)].map(String);
+  process.stdout.write(`spend phases ${view.workspaceId} ${view.day} UTC (cost is an estimate)\n`);
+  writeTable([columns, ...view.rows.map(line), ...unattributedRows(view, line), line(view.totals)]);
+  process.stdout.write(landingLine(view.cacheReadPerLandedItem.day));
+  process.stdout.write(landingLine(view.cacheReadPerLandedItem['7d']));
+  phaseNote(view);
+  process.stdout.write('note: wall = distinct 5-min slots with usage in the row; phases overlap, so the rows may sum above the total\n');
+};
+
 const cmdSpend = async (args) => {
   const sub = args[0];
   const rest = args.slice(1);
-  if (sub !== 'show') die(SPEND_USAGE);
-  const positional = stripBooleanFlags(stripFlags(rest, SPEND_VALUE_FLAGS), SPEND_BOOL_FLAGS);
+  if (sub !== 'show' && sub !== 'phases') die(SPEND_USAGE);
+  const positional = stripBooleanFlags(stripFlags(rest, SPEND_VALUE_FLAGS[sub]), SPEND_BOOL_FLAGS);
   if (positional.length) die(`unexpected argument: ${positional[0]} — ${SPEND_USAGE}`);
   const wsId = flagValue(rest, '--workspace') || flagValue(rest, '-w');
   if (!wsId) die('--workspace is required');
   const qs = new URLSearchParams({ workspaceId: wsId });
-  for (const name of ['since', 'until', 'by']) {
+  for (const name of SPEND_VALUE_FLAGS[sub].filter((flag) => flag.startsWith('--') && flag !== '--workspace').map((flag) => flag.slice(2))) {
     const value = flagValue(rest, `--${name}`);
     if (value !== null) qs.set(name, value);
   }
   requireEnv();
-  const { body } = await api('GET', `/api/cli/spend?${qs}`);
+  const { body } = await api('GET', `/api/cli/spend${sub === 'phases' ? '/phases' : ''}?${qs}`);
   if (rest.includes('--json')) out(body);
   // An index that cannot be read has no numbers: its totals are zeros that mean nothing.
   if (body.index && body.index.state === 'unavailable') {
     return fail(null, `spend not available: ${body.index.error || 'the spend index cannot be read'}`);
   }
-  if (!rest.includes('--json')) printSpend(body);
+  if (rest.includes('--json')) return;
+  if (sub === 'phases') printSpendPhases(body);
+  else printSpend(body);
 };
 
 // A value printed inside a command an agent may copy into its shell: single-quoted unless plainly safe.
@@ -843,7 +931,61 @@ const cmdMission = async (args) => {
     const { body } = await api('POST', `/api/cli/mission-control/events?workspaceId=${encodeURIComponent(wsId)}`, { events: [event] });
     return out(body);
   }
-  die('usage: mission snapshot|bootstrap|events|answers|ack -w WS [options]');
+  if (sub === 'ask') return missionAsk(rest, wsId);
+  die('usage: mission snapshot|bootstrap|events|answers|ack|ask -w WS [options]');
+};
+
+// `mc ask` (ADR-0037 §3): the server's question check before the post, so an unreadable
+// question is fixed in the same turn. --fix asks for the curator reshape, which story 23 enables.
+const missionAsk = async (rest, wsId) => {
+  const draft = await readJsonFlag(rest, 'mc ask draft');
+  const events = draft && Array.isArray(draft.events) ? draft.events : [draft];
+  const event = events.length === 1 ? events[0] : null;
+  if (!event || !['attention.opened', 'attention.updated'].includes(event.type) || !event.payload || typeof event.payload !== 'object') {
+    die('mc ask takes one attention.opened or attention.updated event (or { "events": [that event] })');
+  }
+  return out(await postAsk(event, wsId, rest.includes('--fix')));
+};
+
+// `--fix` (story 23 AC 3): the curator's reshape, accepted only past the preservation check and the format-2 validator.
+// The reshaped event goes back through the check and is posted in this same command; the original is in `source`.
+const RESHAPE_OUTCOME_TEXT = {
+  off: (r) => r.reason,
+  'not-a-draft': (r) => `not reshaped: ${r.reason}`,
+  'not-reshapable': (r) => `not reshaped: a reshape changes wording only, and these need a structural fix:\n${defectLines(r.defects)}`,
+  shadow: (r) => r.reason,
+  'no-reply': (r) => `the curator gave no reshape (${r.reason}); fix the defects in the draft`,
+  refused: (r) => `the curator's reshape was refused (${r.label === 'not-preserved' ? 'it moved a fixed field' : 'still invalid'}):\n${defectLines(r.defects)}`,
+};
+
+const reshapeAsk = async (event, question, query) => {
+  const { body: reshape } = await api('POST', `/api/cli/mission-control/questions/reshape?${query}`, { question });
+  if (reshape.outcome === 'reshaped') {
+    process.stderr.write(`--fix: the curator reshaped the draft (prompt ${reshape.promptVersion}); the original is kept in question_json.source\n`);
+    const { itemId, humanReview } = event.payload;
+    return { ...event, payload: { itemId, ...(humanReview ? { humanReview } : {}), ...reshape.question } };
+  }
+  const text = Object.hasOwn(RESHAPE_OUTCOME_TEXT, reshape.outcome) ? RESHAPE_OUTCOME_TEXT[reshape.outcome](reshape) : 'the curator answered an outcome this CLI does not know';
+  process.stderr.write(`--fix: ${text}\n`);
+  return null;
+};
+
+// The question check, then the event: what `mc ask` does with a draft, and what `curator spot-check open` posts.
+const postAsk = async (event, wsId, fix) => {
+  const { itemId: _itemId, humanReview: _humanReview, ...question } = event.payload;
+  const query = `workspaceId=${encodeURIComponent(wsId)}`;
+  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, { question });
+  if (!check.ok) {
+    process.stderr.write(`question defects (${check.defects.length}, min-version ${check.minVersion}):\n${defectLines(check.defects)}\n`);
+    if (fix) {
+      const reshaped = await reshapeAsk(event, question, query);
+      if (reshaped) return postAsk(reshaped, wsId, false);
+    }
+    return fail('question-invalid', `${check.defects.length} defect${check.defects.length === 1 ? '' : 's'}; nothing was posted`);
+  }
+  if (check.lint.length) process.stderr.write(`question lint (accepted at min-version ${check.minVersion}):\n${defectLines(check.lint)}\n`);
+  const { body } = await api('POST', `/api/cli/mission-control/events?${query}`, { events: [event] });
+  return body;
 };
 
 const cmdPortfolio = async (args) => {
@@ -930,7 +1072,7 @@ const leaseName = (args, what = 'NAME') => {
 // Fleet config (ADR-0019): versioned values tools read at call time. A change
 // is audited and sent to nobody.
 const CONFIG_USAGE = 'usage: config get KEY | list [--json] | set KEY VALUE [--expect-version N] | unset KEY [--expect-version N] | history [KEY] [--json]';
-const CONFIG_KEY = /^[a-z][a-z0-9.-]{1,63}$/;
+const CONFIG_KEY = /^[a-z][A-Za-z0-9._-]{1,63}$/;
 
 const configKey = (key) => {
   if (!key || !CONFIG_KEY.test(key)) die(`KEY must match ${CONFIG_KEY.source}, got ${JSON.stringify(key ?? '')}`);
@@ -1143,6 +1285,95 @@ const cmdWatch = async (args) => {
     }
     default:
       die(WATCH_USAGE);
+  }
+};
+
+// Auth waits (ADR-0041): an auth watch on the owner's AWS sign-in. The server reads the SSO cache file
+// every 60 s and starts no aws process (DEC-261); the notice reaches this tab through the inbox.
+const WAIT_USAGE = 'usage: wait add --auth PROFILE [--item LEDGER_ITEM_KEY] [--ttl 24h] [--label TEXT] (list and clear with purplemux watch list|clear)';
+
+const cmdWait = async (args) => {
+  if (args[0] !== 'add') die(WAIT_USAGE);
+  const rest = args.slice(1);
+  if (stripFlags(rest, ['--auth', '--item', '--ttl', '--label']).length) die(WAIT_USAGE);
+  const profile = flagValue(rest, '--auth');
+  if (!profile) die(WAIT_USAGE);
+  const data = { kind: 'auth', target: profile, until: 'signed-in' };
+  const item = flagValue(rest, '--item');
+  if (item !== null) data.ledgerItem = item;
+  const ttl = flagValue(rest, '--ttl');
+  if (ttl !== null) {
+    const seconds = parseTtl(ttl);
+    if (seconds === null) die('--ttl needs a duration (a wait always expires, at most 7d)');
+    data.ttlSeconds = seconds;
+  }
+  const label = flagValue(rest, '--label');
+  if (label !== null) data.label = label;
+  requireEnv();
+  const { body } = await api('POST', '/api/cli/watches', data);
+  return out(body);
+};
+
+// Standing orders (ADR-0041): the owner's rules, written into every Claude tab's workspace prompt file.
+const SO_USAGE = 'usage: so add (-w WS | --fleet) --text TEXT --source "OWNER MESSAGE ID, UTC DATE" [--scope S] [--check HOOK|TEST|prose]; so strike SO-N --reason TEXT; so list [-w WS] [--all] [--json]';
+
+const printOrders = (orders) => {
+  if (!orders.length) {
+    process.stdout.write('no standing orders\n');
+    return;
+  }
+  for (const o of orders) {
+    const struck = o.state === 'struck' ? `  STRUCK ${o.struck}` : '';
+    process.stdout.write(`${o.id}  [${o.owner}; scope ${o.scope}; check ${o.check}]  ${o.text}\n    source: ${o.source}${struck}\n`);
+  }
+};
+
+const cmdSo = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  const ws = flagValue(rest, '--workspace') || flagValue(rest, '-w');
+  switch (sub) {
+    case 'add': {
+      const positional = stripBooleanFlags(stripFlags(rest, ['--text', '--source', '--scope', '--check', '-w', '--workspace']), ['--fleet', '--json']);
+      if (positional.length) die(SO_USAGE);
+      const fleet = rest.includes('--fleet');
+      if (fleet === !!ws) die('so add needs exactly one of -w WS (a workspace order) or --fleet (admin token)');
+      const text = flagValue(rest, '--text');
+      const source = flagValue(rest, '--source');
+      if (!text || !source) die(SO_USAGE);
+      const data = { text, source };
+      if (ws) data.workspaceId = ws;
+      const scope = flagValue(rest, '--scope');
+      if (scope !== null) data.scope = scope;
+      const check = flagValue(rest, '--check');
+      if (check !== null) data.check = check;
+      requireEnv();
+      const { body } = await api('POST', '/api/cli/standing-orders', data);
+      if (rest.includes('--json')) return out(body);
+      process.stdout.write(`${body.order.id} added (${body.owner}); its prompt section is ${body.bytes} bytes of 8192; ${body.promptsWritten} prompt file(s) rewritten, ${body.tabsNotified} live tab(s) told\n`);
+      return;
+    }
+    case 'strike': {
+      const positional = stripBooleanFlags(stripFlags(rest, ['--reason']), ['--json']);
+      const reason = flagValue(rest, '--reason');
+      if (positional.length !== 1 || !reason) die(SO_USAGE);
+      requireEnv();
+      const { body } = await api('POST', `/api/cli/standing-orders/${encodeURIComponent(positional[0])}/strike`, { reason });
+      if (rest.includes('--json')) return out(body);
+      process.stdout.write(`${body.order.id} struck (${body.owner}); ${body.promptsWritten} prompt file(s) rewritten, ${body.tabsNotified} live tab(s) told\n`);
+      return;
+    }
+    case 'list': {
+      const positional = stripBooleanFlags(stripFlags(rest, ['-w', '--workspace']), ['--all', '--json']);
+      if (positional.length) die(SO_USAGE);
+      requireEnv();
+      const query = [ws ? `workspaceId=${encodeURIComponent(ws)}` : '', rest.includes('--all') ? 'all=1' : ''].filter(Boolean).join('&');
+      const { body } = await api('GET', `/api/cli/standing-orders${query ? `?${query}` : ''}`);
+      if (rest.includes('--json')) return out(body);
+      return printOrders(body.orders || []);
+    }
+    default:
+      die(SO_USAGE);
   }
 };
 
@@ -1359,6 +1590,109 @@ const cmdLease = async (args) => {
   }
 };
 
+// ---- pool (ADR-0039) ----
+
+const POOL_USAGE = 'usage: pool show [--json] | acquire --kind gate|build|tab [--mem GB] [--ttl 60m] [--panel-type T] [--role R] | release LEASE';
+// The client rule: no answer in 2 s exits 6 (pool-timeout), and the caller falls back to its local slots and logs it.
+const POOL_ACQUIRE_TIMEOUT_MS = 2000;
+
+const poolRequest = async (method, requestPath, data) => {
+  const opts = {
+    method,
+    headers: headersFor(requestPath, { 'Content-Type': 'application/json' }, data, method),
+    signal: AbortSignal.timeout(POOL_ACQUIRE_TIMEOUT_MS),
+  };
+  if (data !== undefined) opts.body = JSON.stringify(data);
+  const timedOut = (err) => err?.name === 'TimeoutError' || err?.name === 'AbortError';
+  const late = () => fail('pool-timeout', `no answer from ${BASE} in ${POOL_ACQUIRE_TIMEOUT_MS} ms`);
+  let resp;
+  try {
+    resp = await fetch(`${BASE}${requestPath}`, opts);
+  } catch (err) {
+    if (timedOut(err)) return late();
+    return networkFailure(method, requestPath, err);
+  }
+  failIfRouteAbsent(resp, requestPath);
+  let body = null;
+  if (isJson(resp)) {
+    try {
+      body = await resp.json();
+    } catch (err) {
+      if (timedOut(err)) return late();
+      if (!(err instanceof SyntaxError)) return networkFailure(method, requestPath, err);
+    }
+  }
+  if (!resp.ok) failFromResponse(resp, body);
+  if (!body) fail(null, `HTTP ${resp.status} without a JSON body — is purplemux the server ${SERVER_LABEL}?`);
+  return body;
+};
+
+const GIB = 1024 ** 3;
+const gib = (bytes) => (bytes === null || bytes === undefined ? '-' : `${(bytes / GIB).toFixed(1)}`);
+const slotText = (s) => `${s.used}/${s.cap}`;
+
+const printPool = (view) => {
+  const t = view.totals;
+  process.stdout.write(`pool ${t.knownHosts} known, ${t.unknownHosts} unknown: ${t.threads} threads, ${gib(t.memAvailableBytes)}/${gib(t.memTotalBytes)} GiB free, gate ${slotText(t.slots.gate)} build ${slotText(t.slots.build)} tab ${slotText(t.slots.tab)}\n`);
+  for (const h of view.hosts) {
+    const name = `${h.host}${h.local ? ' (this host)' : ''}`;
+    if (!h.metrics) {
+      process.stdout.write(`  ${name}: unknown — ${h.reason}; slots held gate ${h.slots.gate.used} build ${h.slots.build.used} tab ${h.slots.tab.used}\n`);
+      continue;
+    }
+    const m = h.metrics;
+    const disks = m.disks.map((d) => `${d.path} ${d.usedPct === null ? '-' : `${d.usedPct}%`}`).join(' ');
+    const gpu = m.gpus ? ` gpu ${m.gpus.map((g) => `${g.name} ${g.utilPct ?? '-'}%`).join(', ') || 'none'}` : '';
+    const sweep = m.sccacheSweep ? ` sccache-sweep ${m.sccacheSweep.state}` : '';
+    const notPlaceable = h.placeable === false ? `; not placeable: ${h.reason}` : '';
+    process.stdout.write(`  ${name}: ${m.threads} threads, load ${m.load1}/${m.load5} (${h.loadPerThread}/thread), ${gib(m.memAvailableBytes)}/${gib(m.memTotalBytes)} GiB free, ${disks}${gpu}${sweep}; gate ${slotText(h.slots.gate)} build ${slotText(h.slots.build)} tab ${slotText(h.slots.tab)}${h.via && h.via !== h.host ? ` via ${h.via}` : ''}${notPlaceable}\n`);
+  }
+};
+
+const cmdPool = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  switch (sub) {
+    case 'show': {
+      requireEnv();
+      const { body } = await api('GET', '/api/cli/pool');
+      if (rest.includes('--json')) return out(body);
+      return printPool(body);
+    }
+    case 'acquire': {
+      const kind = flagValue(rest, '--kind');
+      if (!['gate', 'build', 'tab'].includes(kind)) die(`--kind must be gate, build or tab — ${POOL_USAGE}`);
+      const data = { kind };
+      const mem = flagValue(rest, '--mem');
+      if (mem !== null) {
+        if (!/^\d+(\.\d+)?$/.test(mem)) die(`--mem must be a number of GiB, got "${mem}"`);
+        data.memGb = Number(mem);
+      }
+      const ttl = flagValue(rest, '--ttl');
+      if (ttl !== null) {
+        const seconds = parseTtl(ttl);
+        if (seconds === null) die('--ttl none is not allowed: a pool slot must expire');
+        data.ttlSeconds = seconds;
+      }
+      const panelType = flagValue(rest, '--panel-type');
+      if (panelType !== null) data.panelType = panelType;
+      const role = flagValue(rest, '--role');
+      if (role !== null) data.role = role;
+      requireEnv();
+      return out(await poolRequest('POST', '/api/cli/pool/acquire', data));
+    }
+    case 'release': {
+      const lease = rest.find((a) => !a.startsWith('-'));
+      if (!lease) die(`release needs a LEASE (pool:<host>/<kind>-<n>) — ${POOL_USAGE}`);
+      requireEnv();
+      const { body } = await api('POST', '/api/cli/pool/release', { lease });
+      return out(body);
+    }
+    default:
+      die(POOL_USAGE);
+  }
+};
+
 const OVER_CAP_REASON_MAX = 500;
 
 const cmdTabCreate = async (args) => {
@@ -1377,14 +1711,26 @@ const cmdTabCreate = async (args) => {
   const reportsTo = flagValue(args, '--reports-to');
   // The end-line markers whose nudges the target receives (ADR-0025); the server validates the names.
   const reportOn = flagValue(args, '--report-on');
-  // The ssh alias of a registered remote host (ADR-0022); the tab's tmux runs there.
+  // The ssh alias of a registered remote host (ADR-0022), or `auto`: the pool places it (ADR-0039).
   const host = flagValue(args, '--host');
   // The tab's start directory: it must exist on the host the tab runs on.
   const cwd = flagValue(args, '--cwd');
+  // A fixed tool configuration for the tab (ADR-0040); the server validates the name.
+  const role = flagValue(args, '--role');
+  const previewUrl = flagValue(args, '--preview-url');
+  const pgService = flagValue(args, '--pg-service');
+  // A seat (ADR-0036): rotate from this handoff file at the context threshold; the path is resolved against the cwd.
+  const handoff = flagValue(args, '--handoff');
+  const rotateAt = flagValue(args, '--rotate-at');
   if (!wsId) die('--workspace is required');
+  if (args.includes('--handoff') && !handoff) die('--handoff needs the path of the seat\'s handoff file');
+  if (args.includes('--rotate-at') && !rotateAt) die('--rotate-at needs a token count (50000..900000) or off');
+  if (args.includes('--role') && !role) die('--role needs a role name (evaluator)');
+  if (args.includes('--pg-service') && !pgService) die('--pg-service needs a ~/.pg_service.conf entry name');
+  if (args.includes('--preview-url') && !previewUrl) die('--preview-url needs the http(s) URL of the preview the evaluator may browse');
   if (args.includes('--reports-to') && !reportsTo) die('--reports-to needs a tab id');
   if (args.includes('--report-on') && !reportOn) die('--report-on needs a comma-separated list of markers (DONE, BLOCKED, NEEDS-DECISION, READY-TO-MERGE, CHECKPOINTED) or all');
-  if (args.includes('--host') && !host) die('--host needs a host name from fleet config remote.hosts');
+  if (args.includes('--host') && !host) die('--host needs a host name from fleet config remote.hosts, or auto (the pool places it)');
   if (args.includes('--cwd') && !cwd) die('--cwd needs an absolute directory on the tab\'s host');
   // Past the WIP cap (ADR-0027): only the workspace's enabled orchestrator, with a reason that is audited.
   const overCap = args.includes('--over-cap');
@@ -1404,9 +1750,46 @@ const cmdTabCreate = async (args) => {
     ...(reportOn ? { reportOn } : {}),
     ...(host ? { host } : {}),
     ...(cwd ? { cwd } : {}),
+    ...(role ? { role } : {}),
+    ...(previewUrl ? { previewUrl } : {}),
+    ...(pgService ? { pgService } : {}),
+    ...(handoff ? { handoff: path.resolve(handoff) } : {}),
+    ...(rotateAt ? { rotateAt } : {}),
     ...(overCap ? { overCap: { reason } } : {}),
   });
   out(body);
+};
+
+/**
+ * `handoff check <path>` (ADR-0036 §4): the file is read here and checked by the server's checkHandoff, the
+ * function the rotation runs. PASS exits 0; refusals print one `handoff-check:` line each and exit 1, as v2's
+ * tools/handoff-check.py did.
+ */
+const cmdHandoff = async (args) => {
+  const [sub, file, ...rest] = args;
+  if (sub !== 'check' || !file || file.startsWith('-')) die('usage: handoff check <path> [--rotate-requested-at UTC] [--now UTC] [--json]');
+  const rotateRequestedAt = flagValue(rest, '--rotate-requested-at');
+  const now = flagValue(rest, '--now');
+  if (rest.includes('--rotate-requested-at') && !rotateRequestedAt) die('--rotate-requested-at needs a UTC time');
+  if (rest.includes('--now') && !now) die('--now needs a UTC time');
+  requireEnv();
+  let text;
+  try {
+    // A BOM is kept, so it is refused as v2's checker refuses it.
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(file));
+  } catch (err) {
+    process.stdout.write(`handoff-check: cannot read ${file}: ${err.message || err} (expected a readable UTF-8 handoff file)\n`);
+    process.exit(1);
+  }
+  const { body } = await api('POST', '/api/cli/handoff/check', {
+    text,
+    ...(rotateRequestedAt ? { rotateRequestedAt } : {}),
+    ...(now ? { now } : {}),
+  });
+  if (rest.includes('--json')) out(body);
+  else if (body.ok) process.stdout.write(`handoff-check: PASS ${file}\n`);
+  else process.stdout.write(body.reasons.map((reason) => `handoff-check: ${reason}\n`).join(''));
+  if (!body.ok) process.exit(1);
 };
 
 const cmdTabCount = async (args) => {
@@ -1763,6 +2146,906 @@ const cmdTabBrowser = async (args) => {
   }
 };
 
+// ── ledger (ADR-0033) ────────────────────────────────────────────────────────
+const LEDGER_USAGE = [
+  'usage: ledger token issue -w WS --producer NAME [--out FILE]',
+  '       ledger emit -w WS --token-file FILE [--json @FILE|@-|JSON]',
+  '       ledger show -w WS [--open] [--type TYPE] [--holder H] [--json]',
+  '       ledger waits -w WS [--since T] [--until T] [--by reason|holder|type|stage] [--type TYPE] [--json]',
+  '       ledger experiment open -w WS --json @FILE | close -w WS EXP-n --verdict keep|revert --evidence TEXT | list -w WS [--json]',
+  '       ledger experiment extend -w WS EXP-n --days N --evidence TEXT',
+].join('\n');
+// Mirrors src/lib/ledger.ts: the server refuses more, so the CLI never builds a batch it cannot take.
+const LEDGER_MAX_EVENTS = 500;
+const LEDGER_MAX_BYTES = 1000 * 1000;
+const LEDGER_EMIT_TIMEOUT_MS = 5000;
+const LEDGER_PRODUCER = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const LEDGER_LOCK_WAIT_MS = 3000;
+const LEDGER_LOCK_STALE_MS = 60_000;
+const LEDGER_FILE_LOCK_STALE_MS = 10_000;
+
+const ledgerWorkspace = (rest) => {
+  const wsId = flagValue(rest, '--workspace') || flagValue(rest, '-w');
+  if (!wsId) die('--workspace is required');
+  return wsId;
+};
+
+const ledgerPath = (wsId, route) => `/api/cli/workspaces/${encodeURIComponent(wsId)}/ledger/${route}`;
+
+const writePrivateFile = (file, text) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, text, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+};
+
+const cmdLedgerTokenIssue = async (rest) => {
+  const wsId = ledgerWorkspace(rest);
+  const producer = flagValue(rest, '--producer');
+  if (!producer || !LEDGER_PRODUCER.test(producer)) die(`--producer: saw ${JSON.stringify(producer)}, expected a name matching ${LEDGER_PRODUCER.source}`);
+  const file = path.resolve(flagValue(rest, '--out') || path.join(os.homedir(), '.purplemux', 'ledger-tokens', wsId, `${producer}.json`));
+  requireEnv();
+  const { body } = await api('POST', ledgerPath(wsId, 'tokens'), { producer });
+  writePrivateFile(file, `${JSON.stringify(body, null, 2)}\n`);
+  process.stdout.write(`wrote ${file} (scope ${body.scope} on ${body.workspaceId} for producer ${body.producer}; an earlier token of this producer no longer works)\n`);
+};
+
+const readLedgerTokenFile = (file) => {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    return die(`--token-file: cannot read ${file}: ${err.code || err.message}`);
+  }
+  if (!parsed || typeof parsed.token !== 'string' || typeof parsed.workspaceId !== 'string' || !LEDGER_PRODUCER.test(parsed.producer || '')) {
+    return die(`--token-file: ${file} is not a token file written by "ledger token issue"`);
+  }
+  return parsed;
+};
+
+/** A JSON array, a { "events": [...] } batch, one event object, or JSON Lines of events. */
+const parseLedgerInput = (raw) => {
+  const text = raw.trim();
+  if (!text) return die('ledger emit: no events on input');
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    try {
+      return text.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+    } catch {
+      return die('ledger emit: input must be JSON (an event, an array, { "events": [...] }) or JSON Lines');
+    }
+  }
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object' && Array.isArray(value.events)) return value.events;
+  return [value];
+};
+
+/**
+ * The spool as lines. A torn last line (a crash mid-append: no newline, not JSON) is counted and
+ * dropped. Any other line that is not JSON stops the drain: `bad` is its 1-based line number.
+ */
+const readLedgerSpool = (file) => {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return { events: [], lines: 0, bad: null };
+    throw err;
+  }
+  const lines = text.split('\n');
+  const tail = lines.pop();
+  const events = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (!lines[index].trim()) continue;
+    try { events.push(JSON.parse(lines[index])); } catch { return { events, lines: lines.length + (tail ? 1 : 0), bad: index + 1 }; }
+  }
+  if (tail && tail.trim()) {
+    try { events.push(JSON.parse(tail)); } catch { /* torn by a crash mid-append */ }
+  }
+  return { events, lines: lines.length + (tail ? 1 : 0), bad: null };
+};
+
+/** The raw lines past the first `count`: what other emits appended while this one drained. */
+const spoolLinesAfter = (file, count) => {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (err) { if (err.code === 'ENOENT') return []; throw err; }
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines.slice(count).filter((line) => line.trim());
+};
+
+const toJsonLines = (events) => events.map((event) => `${JSON.stringify(event)}\n`).join('');
+
+const rewriteLedgerSpool = (file, events, appendedLines) => {
+  const text = toJsonLines(events) + appendedLines.map((line) => `${line}\n`).join('');
+  if (text) writePrivateFile(file, text);
+  else fs.rmSync(file, { force: true });
+};
+
+/**
+ * A lock directory. Waits at most `waitMs`; a lock whose mtime is older than `staleMs` belongs to
+ * a crashed emit and is taken over. Returns `{ release, touch }`, or null when it stayed busy.
+ */
+const takeLock = async (lockDir, waitMs, staleMs) => {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      fs.mkdirSync(lockDir);
+      return {
+        release: () => fs.rmSync(lockDir, { recursive: true, force: true }),
+        touch: () => { try { const now = new Date(); fs.utimesSync(lockDir, now, now); } catch { /* released */ } },
+      };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - fs.statSync(lockDir).mtimeMs > staleMs) fs.rmSync(lockDir, { recursive: true, force: true });
+      } catch { /* the holder released it between the two calls */ }
+      if (Date.now() > deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+};
+
+/**
+ * Every change to a spool file happens under its short file lock: an append, the drainer's first
+ * read and its final rewrite. The wait outlasts the stale age, so the lock is always taken.
+ */
+const withSpoolFile = async (spoolFile, fn) => {
+  const lock = await takeLock(`${spoolFile}.lock`, LEDGER_FILE_LOCK_STALE_MS + 1000, LEDGER_FILE_LOCK_STALE_MS);
+  try {
+    return fn();
+  } finally {
+    lock?.release();
+  }
+};
+
+/** Append under the file lock; a torn last line is closed first, so it never swallows the new line. */
+const appendLedgerSpool = (spoolFile, events) => withSpoolFile(spoolFile, () => {
+  let prefix = '';
+  try {
+    const size = fs.statSync(spoolFile).size;
+    if (size > 0) {
+      const last = Buffer.alloc(1);
+      const fd = fs.openSync(spoolFile, 'r');
+      try { fs.readSync(fd, last, 0, 1, size - 1); } finally { fs.closeSync(fd); }
+      if (last.toString() !== '\n') prefix = '\n';
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  fs.appendFileSync(spoolFile, prefix + toJsonLines(events), { mode: 0o600 });
+});
+
+/** The leading entries of `rest` that fit one batch; a batch never mixes spooled and new events. */
+const nextLedgerBatch = (rest) => {
+  const batch = [];
+  let bytes = 20;
+  for (const entry of rest) {
+    const size = Buffer.byteLength(JSON.stringify(entry.event)) + 1;
+    if (batch.length && (entry.spooled !== batch[0].spooled || batch.length >= LEDGER_MAX_EVENTS || bytes + size > LEDGER_MAX_BYTES)) break;
+    batch.push(entry);
+    bytes += size;
+  }
+  return batch;
+};
+
+// A refusal no retry can change: the batch is wrong, not the ledger down.
+const LEDGER_REFUSAL_CODES = new Set(['ledger-type-reserved', 'ledger-event-conflict']);
+
+/** POST one batch; never exits. `delivered` false means the ledger could not take it now. */
+const postLedgerBatch = async (wsId, token, events) => {
+  if (!PORT && !URL_OVERRIDE) return { delivered: false, reason: 'no server port configured' };
+  let resp;
+  try {
+    resp = await fetch(`${BASE}${ledgerPath(wsId, 'events')}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Pmux-Token': token },
+      body: JSON.stringify({ events }),
+      signal: AbortSignal.timeout(LEDGER_EMIT_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const reason = err?.name === 'TimeoutError' ? `no answer in ${LEDGER_EMIT_TIMEOUT_MS} ms` : (causeCode(err) || err?.message || String(err));
+    return { delivered: false, reason };
+  }
+  let body = null;
+  try { body = await resp.json(); } catch { body = null; }
+  if (resp.ok && body && body.ok === true) return { delivered: true, body };
+  if (resp.status === 400 || resp.status === 413 || LEDGER_REFUSAL_CODES.has(body?.code)) {
+    return { delivered: false, refused: true, status: resp.status, body };
+  }
+  return { delivered: false, reason: `HTTP ${resp.status}${body?.code ? ` ${body.code}` : ''}` };
+};
+
+const ledgerEventIndex = (field) => {
+  const match = typeof field === 'string' ? /^events\[(\d+)\]/.exec(field) : null;
+  return match ? Number(match[1]) : null;
+};
+
+const cmdLedgerEmit = async (rest) => {
+  const wsId = ledgerWorkspace(rest);
+  const tokenFile = flagValue(rest, '--token-file');
+  if (!tokenFile) die('--token-file is required (write one with "ledger token issue")');
+  const credential = readLedgerTokenFile(tokenFile);
+  if (credential.workspaceId !== wsId) die(`--token-file emits for ${credential.workspaceId}, not ${wsId}`);
+  const value = flagValue(rest, '--json');
+  const raw = value && value.startsWith('@') && value !== '@-'
+    ? (() => { try { return fs.readFileSync(value.slice(1), 'utf8'); } catch (err) { return die(`cannot read ${value.slice(1)}: ${err.code || err.message}`); } })()
+    : (value && value !== '@-' ? value : await readStdin());
+  const fresh = parseLedgerInput(raw);
+  const spoolDir = path.join(os.homedir(), '.purplemux', 'ledger-spool');
+  const spoolFile = path.join(spoolDir, `${credential.producer}.jsonl`);
+  const rejectedFile = path.join(spoolDir, `${credential.producer}.rejected.jsonl`);
+  fs.mkdirSync(spoolDir, { recursive: true, mode: 0o700 });
+  const drain = await takeLock(path.join(spoolDir, `${credential.producer}.drain.lock`), LEDGER_LOCK_WAIT_MS, LEDGER_LOCK_STALE_MS);
+  if (!drain) {
+    await appendLedgerSpool(spoolFile, fresh);
+    process.stderr.write(`warning: spooled ${fresh.length} events to ${spoolFile}: another emit of ${credential.producer} is draining\n`);
+    return;
+  }
+  let refusedNew = null;
+  try {
+    const spool = await withSpoolFile(spoolFile, () => readLedgerSpool(spoolFile));
+    if (spool.bad !== null) {
+      await appendLedgerSpool(spoolFile, fresh);
+      process.stderr.write(`warning: ${spoolFile} line ${spool.bad} is not JSON; nothing was drained and ${fresh.length} events were appended. `
+        + 'Fix or remove that line; the next emit drains the spool\n');
+      return;
+    }
+    let pending = [...spool.events.map((event) => ({ event, spooled: true })), ...fresh.map((event) => ({ event, spooled: false }))];
+    const totals = { accepted: 0, duplicates: 0, drained: 0, rejected: 0 };
+    while (pending.length) {
+      drain.touch();
+      const batch = nextLedgerBatch(pending);
+      const result = await postLedgerBatch(wsId, credential.token, batch.map((entry) => entry.event));
+      if (result.delivered) {
+        totals.accepted += result.body.accepted;
+        totals.duplicates += result.body.duplicates;
+        if (batch[0].spooled) totals.drained += batch.length;
+        pending = pending.slice(batch.length);
+        continue;
+      }
+      if (result.refused) {
+        // Only the refused event is set aside; the rest of its batch is sent again, in order.
+        const index = ledgerEventIndex(result.body?.field);
+        const refused = index !== null && index < batch.length ? [batch[index]] : batch;
+        fs.appendFileSync(rejectedFile, toJsonLines(refused.map((entry) => entry.event)), { mode: 0o600 });
+        process.stderr.write(`warning: kept ${refused.length} refused event(s) in ${rejectedFile}: ${result.body?.error || `HTTP ${result.status}`}\n`);
+        if (refused.some((entry) => !entry.spooled)) refusedNew = result;
+        totals.rejected += refused.length;
+        pending = pending.filter((entry) => !refused.includes(entry));
+        continue;
+      }
+      await withSpoolFile(spoolFile, () => rewriteLedgerSpool(spoolFile, pending.map((entry) => entry.event), spoolLinesAfter(spoolFile, spool.lines)));
+      process.stderr.write(`warning: spooled ${pending.length} events to ${spoolFile} (${result.reason}); the next emit sends them first\n`);
+      return;
+    }
+    await withSpoolFile(spoolFile, () => rewriteLedgerSpool(spoolFile, [], spoolLinesAfter(spoolFile, spool.lines)));
+    process.stdout.write(`ok accepted=${totals.accepted} duplicates=${totals.duplicates} drained=${totals.drained}${totals.rejected ? ` rejected=${totals.rejected}` : ''}\n`);
+  } finally {
+    drain.release();
+  }
+  if (refusedNew) failFromResponse({ status: refusedNew.status }, refusedNew.body);
+};
+
+const dash = (value) => (value === null || value === undefined ? '—' : String(value));
+
+const ledgerDuration = (ms) => {
+  if (ms === null || ms === undefined) return '—';
+  const minutes = Math.round(ms / 60_000);
+  return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`;
+};
+
+const printTable = (columns, rows) => {
+  const table = [columns, ...rows];
+  const widths = columns.map((_, i) => Math.max(...table.map((cells) => cells[i].length)));
+  for (const cells of table) process.stdout.write(cells.map((cell, i) => cell.padEnd(widths[i])).join('  ').trimEnd() + '\n');
+};
+
+// ── board (ADR-0034) ─────────────────────────────────────────────────────────
+const BOARD_USAGE = 'usage: board show [-w WS] [--json|--line|--mine] | board pulse [-w WS] [--json]'
+  + ' | board goal set -w WS --items KEY,KEY --label TEXT | board goal show|clear -w WS'
+  + " (show and pulse default to this tab's workspace, PMUX_WORKSPACE_ID)";
+
+// The owner reads times in AEDT/AEST (ADR-HFL-02); Intl names the offset that applies on the day.
+const boardTime = (ms) => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    hourCycle: 'h23', timeZoneName: 'short',
+  }).formatToParts(new Date(ms)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneName}`;
+};
+
+// A finder answer older than two ticks says so on every face: a hung tick is not a fresh board.
+// A down curator rides on the line too (ADR-0038 §6): the owner's bare status ask is answered with it.
+const boardLineText = (board) => {
+  const line = board.staleSince === null || board.staleSince === undefined ? board.line : `${board.line} · stale since ${boardTime(board.staleSince)}`;
+  return board.curator && board.curator.health.state === 'down' ? `${line} · curator down` : line;
+};
+
+const boardInput = (name, input) => `${name} ${input.state}${input.reason ? ` (${input.reason})` : ''}`;
+
+const boardMeasures = (board) => {
+  const now = board.generatedAt + board.ageMs;
+  const shown = board.stuck.length < board.stuckTotal ? `${board.stuck.length} of ${board.stuckTotal}` : String(board.stuckTotal);
+  process.stdout.write(`stuck, oldest first: ${shown}\n`);
+  if (board.stuck.length) {
+    printTable(['ITEM', 'REASON', 'AGE', 'HOLDER', 'CLEARS'], board.stuck.map((item) => [
+      `${item.critical ? '* ' : ''}${item.key}`, item.reasonLabel, ledgerDuration(now - item.since), dash(item.holder), dash(item.clearInput),
+    ]));
+  }
+  const breached = board.anomalies.filter((a) => a.breached);
+  process.stdout.write(`anomalies over threshold: ${breached.length}\n`);
+  for (const a of breached) process.stdout.write(`  ${a.text}\n`);
+};
+
+const boardText = (board) => {
+  const lines = [`board ${board.workspaceId} · finder ran ${ledgerDuration(board.ageMs)} ago`, boardLineText(board), goalText(board)];
+  const c = board.constraint;
+  lines.push(c
+    ? `constraint: ${c.labels.reason} (${c.labels.stage}), ${c.waitingHours.toFixed(1)} h in 24 h on ${c.items} item(s), `
+      + `${c.basis === 'critical' ? 'critical items' : 'all items'}, ${c.labels.trend}; owner ${dash(c.ownerSeat)}; clears: ${c.clearInput ?? 'not recorded'}`
+    : `constraint: ${board.inputs.ledger.state === 'ok' ? 'none measured in 24 h' : 'unknown'}`);
+  lines.push(board.needsYou === null ? 'needs you: unknown (Mission Control unreadable)' : `needs you: ${board.needsYou.length} open in Mission Control`);
+  const ledgerUnknown = board.inputs.ledger.state === 'ok' ? null : (board.inputs.ledger.reason || board.inputs.ledger.state);
+  for (const item of board.needsYou ?? []) {
+    let blocked = 'no ledger item links to this item';
+    if (ledgerUnknown) blocked = `blocked cost not measured: ${ledgerUnknown}`;
+    else if (item.blocked) {
+      blocked = `blocks ${item.blocked.items} item(s), ${item.blocked.hours.toFixed(1)} h waiting${item.blocked.critical ? ', critical path' : ''}`;
+    }
+    lines.push(`  ${item.id}  ${item.title} · ${blocked}`);
+  }
+  process.stdout.write(`${lines.join('\n')}\n`);
+  if (ledgerUnknown) {
+    // Not measured is not none: an unread ledger never prints as "0 stuck".
+    process.stdout.write(`stuck: unknown (${ledgerUnknown})\nanomalies: unknown (${ledgerUnknown})\n`);
+  } else {
+    boardMeasures(board);
+  }
+  if (board.curator) {
+    const agree = (task) => {
+      if (task.task === 'reshape-question') return 'gated by its evaluation and judge';
+      const a = (board.curator.agreement || []).find((x) => x.task === task.task);
+      return a && a.compared ? `${a.agreed}/${a.compared} agree` : 'no labels in 72 h';
+    };
+    process.stdout.write(`curator: ${board.curator.health.state === 'down' ? 'curator down' : board.curator.health.state}`
+      + `${board.curator.health.state === 'down' && board.curator.health.reason ? ` (${board.curator.health.reason}); the rules route` : ''}`
+      + ` · ${board.curator.tasks.map((t) => `${t.task} ${t.state}${t.state === 'routing' && !t.routingHere ? ' (not here)' : ''}, ${agree(t)}`).join(' · ')}\n`);
+  } else {
+    process.stdout.write('curator: unknown (state unreadable)\n');
+  }
+  const { ledger, flow, spend, pool } = board.inputs;
+  process.stdout.write(`inputs: ${[boardInput('ledger', ledger), boardInput('flow', flow), boardInput('spend', spend), boardInput('pool', pool)].join(' · ')}\n`);
+};
+
+// ── board pulse (ADR-0034 §9) ────────────────────────────────────────────────
+const PULSE_BLOCKS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const PULSE_STATE_WORDS = { stalled: 'STALLED', moving: 'moving', steady: 'steady', idle: 'idle', 'not-measured': 'not measured' };
+
+// One character per clock hour, oldest left; a measured zero is '·', never a blank.
+const pulseStrip = (hours) => {
+  const max = Math.max(...hours.map((hour) => hour.total));
+  return hours.map((hour) => (hour.total === 0 ? '·' : PULSE_BLOCKS[Math.min(7, Math.ceil((hour.total / max) * 8) - 1)])).join('');
+};
+
+const pulseText = (pulse) => {
+  const scope = pulse.scope && pulse.scope.basis === 'epic' ? `epic ${pulse.scope.epics.join(', ')}` : 'its own directories';
+  const lines = [`pulse ${pulse.workspaceId} (counts ${scope}) · read ${ledgerDuration(Date.now() - pulse.generatedAt)} ago`];
+  lines.push(pulse.hours
+    ? `last 48 h, one mark per hour, oldest left: ${pulseStrip(pulse.hours)}`
+    : 'last 48 h: not measured (no movement source could be read)');
+  if (pulse.hours) {
+    const failed = pulse.hours.reduce((sum, hour) => sum + hour.gatesFailed, 0);
+    const passed = pulse.hours.reduce((sum, hour) => sum + hour.gatesPassed, 0);
+    lines.push(`gates in 48 h: ${passed} passed, ${failed} failed`);
+  }
+  const stateWord = Object.hasOwn(PULSE_STATE_WORDS, pulse.stall.state) ? PULSE_STATE_WORDS[pulse.stall.state] : 'state not in the label map';
+  lines.push(pulse.stall.state === 'not-measured' ? pulse.stall.reason : `${stateWord}: ${pulse.stall.reason}`);
+  lines.push(`priority now: ${pulse.priority.text}${pulse.staleSince === null ? '' : ` · stale since ${boardTime(pulse.staleSince)}`}`);
+  lines.push(`work in progress: ${pulse.wip.basisReason}`);
+  lines.push('sources:');
+  process.stdout.write(`${lines.join('\n')}\n`);
+  printTable(['  SOURCE', '48 H', 'LAST'], pulse.sources.map((source) => [
+    `  ${source.label}${source.sharedWith ? ` (shared with ${source.sharedWith.join(', ')}; not counted)` : ''}`,
+    source.state === 'ok' ? String(source.count) : `not measured (${source.reason})`,
+    source.lastAt === null ? '—' : boardTime(source.lastAt),
+  ]));
+};
+
+const goalText = (body) => {
+  const t = body.onTrack;
+  if (t && t.goalState === 'unknown') return `goal: ${t.reason || 'goal not measured'}`;
+  if (!t || t.goal === null) return 'goal: no goal set';
+  const forecast = t.p50At === null ? `no forecast (${t.reason})` : `p50 ${boardTime(t.p50At)}, p90 ${boardTime(t.p90At)}`;
+  const rate = t.throughputPerDay ? ` · closed per day, last 3 days: ${t.throughputPerDay.join(', ')}` : '';
+  return `goal: ${t.goal} · ${t.itemsLeft === null ? 'items left unknown' : `${t.itemsLeft} items left`} · ${forecast}${rate} · ${t.state}`;
+};
+
+const cmdBoardGoal = async (rest) => {
+  const action = rest[0];
+  const wsId = flagValue(rest, '--workspace') || flagValue(rest, '-w');
+  if (!wsId) die('--workspace is required');
+  const path = `/api/cli/workspaces/${encodeURIComponent(wsId)}/board-goal`;
+  requireEnv();
+  if (action === 'show') {
+    const { body } = await api('GET', path);
+    if (rest.includes('--json')) return out(body);
+    const board = (await api('GET', `/api/cli/workspaces/${encodeURIComponent(wsId)}/board`)).body;
+    process.stdout.write(`${goalText(board)}\n`);
+    if (body.goal) process.stdout.write(`items: ${body.goal.items.join(', ')}\nset by ${body.goal.setBy} at ${boardTime(body.goal.setAt)}\n`);
+    return;
+  }
+  if (action === 'clear') {
+    const { body } = await api('DELETE', path);
+    if (rest.includes('--json')) return out(body);
+    process.stdout.write(body.cleared ? 'goal cleared\n' : 'no goal was set\n');
+    return;
+  }
+  if (action !== 'set') die(BOARD_USAGE);
+  const items = flagValue(rest, '--items');
+  const label = flagValue(rest, '--label');
+  if (!items) die('--items is required: ledger item keys, comma-separated (range:<lane>:<key12>, slice:<lane>, ...)');
+  if (!label) die('--label is required');
+  const { body } = await api('PUT', path, { label, items: items.split(',').map((key) => key.trim()).filter(Boolean) });
+  if (rest.includes('--json')) return out(body);
+  process.stdout.write(`${goalText(body)}\n`);
+};
+
+const cmdBoard = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (sub === 'goal') return cmdBoardGoal(rest);
+  if (sub !== 'show' && sub !== 'pulse') die(BOARD_USAGE);
+  // A tab asks about its own workspace: seed order SO-7 runs `board show --line` with no -w (review r1, R4).
+  const wsId = flagValue(rest, '--workspace') || flagValue(rest, '-w') || process.env.PMUX_WORKSPACE_ID;
+  if (!wsId) die('--workspace is required outside a purplemux tab (PMUX_WORKSPACE_ID is not set)');
+  if (sub === 'pulse') {
+    requireEnv();
+    const { body } = await api('GET', `/api/cli/workspaces/${encodeURIComponent(wsId)}/pulse`);
+    if (rest.includes('--json')) return out(body);
+    pulseText(body);
+    return;
+  }
+  const modes = ['--json', '--line', '--mine'].filter((flag) => rest.includes(flag));
+  if (rest.includes('--json') && rest.includes('--line')) die('--json and --line are exclusive');
+  requireEnv();
+  const query = modes.includes('--mine') ? '?mine=1' : '';
+  const { body } = await api('GET', `/api/cli/workspaces/${encodeURIComponent(wsId)}/board${query}`);
+  if (modes.includes('--json')) return out(body);
+  if (modes.includes('--line')) {
+    process.stdout.write(`${boardLineText(body)}\n`);
+    return;
+  }
+  boardText(body);
+};
+
+// ── curator (ADR-0038) ───────────────────────────────────────────────────────
+const CURATOR_TASKS = ['classify-owner-message', 'flag-owner-question', 'match-standing-order', 'reshape-question'];
+const CURATOR_USAGE = 'usage: curator status [--json] | eval --task T [--split holdout|train|all] [--no-wait] [--json] | promote|demote --task T'
+  + ' | label-queue --task T [--json] | label-import --task T --file F | spot-check open -w WS [--task T] [--run RUN] | spot-check show [--task T] [--json]'
+  + ' | reshape-pairs | judge-import --file F [--judge NAME] | message -w WS ID';
+const CURATOR_EVAL_POLL_MS = 5000;
+const { spotCheckEvent } = require('./curator-spot-check-event.js');
+const CURATOR_SPLITS = ['holdout', 'train', 'all'];
+
+const curatorTask = (rest, fallback) => {
+  const task = flagValue(rest, '--task') || fallback;
+  if (!CURATOR_TASKS.includes(task)) die(`--task must be one of ${CURATOR_TASKS.join(', ')} — ${CURATOR_USAGE}`);
+  return task;
+};
+
+const ratio = (value) => (value === null || value === undefined ? 'not measured' : value.toFixed(3));
+
+const curatorHealthText = (health) => {
+  if (health.state === 'up') return 'up';
+  if (health.state === 'down') return `DOWN${health.reason ? ` (${health.reason})` : ''}${health.since ? ` since ${boardTime(health.since)}` : ''}: the rules route`;
+  return 'not probed yet';
+};
+
+// The bound decides, the point estimate explains (consult 16-promote-gate, ruling 1).
+// A bound is printed rounded down to 4 decimals: just under its threshold never reads as reaching it.
+const boundText = (value) => (value === null || value === undefined ? 'not measured' : (Math.floor(value * 1e4) / 1e4).toFixed(4));
+const curatorCheckText = (check) => `${check.pass ? 'PASS' : 'FAIL'} ${check.label} ${check.metric} ${check.successes}/${check.trials} = ${ratio(check.measured)}; `
+  + `95% lower bound ${boundText(check.lowerBound)} >= ${check.threshold.toFixed(2)}? (0 errors needs ${check.minTrials})`;
+
+const curatorEvalText = (result) => {
+  const outcomes = Object.entries(result.outcomes).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
+  process.stdout.write(`${result.task} · prompt ${result.promptVersion} · ${result.model} · ${result.split} · ${result.n} items`
+    + ` (unresolved ${result.unresolved}, aged out ${result.agedOut}, left out: ${result.excluded.shadow} shadow, ${result.excluded.disputed} disputed)`
+    + ` · ran ${boardTime(result.startedAt)} to ${boardTime(result.finishedAt)}\n`);
+  if (result.refused) {
+    process.stdout.write(`REFUSED: ${result.refused} — no model call was made; promote reads this as no evaluation\n`);
+    return;
+  }
+  process.stdout.write(`outcomes: ${outcomes} · latency p50 ${result.latency.p50 ?? '—'} ms, p90 ${result.latency.p90 ?? '—'} ms\n`);
+  printTable(['CLASS', 'SUPPORT', 'PREDICTED', 'PRECISION', 'RECALL', 'RULES P', 'RULES R'], result.score.classes.map((c) => {
+    const rules = result.rules.classes.find((r) => r.label === c.label) || {};
+    return [c.label, String(c.support), String(c.predicted), ratio(c.precision), ratio(c.recall), ratio(rules.precision), ratio(rules.recall)];
+  }));
+  process.stdout.write('gate on this run alone (ADR-0038 §5; promote adds the labelled shadow rows):\n');
+  for (const check of result.score.checks) process.stdout.write(`  ${curatorCheckText(check)}\n`);
+  process.stdout.write(`gate: ${result.score.pass ? 'PASS' : 'FAIL'} (promote also needs 72 h and 30 labelled shadow rows of this prompt`
+    + `${result.task === 'flag-owner-question' ? '' : ', and the owner\'s spot check'})\n`);
+};
+
+// The reshape gate on this run alone (story 23 AC 4): 100 replies, every one valid and preserved; the judge and 72 h follow.
+const reshapeEvalText = (result) => {
+  const kv = (o) => Object.entries(o || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'none';
+  process.stdout.write(`reshape-question · prompt ${result.promptVersion} · ${result.model} · run ${result.runId} · ran ${boardTime(result.startedAt)} to ${boardTime(result.finishedAt)}\n`);
+  if (result.refused) {
+    process.stdout.write(`REFUSED: ${result.refused} — promote reads this as no evaluation\n`);
+    return;
+  }
+  process.stdout.write(`replies ${result.replied}/${result.target} of ${result.candidates} held-out ids · non-replies ${result.nonReplies}`
+    + ` · unresolved ${result.unresolved} · not reshapable ${result.unreshapable} · latency p50 ${result.latency.p50 ?? '—'} ms, p90 ${result.latency.p90 ?? '—'} ms\n`);
+  process.stdout.write(`labels: ${kv(result.labels)} · outcomes: ${kv(result.outcomes)}\n`);
+  const pass = result.replied >= result.target && result.clean === result.replied;
+  process.stdout.write(`${pass ? 'PASS' : 'FAIL'} schema-valid and preservation-clean ${result.clean}/${result.replied} (needs ${result.target}/${result.target})\n`);
+  process.stdout.write('promote also needs the judge (curator reshape-pairs, then curator judge-import: >= 95% same decision, same options) and 72 h of clean live replies\n');
+};
+
+const curatorEval = async (rest) => {
+  const task = curatorTask(rest);
+  const split = flagValue(rest, '--split') || (rest.includes('--all') ? 'all' : 'holdout');
+  if (!CURATOR_SPLITS.includes(split)) die(`--split must be one of ${CURATOR_SPLITS.join(', ')}`);
+  requireEnv();
+  const { body: started } = await api('POST', '/api/cli/curator/eval', { task, split });
+  if (rest.includes('--no-wait')) return out(started);
+  const since = started.progress.startedAt;
+  for (;;) {
+    const { body } = await api('GET', `/api/cli/curator/eval?task=${encodeURIComponent(task)}&split=${split}`);
+    if (body.progress && body.progress.error) fail('curator-unavailable', `evaluation failed: ${body.progress.error}`);
+    if (body.progress && !body.progress.running && body.result && body.result.startedAt >= since) {
+      if (rest.includes('--json')) return out(body.result);
+      return task === 'reshape-question' ? reshapeEvalText(body.result) : curatorEvalText(body.result);
+    }
+    if (body.progress && process.stderr.isTTY) process.stderr.write(`\r${task}: ${body.progress.done}/${body.progress.total || '?'}`);
+    await new Promise((resolve) => setTimeout(resolve, CURATOR_EVAL_POLL_MS));
+  }
+};
+
+const curatorStatusText = (body) => {
+  process.stdout.write(`curator ${body.model} · ${curatorHealthText(body.health)} · queued ${body.queued}`
+    + `${body.rateLimitMs ? ` · ${body.rateLimitMs / 1000} s between calls (kodit rule)` : ''}\n`);
+  printTable(['TASK', 'STATE', 'PROMPT', 'SHADOW ENDS', 'PROMOTED', 'LABEL QUEUE'], body.tasks.map((t) => [
+    t.task, t.state, t.promptVersion, t.shadowEndsAt ? boardTime(t.shadowEndsAt) : 'no live call yet', t.promotedAt ? boardTime(t.promotedAt) : '—',
+    t.queue && t.queue.size ? `${t.queue.size}, oldest ${boardTime(t.queue.oldestAt)}` : '0',
+  ]));
+  for (const t of body.tasks) {
+    const gate = t.gate || {};
+    process.stdout.write(`${t.task} gate:\n`);
+    if (t.task === 'reshape-question') {
+      for (const r of gate.refusals || []) process.stdout.write(`  FAIL ${r}\n`);
+      if (!(gate.refusals || []).length) process.stdout.write('  PASS every condition\n');
+      continue;
+    }
+    if (gate.checks) for (const check of gate.checks) process.stdout.write(`  pool ${curatorCheckText(check)}\n`);
+    else process.stdout.write('  pool: no usable held-out evaluation of this prompt\n');
+    for (const c of gate.shadow || []) process.stdout.write(`  shadow ${c.label} ${c.metric} ${c.successes}/${c.trials} (needs n >= 30, >= ${c.threshold.toFixed(2)}): ${c.pass ? 'PASS' : 'FAIL'}\n`);
+  }
+  const k = body.kodit;
+  if (!k) process.stdout.write('kodit: not measured yet\n');
+  else {
+    const rate = (w) => (w && w.docsPerHour !== null ? `${w.docsPerHour.toFixed(0)} docs/h, ${w.summariesPerHour.toFixed(0)} summaries/h (${w.samples} samples)` : 'not measured');
+    process.stdout.write(`kodit before: ${rate(k.before)}\nkodit after: ${k.after ? rate(k.after) : `waits for 72 h live (from ${body.liveSince ? boardTime(body.liveSince + 72 * 3600000) : '—'})`}`
+      + `${k.drop === null ? '' : ` · change ${(-k.drop * 100).toFixed(1)}%`}\n`);
+  }
+  for (const e of body.evals || []) process.stdout.write(`eval ${e.task}: ${e.running ? `running ${e.done}/${e.total}` : e.error ? `failed: ${e.error}` : 'finished'}\n`);
+};
+
+const curatorSpotCheckOpen = async (rest) => {
+  const wsId = missionWorkspace(rest);
+  const task = curatorTask(rest, 'classify-owner-message');
+  requireEnv();
+  const { body: snapshot } = await api('GET', `/api/cli/mission-control?workspaceId=${encodeURIComponent(wsId)}`);
+  const runs = missionBoundRuns(snapshot, wsId);
+  const runId = flagValue(rest, '--run');
+  const run = runId ? runs.find((r) => r.runId === runId) : runs.length === 1 ? runs[0] : null;
+  if (!run) die(`--run must name one bound run of ${wsId}: ${runs.map((r) => r.runId).join(', ') || 'none is bound'}`);
+  const { body: draft } = await api('POST', '/api/cli/curator/spot-check', { task, workspaceId: wsId });
+  process.stderr.write(`drawn per class: ${Object.entries(draft.perClass).map(([k, v]) => `${k} ${v}`).join(', ')} · skipped as credential-like: ${draft.skippedSecret}\n`);
+  // A new item is revision 0 (review r1 F1); the number map is recorded only once the item exists.
+  const posted = await postAsk(spotCheckEvent({ draft, run, workspaceId: wsId, task, now: Date.now() }), wsId, false);
+  const { body: committed } = await api('POST', '/api/cli/curator/spot-check', { task, workspaceId: wsId, commit: draft.itemId });
+  return out({ posted, committed });
+};
+
+const curatorLabelImport = async (rest) => {
+  const task = curatorTask(rest);
+  const file = flagValue(rest, '--file');
+  if (!file) die('--file is required: a JSON array of { "id", "label" }');
+  let labels;
+  try { labels = JSON.parse(require('fs').readFileSync(file, 'utf-8')); } catch (e) { die(`--file ${file}: ${e.message}`); }
+  requireEnv();
+  const { body } = await api('POST', '/api/cli/curator/label-import', { task, labels });
+  return out(body);
+};
+
+const cmdCurator = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (sub === 'status') {
+    requireEnv();
+    const { body } = await api('GET', '/api/cli/curator');
+    if (rest.includes('--json')) return out(body);
+    return curatorStatusText(body);
+  }
+  if (sub === 'eval') return curatorEval(rest);
+  if (sub === 'label-queue') {
+    const task = curatorTask(rest);
+    requireEnv();
+    const { body } = await api('POST', '/api/cli/curator/label-queue', { task });
+    if (rest.includes('--json')) return out(body);
+    process.stdout.write(`${task} · prompt ${body.promptVersion} · ${body.size} queued (${body.added} new)`
+      + `${body.oldestAt ? ` · oldest ${boardTime(body.oldestAt)}` : ''}\n${body.ids.join('\n')}${body.ids.length ? '\n' : ''}`);
+    return;
+  }
+  if (sub === 'label-import') return curatorLabelImport(rest);
+  if (sub === 'reshape-pairs') {
+    // The judge's input, one JSON document on stdout: nothing is written to disk (consult C2 (iii)).
+    requireEnv();
+    const { body } = await api('GET', '/api/cli/curator/reshape-pairs');
+    return out(body);
+  }
+  if (sub === 'judge-import') {
+    const file = flagValue(rest, '--file');
+    if (!file) die('--file is required: { "runId", "verdicts": [{ "id", "sha", "verdict": "same" | "different" }] }');
+    let doc;
+    try { doc = JSON.parse(require('fs').readFileSync(file, 'utf-8')); } catch (e) { die(`--file ${file}: ${e.message}`); }
+    requireEnv();
+    const { body } = await api('POST', '/api/cli/curator/judge-import', { runId: doc.runId, verdicts: doc.verdicts, judge: flagValue(rest, '--judge') || doc.judge });
+    return out(body);
+  }
+  if (sub === 'message') {
+    const wsId = missionWorkspace(rest);
+    const entryId = rest.filter((a, i) => !a.startsWith('-') && rest[i - 1] !== '-w' && rest[i - 1] !== '--workspace')[0];
+    if (!entryId) die('usage: curator message -w WS ID');
+    requireEnv();
+    const { body } = await api('GET', `/api/cli/curator/message?workspaceId=${encodeURIComponent(wsId)}&entryId=${encodeURIComponent(entryId)}`);
+    if (rest.includes('--json')) return out(body);
+    process.stdout.write(`${body.workspaceId}/${body.entryId} at ${body.sentAt}:\n${body.message}\n`);
+    return;
+  }
+  if (sub === 'promote' || sub === 'demote') {
+    const task = curatorTask(rest);
+    requireEnv();
+    const { body } = await api('POST', '/api/cli/curator/promote', { task, ...(sub === 'demote' ? { demote: true } : {}) });
+    if (rest.includes('--json')) return out(body);
+    process.stdout.write(sub === 'demote' ? `${task}: shadow${body.wasRouting ? ' (was routing)' : ''}\n` : `${task}: routing (every gate condition met)\n`);
+    return;
+  }
+  if (sub === 'spot-check') {
+    const action = rest[0];
+    if (action === 'open') return curatorSpotCheckOpen(rest.slice(1));
+    if (action === 'show') {
+      const task = curatorTask(rest.slice(1), 'classify-owner-message');
+      requireEnv();
+      const { body } = await api('GET', `/api/cli/curator/spot-check?task=${encodeURIComponent(task)}`);
+      if (rest.includes('--json')) return out(body);
+      const v = body.verdict;
+      const text = v.state === 'answered' ? `answered: ${v.disputed.length} wrong of ${v.judged} judged (${(v.wrongShare * 100).toFixed(1)}%), ${v.unjudged.length} not judged`
+        : v.state === 'unreadable' ? `answer unreadable: ${v.reason}` : 'unanswered';
+      process.stdout.write(`spot check ${body.itemId ?? '(not opened)'}${body.workspaceId ? ` in ${body.workspaceId}` : ''}: ${text}\n`);
+      return;
+    }
+  }
+  die(CURATOR_USAGE);
+};
+
+const cmdLedgerShow = async (rest) => {
+  const wsId = ledgerWorkspace(rest);
+  const qs = new URLSearchParams();
+  if (rest.includes('--open')) qs.set('open', '1');
+  for (const name of ['type', 'holder']) {
+    const value = flagValue(rest, `--${name}`);
+    if (value !== null) qs.set(name, value);
+  }
+  requireEnv();
+  const { body } = await api('GET', `${ledgerPath(wsId, 'items')}?${qs}`);
+  if (rest.includes('--json')) return out(body);
+  process.stdout.write(`ledger ${wsId}: ${body.items.length} items${body.truncated ? ' (more match; narrow with --open, --type or --holder)' : ''}\n`);
+  printTable(['ITEM', 'TYPE', 'STATE', 'WAITING ON', 'FOR', 'HOLDER', 'CLOSED'], body.items.map((item) => [
+    item.itemKey, item.itemType, dash(item.state), dash(item.waitReason),
+    item.waitSince === null ? '—' : ledgerDuration(body.now - item.waitSince), dash(item.holder),
+    item.closedAt === null ? '—' : new Date(item.closedAt).toISOString(),
+  ]));
+};
+
+const cmdLedgerWaits = async (rest) => {
+  const wsId = ledgerWorkspace(rest);
+  const qs = new URLSearchParams();
+  for (const name of ['since', 'until', 'by', 'type']) {
+    const value = flagValue(rest, `--${name}`);
+    if (value !== null) qs.set(name, value);
+  }
+  requireEnv();
+  const { body } = await api('GET', `${ledgerPath(wsId, 'waits')}?${qs}`);
+  if (rest.includes('--json')) return out(body);
+  process.stdout.write(`waits ${wsId} ${new Date(body.since).toISOString()}..${new Date(body.until).toISOString()} by ${body.by}${body.type ? ` type ${body.type}` : ''}\n`);
+  const line = (key, row) => [key, ledgerDuration(row.waitedMs), String(row.finished), ledgerDuration(row.p50Ms), ledgerDuration(row.p90Ms),
+    String(row.openItems), ledgerDuration(row.openWaitedMs)];
+  printTable(['KEY', 'WAITED', 'FINISHED', 'P50', 'P90', 'OPEN', 'OPEN-WAITED'],
+    [...body.rows.map((row) => line(row.key === null ? '(no holder)' : row.key, row)), line('total', body.totals)]);
+};
+
+const cmdLedgerExperiment = async (sub, rest) => {
+  const wsId = ledgerWorkspace(rest);
+  if (sub === 'list') {
+    requireEnv();
+    const { body } = await api('GET', ledgerPath(wsId, 'experiments'));
+    if (rest.includes('--json')) return out(body);
+    printTable(['ID', 'STAGE', 'METRIC', 'STARTED', 'VERDICT', 'HYPOTHESIS'], body.experiments.map((e) => [
+      e.id, e.stage, e.metric, new Date(e.startedAt).toISOString(),
+      e.verdict ? `${e.verdict} ${new Date(e.verdictAt).toISOString()}` : e.extendedAt ? `active, extended +${e.extensionDays}d` : 'active', e.hypothesis,
+    ]));
+    return;
+  }
+  if (sub === 'open') {
+    const experiment = await readJsonFlag(rest, 'experiment');
+    requireEnv();
+    const { body } = await api('POST', ledgerPath(wsId, 'experiments'), experiment);
+    process.stdout.write(`opened ${body.experiment.id} (stage ${body.experiment.stage}, metric ${body.experiment.metric})\n`);
+    return;
+  }
+  if (sub === 'close') {
+    const positional = stripFlags(rest, ['-w', '--workspace', '--verdict', '--evidence']);
+    const id = positional[0];
+    if (!id || positional.length > 1) die(LEDGER_USAGE);
+    const verdict = flagValue(rest, '--verdict');
+    const evidence = flagValue(rest, '--evidence');
+    if (!verdict || !evidence) die('--verdict keep|revert and --evidence TEXT are required');
+    requireEnv();
+    const { body } = await api('POST', ledgerPath(wsId, `experiments/${encodeURIComponent(id)}`), { verdict, evidence });
+    process.stdout.write(`closed ${body.experiment.id}: ${body.experiment.verdict}\n`);
+    return;
+  }
+  if (sub === 'extend') {
+    const positional = stripFlags(rest, ['-w', '--workspace', '--days', '--evidence']);
+    const id = positional[0];
+    if (!id || positional.length > 1) die(LEDGER_USAGE);
+    const daysText = flagValue(rest, '--days');
+    const evidence = flagValue(rest, '--evidence');
+    if (!daysText || !/^\d+$/.test(daysText) || !evidence) die('--days N (a whole number of days) and --evidence TEXT are required');
+    requireEnv();
+    const { body } = await api('POST', ledgerPath(wsId, `experiments/${encodeURIComponent(id)}/extend`), { days: Number(daysText), evidence });
+    process.stdout.write(`extended ${body.experiment.id} by ${body.experiment.extensionDays} days: ends by day ${body.experiment.maxDays}\n`);
+    return;
+  }
+  die(LEDGER_USAGE);
+};
+
+const cmdLedger = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  switch (sub) {
+    case 'token':
+      if (rest[0] !== 'issue') die(LEDGER_USAGE);
+      return cmdLedgerTokenIssue(rest.slice(1));
+    case 'emit': return cmdLedgerEmit(rest);
+    case 'show': return cmdLedgerShow(rest);
+    case 'waits': return cmdLedgerWaits(rest);
+    case 'experiment': return cmdLedgerExperiment(rest[0], rest.slice(1));
+    case 'experiments': return cmdLedgerExperiment('list', rest);
+    default: die(LEDGER_USAGE);
+  }
+};
+
+// ── events (ADR-0035) ────────────────────────────────────────────────────────
+const EVENTS_USAGE = [
+  'usage: events show -w WS [TAB] [--since T] [--limit N] [--json]',
+  '       events wakes -w WS [--since T] [--until T] [--by-day] [--json]',
+  'T is an age (90s, 15m, 1h, 7d), Unix ms or ISO-8601',
+].join('\n');
+
+const eventsPath = (wsId, route, qs) => `/api/cli/workspaces/${encodeURIComponent(wsId)}/events${route ? `/${route}` : ''}?${qs}`;
+
+const EVENT_TEXT_CHARS = 120;
+const firstLine = (text) => {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > EVENT_TEXT_CHARS ? `${line.slice(0, EVENT_TEXT_CHARS - 1)}…` : line;
+};
+
+const eventDelivery = (event) => {
+  if (event.deliveredAt === null) return event.class === 'digest' ? 'waiting' : event.class === 'log' ? 'logged' : 'not delivered';
+  return `${new Date(event.deliveredAt).toISOString().slice(11, 19)}Z${event.digestId ? ` ${event.digestId}` : ''}`;
+};
+
+const cmdEventsShow = async (rest) => {
+  const wsId = ledgerWorkspace(rest);
+  const positional = stripFlags(rest, ['-w', '--workspace', '--since', '--limit']).filter((arg) => arg !== '--json');
+  if (positional.length > 1) die(EVENTS_USAGE);
+  const qs = new URLSearchParams({ since: flagValue(rest, '--since') ?? '1h' });
+  if (positional[0]) qs.set('tab', positional[0]);
+  const limit = flagValue(rest, '--limit');
+  if (limit !== null) qs.set('limit', limit);
+  requireEnv();
+  const { body } = await api('GET', eventsPath(wsId, '', qs));
+  if (rest.includes('--json')) return out(body);
+  process.stdout.write(`events ${wsId}${body.tabId ? ` ${body.tabId}` : ''} since ${new Date(body.since).toISOString()}: ${body.events.length}`
+    + `${body.truncated ? ' (newest shown; older ones match: narrow --since or raise --limit)' : ''}\n`);
+  const at = (event) => new Date(event.at).toISOString().slice(0, 19) + 'Z';
+  if (body.tabId) {
+    // One tab: every event whole, the text a digest points to (ADR-0035 §3).
+    for (const event of body.events) {
+      process.stdout.write(`\n${at(event)}  ${event.class}  ${event.kind}  ${eventDelivery(event)}\n`);
+      process.stdout.write(`${event.text.split('\n').map((line) => `  ${line}`).join('\n')}\n`);
+    }
+    return;
+  }
+  printTable(['AT', 'TAB', 'CLASS', 'KIND', 'DELIVERED', 'TEXT'], body.events.map((event) => [
+    at(event), event.tabId, event.class, event.kind, eventDelivery(event), firstLine(event.text),
+  ]));
+};
+
+const cmdEventsWakes = async (rest) => {
+  const wsId = ledgerWorkspace(rest);
+  const qs = new URLSearchParams({ since: flagValue(rest, '--since') ?? '24h', by: rest.includes('--by-day') ? 'day' : 'window' });
+  const until = flagValue(rest, '--until');
+  if (until !== null) qs.set('until', until);
+  requireEnv();
+  const { body } = await api('GET', eventsPath(wsId, 'wakes', qs));
+  if (rest.includes('--json')) return out(body);
+  process.stdout.write(`wakes ${wsId} ${new Date(body.since).toISOString()}..${new Date(body.until).toISOString()}`
+    + `${body.hasEvents ? '' : ' (no tab events recorded for this workspace)'}\n`);
+  printTable(['TAB', ...(body.by === 'day' ? ['DAY'] : []), 'WAKES', 'DIGESTS', 'URGENT', 'LOGGED'], body.rows.map((row) => [
+    row.tabId, ...(body.by === 'day' ? [row.day] : []), String(row.wakes), String(row.digests), String(row.urgent), String(row.logged),
+  ]));
+};
+
+const cmdEvents = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  switch (sub) {
+    case 'show': return cmdEventsShow(rest);
+    case 'wakes': return cmdEventsWakes(rest);
+    default: die(EVENTS_USAGE);
+  }
+};
+
+// ── effects (story 15, ADR-0035 §7) ─────────────────────────────────────────
+const EFFECTS_USAGE = 'usage: effects show [-w WS] [--days N] [--json]   (N: 1 to 30, default 7; WS defaults to $PMUX_WORKSPACE_ID)';
+
+const effectCount = (value) => (value === null ? '—' : String(value));
+
+const cmdEffectsShow = async (rest) => {
+  const wsId = flagValue(rest, '--workspace') || flagValue(rest, '-w') || process.env.PMUX_WORKSPACE_ID;
+  if (!wsId) die(`--workspace is required outside a tab\n${EFFECTS_USAGE}`);
+  if (stripFlags(rest, ['-w', '--workspace', '--days']).filter((arg) => arg !== '--json').length) die(EFFECTS_USAGE);
+  const qs = new URLSearchParams({ days: flagValue(rest, '--days') ?? '7' });
+  requireEnv();
+  const { body } = await api('GET', `/api/cli/workspaces/${encodeURIComponent(wsId)}/effects?${qs}`);
+  if (rest.includes('--json')) return out(body);
+  const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const window = `${iso(body.requestedSince)}..${iso(body.until)}`;
+  const counted = body.since === null
+    ? (body.measuredSince === null ? 'nothing measured: no turn recorded yet' : `nothing measured: turns recorded from ${iso(body.measuredSince)}`)
+    : body.since > body.requestedSince ? `counted from ${iso(body.since)}, the first recorded turn` : 'all of it counted';
+  process.stdout.write(`effects ${wsId} ${window}: ${counted}\nsource: ${body.source}\n`);
+  const measured = body.rows.filter((row) => row.notMeasured === null);
+  const share = (row) => (row.judged ? `${Math.round((100 * row.followed) / row.judged)}%` : '—');
+  if (measured.length) {
+    const candidate = (row) => (row.candidate === null ? '—' : row.candidate ? 'yes' : 'no');
+    printTable(['COMPONENT', 'FAMILY', 'FIRED', 'DELIVERED', 'IN-DIGEST', 'FOLLOWED', 'JUDGED', 'SHARE', 'NO-TURN', 'MID-TURN', 'PENDING',
+      'CLOSED', 'UNMEASURED', 'CANDIDATE'], measured.map((row) => [row.component, row.family,
+      ...['fired', 'delivered', 'inDigest', 'followed', 'judged'].map((key) => effectCount(row[key])), share(row),
+      ...['noTurn', 'midTurn', 'pending', 'closed', 'unmeasured'].map((key) => effectCount(row[key])), candidate(row)]));
+    process.stdout.write(`\nCANDIDATE yes: at least ${body.candidateMinObserved} deliveries with an observed turn, none followed; — is not measured (--json gives candidateReason). `
+      + 'Delivered 0 is never a candidate: it means the component reached no tab, not that it never fired.\n');
+  }
+  const unmeasured = body.rows.filter((row) => row.notMeasured !== null);
+  if (unmeasured.length) {
+    process.stdout.write(`${measured.length ? '\n' : ''}not measured:\n`);
+    printTable(['COMPONENT', 'FAMILY', 'WHY'], unmeasured.map((row) => [row.component, row.family, row.notMeasured]));
+  }
+};
+
+const cmdEffects = async (args) => {
+  if (args[0] !== 'show') die(EFFECTS_USAGE);
+  return cmdEffectsShow(args.slice(1));
+};
+
 const cmdApiGuide = async () => {
   requireEnv();
   const guidePath = '/api/cli/api-guide';
@@ -1828,22 +3111,46 @@ Commands:
              [--host HOST]                 Run the tab's tmux on HOST over ssh (ADR-0022): an ssh alias listed in
                                            fleet config remote.hosts. terminal and claude-code only; exit 2
                                            otherwise, exit 6 when HOST does not answer. The pane's purplemux
-                                           reaches this server through PMUX_URL with the tab's own token
+                                           reaches this server through PMUX_URL with the tab's own token.
+                                           --host auto: the pool places it (ADR-0039): a claude-code tab with no
+                                           role may go to the known host with the most free memory; every other
+                                           tab, and any pool refusal, no answer in 2 s or a --cwd missing there,
+                                           stays here. The answer's "placement" says where and why
              [--cwd DIR]                   Start the tab in DIR, an absolute directory that must exist on the
                                            tab's host (cwd-missing, exit 2). A remote worker works in its own
                                            checkout or worktree on that host
+             [--role evaluator --preview-url URL [--pg-service NAME]]
+                                           A claude-code tab (implied when -t is omitted) that cannot change the
+                                           repository (ADR-0040). Tools: Read, Grep, Glob, Bash and the
+                                           chrome-devtools MCP (headless Chrome 149+, URL's origin only); Bash runs
+                                           Claude Code's read-only commands (not docker, ps, pgrep, lsof, ss)
+                                           and ~/.purplemux/bin/evaluator-sql, which queries the libpq service
+                                           NAME (exported as PGSERVICE; the service's SELECT-only role is the
+                                           guard);
+                                           credential paths (~/.purplemux, ~/.ssh, *token*, ...) are unreadable;
+                                           anything else is denied, never prompted. Every relaunch keeps it; never
+                                           an orchestrator. Exit 2 without --preview-url (an http(s) URL on a
+                                           plain host, not purplemux's own port), for another type, a remote
+                                           host, an unknown role or a headless Chrome under 149
              [-m MODEL] [-r EFFORT]        Agent tabs auto-launch their CLI (hooks wired). -m sets the model; -r sets the
              [--no-launch]                 reasoning effort — claude-code: low|medium|high|xhigh|max (claude --effort;
                                            omitted = the user's global default, so orchestrators should ALWAYS pin it);
                                            grok-cli: none|minimal|low|medium|high|xhigh|max (grok --effort);
                                            codex: minimal|low|medium|high. --no-launch keeps the old bare-shell behavior.
+             [--handoff PATH [--rotate-at N|off]]
+                                           A seat (ADR-0036): at its context threshold (fleet config
+                                           context.rotate-at-tokens, default 300000; --rotate-at 50000..900000 or
+                                           off for this tab), idle with no background work, it is sent ROTATE; on
+                                           HANDOFF-READY the file at PATH is checked and the tab restarts --clear
+                                           with "Read PATH, then continue: <resume command>". Local tabs only
              [--over-cap --reason TEXT]    An agent tab is refused at the WIP cap (fleet config tabs.cap-per-workspace,
                                            default 8): exit 3 wip-cap. Only the workspace's verified, enabled
                                            orchestrator tab passes it, with a reason (1-500 characters, else exit 2)
                                            that is audited; any other caller exits 3 forbidden. The answer's
                                            "wip" is { count, cap, overCap } after the create
   tab count -w WS [--json]                 Print "<count> <cap>": WS's agent tabs (claude-code, codex-cli, grok-cli)
-                                           and the WIP cap; --json adds workspaceId, capSource, overCap. Hooks use it
+                                           and the WIP cap (tabs.cap-per-workspace.<WS> wins over the fleet value);
+                                           --json adds workspaceId, capSource, overCap. Hooks use it
                                            instead of counting tmux sessions
   tab reports-to -w WS TAB_ID TARGET       Route TAB_ID's nudges to TARGET while TARGET is live; --clear
                   [--clear] [--on MARKERS] restores the workspace orchestrator. Cleared when TARGET closes.
@@ -1925,13 +3232,73 @@ Commands:
             [--history all|window|none]    since), meters, producer flags, and "stale" after 10 min without a
                                            publish. No record: "no flow published", exit 7 (flow-not-found);
                                            a damaged record: exit 1 (flow-unreadable)
-  spend show -w WS [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--by tab|day|model|role] [--json]
-                                           Tokens (input, output, cache read, cache creation, subagents) and the
-                                           estimated cost ("est."; "—" when no price is known) per tab, UTC day, model
-                                           or role, plus the unattributed row and the total. Default: the last 7 UTC
-                                           days by tab; at most 92 days, none before today - 91 (exit 2). Role uses
-                                           the current orchestrator. An unreadable spend index exits 1.
-                                           Read scope on WS (ADR-0030)
+  spend show -w WS [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--by tab|day|model|role|seat|phase|item] [--json]
+                                           Tokens (input, output, cache read and its share, cache creation, subagents)
+                                           and the estimated cost ("est."; "—" when no price is known) per tab, UTC
+                                           day, model, role, seat (tab name), phase or held ledger item, plus the
+                                           unattributed row (by phase/item: one row per reason) and the total, with
+                                           the cache reads' share of tokens and of the est. cost. Default: the last 7
+                                           UTC days by tab; at most 92 days (7 by phase or item), none before
+                                           today - 91 (exit 2). Role uses the current orchestrator. An unreadable
+                                           spend index exits 1. Read scope on WS (ADR-0030)
+  spend phases -w WS [--day YYYY-MM-DD] [--json]
+                                           One UTC day (default today) by phase: wall time (distinct 5-min slots),
+                                           tokens by kind, est. cost, and cache_read_tokens_per_landed_item (landed
+                                           ranges) for the day and the 7 days ending on it ("—" with the reason when
+                                           it is not measured).
+                                           Read scope on WS (ADR-0030 amendment, harness-flow-loop 04)
+  board show [-w WS] [--json|--line|--mine] The constraint finder's board (ADR-0034, refreshed every 60 s; -w
+                                           defaults to PMUX_WORKSPACE_ID): the
+                                           constraint (24 h, critical items first), its trend, owner and clear
+                                           input; Mission Control's open items; stuck items oldest first; anomalies
+                                           over threshold; each input's state. --line: goal, items left,
+                                           constraint, trend on one line. --mine: only the items the calling tab
+                                           holds (needs PMUX_TAB_TOKEN). Read scope on WS
+  board pulse [-w WS] [--json]             Hourly movement, last 48 h (ADR-0034 §9): one mark per hour from
+                                           ledger changes, commits, gates (pass/fail), review rounds, v2 LANDED
+                                           lines and Mission Control answers; stalled / moving / steady / idle;
+                                           priority now; each source's own state ("not measured", never 0).
+                                           Read scope on WS
+  board goal set -w WS --items KEY,KEY --label TEXT
+                                           Set the goal the on-track line forecasts (p50/p90 from 3-day
+                                           throughput, AEDT). Own workspace only. board goal show|clear -w WS
+  ledger token issue -w WS --producer NAME [--out FILE]
+                                           Issue a producer token (scope ledger:emit on WS only) into a 0600 file,
+                                           default ~/.purplemux/ledger-tokens/WS/NAME.json; rotates NAME's token
+  ledger emit -w WS --token-file FILE [--json @FILE|@-|JSON]
+                                           Append work-item events (ADR-0033): one event, an array, a batch or JSON
+                                           Lines. Drains ~/.purplemux/ledger-spool/NAME.jsonl first, in order; on a
+                                           failure or no answer in 5 s it spools and exits 0. A refused event: exit 2
+  ledger show -w WS [--open] [--type TYPE] [--holder H] [--json]
+                                           Work items: state, the reason each waits on and for how long
+  ledger waits -w WS [--since T] [--until T] [--by reason|holder|type|stage] [--type TYPE] [--json]
+                                           Summed waits, p50 and p90 of finished waits, and open WIP per group.
+                                           Default: the last 7 days by reason. T is Unix ms or ISO-8601
+  ledger experiment open -w WS --json @FILE | close -w WS EXP-n --verdict keep|revert --evidence TEXT
+  ledger experiment list -w WS [--json]    Improvement experiments (ADR-HFL-03): one active per stage, two in all
+  ledger experiment extend -w WS EXP-n --days N --evidence TEXT
+                                           Extend an active experiment once: max_days grows by N, at most to 90; a
+                                           second extension is refused (exit 3, ledger-experiment-extended)
+  handoff check PATH [--rotate-requested-at UTC] [--now UTC] [--json]
+                                           Check a seat handoff file against the ADR-0036 schema (the checker the
+                                           rotation runs): PASS exits 0; each refusal prints a line, exit 1
+  events show -w WS [TAB] [--since T] [--limit N] [--json]
+                                           What each tab was sent (ADR-0035), whole for one TAB, one line each for
+                                           the workspace: urgent typed at once, digest held for
+                                           the tab's next DIGEST, log recorded only. Default: the last hour.
+                                           T is an age (15m, 1h, 7d), Unix ms or ISO-8601; kept 30 days
+  events wakes -w WS [--since T] [--until T] [--by-day] [--json]
+                                           Wakes and digests per tab: one delivery is one wake, a digest counts once.
+                                           Default: the last 24 h
+  effects show [-w WS] [--days N] [--json] Per nudge kind, probe kind and flag rule: firings recorded, delivery units (an
+                                           urgent paste, or a digest counted once per component) and how many were
+                                           followed: the recipient's next turn, started within 30 s of the paste, made an
+                                           acting tool call (edit, write, shell). Followed is what came next, not what the
+                                           delivery caused. Delivered 0 = never reached a tab, not never fired. A paste
+                                           into a running turn, a pending or closed tab and an unrecorded turn are counted
+                                           apart. CANDIDATE yes needs 10 deliveries with an observed turn and none
+                                           followed; otherwise it is not measured. Turns are recorded from the first one after this release;
+                                           an earlier window is clamped. Per-probe effect is not measured. Default: 7 days
   mission snapshot -w WS                   Read the workspace Mission Control snapshot
   mission events -w WS --json '{...}'      Submit an atomic batch of up to 25 producer events (or pipe JSON)
                                            attention.opened/updated accept class (money|irreversible|scope|bookkeeping) and defaultOptionId
@@ -1941,6 +3308,14 @@ Commands:
   mission answers -w WS [--run ID] [--all] Read unacknowledged answers for current answered items, each with its ackCommand; --all includes history
   mission ack -w WS --run ID --answer ID --generation N --revision N --event-id ID --producer-at MS
                                            Acknowledge one persisted answer after reading and applying it
+  mc ask -w WS --json @DRAFT [--fix]      Check one attention.opened/attention.updated event's question against the
+                                           server's format rules (ADR-0037), then post it. Defects print one per line
+                                           (field: measured, limit) and exit 2 with nothing posted; lint on an accepted
+                                           v1 question prints to stderr. --fix asks the curator to reshape a refused
+                                           draft: where reshape-question routes, a reshape that keeps every option id,
+                                           count, order, recommended, answerType, class and evidence URL is checked and
+                                           posted (the original kept in question_json.source); elsewhere it is logged,
+                                           the defects print and it exits 2. "mc" is "mission".
   portfolio board --workspaces WS,WS       Scoped release blockers for the explicitly selected workspaces (current manager tab and read grants)
   portfolio report -w WS --json '{...}'    Current orchestrator reports a revisioned blocker; see API guide for schema
   portfolio applied -w WS --json '{...}'   Current orchestrator records application of a routed note, not blocker resolution
@@ -1960,6 +3335,36 @@ Commands:
   lease break NAME --reason TEXT           Remove another holder's lease (admin token only; audited)
   lease release-epic SLUG [--kind num]     Release an epic's survives-tab claims (run it while you still hold
                                            epic:SLUG; a tab of a claiming workspace releases its own claims)
+  curator status [--json]                  The local curator (ADR-0038): up or down, queue, each task's state
+                                           (shadow | routing), the shadow clock and the kodit measure
+  curator eval --task T [--split holdout|train|all] [--no-wait] [--json]
+                                           Evaluate a task (held-out 30% by default: counts only): precision and
+                                           recall per class, each check's 95% lower bound, and the rules' scores
+  curator promote|demote --task T          Move a task to routing (refused below the 95% lower bound, before 72 h
+                                           and 30 labelled shadow rows of the live prompt, or without the owner's
+                                           spot check) or back to shadow; admin
+  curator label-queue --task T | label-import --task T --file F
+                                           The blind label pass: queue the live prompt's shadow calls (ids only);
+                                           import their gold labels (admin)
+  curator spot-check open -w WS [--task T] [--run RUN] | spot-check show [--task T] [--json]
+                                           Open the owner's spot check as one Mission Control item; read it
+  curator reshape-pairs | judge-import --file F [--judge NAME]
+                                           The reshape gate's judge (story 23): print the last evaluation's
+                                           original and reshaped drafts with their sha256 to stdout (admin);
+                                           import the verdicts, bound to that run and each sha256 (admin)
+  curator message -w WS ID [--json]        One owner message by its history id (a standing-order candidate
+                                           names the id, never the text); a tab reads its own workspace's
+  pool show [--json]                       The compute pool (ADR-0039): per host threads, load, free memory, disk,
+                                           GPU and slots used/cap; an unknown host shows no figures, never 0
+  pool acquire --kind gate|build|tab [--mem GB] [--ttl 60m] [--panel-type T] [--role R]
+                                           Place the work and take a slot lease: prints {host, local, slot, lease,
+                                           expiresAt, reason, gateHost}. Gates and builds go by load per thread,
+                                           then memory; tabs by memory and never refused. Exit 3 pool-full; exit 6
+                                           when no answer comes in 2 s: do what you do without the pool and log it
+                                           (gate.no-local-fallback repositories never run here). A gate passes --ttl
+                                           of at least its gate timeout
+  pool release LEASE                       Release a slot you hold (pool:<host>/<kind>-<n>); a slot also ends
+                                           with its TTL (default 60m, at most 24h) or its holder tab
   inbox list -w WS [--all]                 Server notices (notes, watches, deploys, Mission Control) queued or held
                                            for WS's tabs; --all adds delivered and dropped (kept 7 days)
   inbox retry ID                           Re-queue a held notice once (the target workspace, the note's sender, or admin).
@@ -2006,6 +3411,18 @@ Commands:
   watch list [-w WS] [--json]              Watches of your workspace: owner tab (live/closed), age, expiry, last check,
                                            the last error text
   watch clear ID                           Remove a watch (its owner tab or admin)
+  wait add --auth PROFILE [--item KEY] [--ttl 24h] [--label TEXT]
+                                           Wait on the owner's AWS SSO sign-in: the server reads that profile's SSO
+                                           cache file every 60 s (no aws process, DEC-261) and sends ONE inbox line
+                                           when its token is valid; a ledger deploy-auth wait on KEY, or naming the
+                                           profile in its clear input, clears then. 2 a profile that is not SSO
+  so add (-w WS | --fleet) --text TEXT --source "MESSAGE ID, UTC DATE" [--scope S] [--check NAME|prose]
+                                           Add a standing order SO-<n>: written into the workspace prompt file of
+                                           every Claude tab it reaches, and one urgent line to each live tab. A
+                                           fleet order needs the admin token. Over 8192 bytes of active orders for
+                                           one workspace is refused with the measured size (exit 2 so-too-large)
+  so strike SO-N --reason TEXT             Strike an order; it stays in its file, struck, and live tabs are told
+  so list [-w WS] [--all] [--json]         The active orders you load (--all: struck ones too), with their sources
   api-guide                                Print full HTTP API reference
   help                                     Show this usage
 
@@ -2072,9 +3489,22 @@ const main = async () => {
       return cmdFlow(args.slice(1));
     case 'spend':
       return cmdSpend(args.slice(1));
+    case 'board':
+      return cmdBoard(args.slice(1));
+    case 'ledger':
+      return cmdLedger(args.slice(1));
+    case 'events':
+      return cmdEvents(args.slice(1));
+    case 'effects':
+      return cmdEffects(args.slice(1));
     case 'lease':
       return cmdLease(args.slice(1));
+    case 'pool':
+      return cmdPool(args.slice(1));
+    case 'curator':
+      return cmdCurator(args.slice(1));
     case 'mission':
+    case 'mc':
       return cmdMission(args.slice(1));
     case 'portfolio':
       return cmdPortfolio(args.slice(1));
@@ -2090,6 +3520,12 @@ const main = async () => {
       return cmdDeploy(args.slice(1));
     case 'watch':
       return cmdWatch(args.slice(1));
+    case 'handoff':
+      return cmdHandoff(args.slice(1));
+    case 'wait':
+      return cmdWait(args.slice(1));
+    case 'so':
+      return cmdSo(args.slice(1));
     case 'tab':
       switch (sub) {
         case 'list': return cmdTabList(rest);

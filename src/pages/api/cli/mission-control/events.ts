@@ -4,10 +4,8 @@ import { FOREIGN_MUTATION_HINT } from '@/lib/cli-error';
 import { isOwnWorkspace } from '@/lib/cli-utils';
 import { MissionControlError } from '@/lib/mission-control-errors';
 import { sendMissionError, setMissionHeaders } from '@/lib/mission-control-http';
-import { resolveMissionTargetIdentity } from '@/lib/mission-control-runtime';
-import { getMissionControlStore, type IMissionEventAuthority, type IMissionItemOpener } from '@/lib/mission-control-store';
-import { parseMissionEvents } from '@/lib/mission-control-validation';
-import { getWorkspaceById } from '@/lib/workspace-store';
+import { applyMissionEventBatch } from '@/lib/mission-control-events';
+import type { IMissionItemOpener } from '@/lib/mission-control-store';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '64kb' } },
@@ -30,46 +28,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       throw new MissionControlError(403, 'forbidden', `Mission Control writes require this workspace token. ${FOREIGN_MUTATION_HINT}`);
     }
     const body = req.body as { events?: unknown } | null;
-    const events = parseMissionEvents(body?.events);
-    if (events.some((event) => event.workspaceId !== workspaceId)) {
-      throw new MissionControlError(403, 'forbidden', 'Every event must match the authorized workspace');
-    }
-    const store = getMissionControlStore();
-    const unreplayed = store.unreplayedEventIds(events);
-    const identities = new Map<string, Awaited<ReturnType<typeof resolveMissionTargetIdentity>>>();
-    await Promise.all(events.map(async (event) => {
-      if (!unreplayed.has(event.eventId)) return;
-      const tabId = event.type === 'run.started' || event.type === 'run.resumed'
-        ? event.payload.tabId
-        : (event.type === 'attention.opened' || event.type === 'attention.updated')
-          ? event.payload.humanReview?.reviewerTabId
-          : undefined;
-      if (tabId) identities.set(event.eventId, await resolveMissionTargetIdentity(event.workspaceId, tabId));
-    }));
-    const needsReviewAuthority = events.some((event) => unreplayed.has(event.eventId)
-      && (event.type === 'attention.opened' || event.type === 'attention.updated')
-      && event.payload.humanReview !== undefined);
-    const configuredOrchestratorTabId = needsReviewAuthority
-      ? (await getWorkspaceById(workspaceId))?.orchestration?.orchestratorTabId ?? null
-      : null;
     // Who opened an item: the server-resolved caller tab, never a payload claim (ADR-0023). Advisory only.
     const opener: IMissionItemOpener | null = !caller.admin && caller.tabId && caller.workspaceId === workspaceId
       && caller.identity !== 'none'
       ? { tabId: caller.tabId, identity: caller.identity }
       : null;
-    const authorities = new Map<string, IMissionEventAuthority>();
-    for (const event of events) {
-      if (!unreplayed.has(event.eventId)) continue;
-      authorities.set(event.eventId, {
-        resolvedIdentity: identities.get(event.eventId) ?? null,
-        configuredOrchestratorTabId,
-        opener: event.type === 'attention.opened' ? opener : null,
-      });
-    }
-    return res.status(200).json({
-      ...store.applyEvents(events, authorities),
-      humanInboxPolicy: store.humanInboxPolicy(workspaceId),
-    });
+    return res.status(200).json(await applyMissionEventBatch(workspaceId, body?.events, opener));
   } catch (error) {
     sendMissionError(res, error);
   }

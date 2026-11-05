@@ -22,6 +22,14 @@ const cliUtils = vi.hoisted(() => ({
 }));
 
 const live = vi.hoisted(() => ({ entries: {} as Record<string, { cliState: TCliState }>, waiting: new Set<string>() }));
+const tabEvents = vi.hoisted(() => ({
+  route: vi.fn(async (_event: unknown) => ({ class: 'digest', delivered: false, seq: 1, duplicate: false })),
+}));
+const ledger = vi.hoisted(() => ({ store: null as unknown as import('@/lib/ledger-store').LedgerStore }));
+vi.mock('@/lib/ledger-store', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/ledger-store')>();
+  return { ...actual, getLedgerStore: () => ledger.store };
+});
 const dispatchPolicy = vi.hoisted(() => vi.fn<
   (workspaceId: string, target: ITab, options?: unknown) => Promise<{ ok: boolean; error?: string }>
 >(async () => ({ ok: true })));
@@ -37,7 +45,11 @@ vi.mock('@/lib/tmux', () => Object.assign(tmux, { hasSessionOrUnreachable: tmux.
 vi.mock('@/lib/agent-prompt-delivery', () => delivery);
 vi.mock('@/lib/cli-utils', () => cliUtils);
 vi.mock('@/lib/status-manager', () => ({
-  getStatusManager: () => ({ getAllForClient: () => live.entries, isWaitingAtPrompt: (id: string) => live.waiting.has(id) }),
+  getStatusManager: () => ({
+    getAllForClient: () => live.entries,
+    isWaitingAtPrompt: (id: string) => live.waiting.has(id),
+    routeTabEvent: tabEvents.route,
+  }),
 }));
 
 interface IFakeResponse {
@@ -116,6 +128,8 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
     dispatchPolicy.mockResolvedValue({ ok: true });
     live.entries = {};
     live.waiting = new Set();
+    const { LedgerStore } = await import('@/lib/ledger-store');
+    ledger.store = new LedgerStore(':memory:');
     tmux.hasSession.mockResolvedValue(true);
     tmux.isContentPendingInComposer.mockResolvedValue(false);
     cliUtils.authorizeWorkspaceInput.mockResolvedValue({ type: 'workspace', workspaceId: WORKSPACE_ID });
@@ -129,11 +143,61 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toEqual({ status: 'sent', submitted: true, cliState: 'idle' });
     expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, 'run the tests');
+    expect(ledger.store.tabEvents.list(WORKSPACE_ID, { since: 0, limit: 5 })).toEqual([
+      expect.objectContaining({ tabId: TAB_ID, kind: 'tab-send', text: 'run the tests', class: 'urgent', deliveredAt: expect.any(Number) }),
+    ]);
     expect(dispatchPolicy).toHaveBeenCalledWith(
       WORKSPACE_ID,
       expect.objectContaining({ id: TAB_ID }),
       { consumeBootstrapForTarget: true },
     );
+  });
+
+  it('holds a copy or a no-reply message for the tab\'s digest instead of typing it (ADR-0035)', async () => {
+    live.entries = { [TAB_ID]: { cliState: 'busy' } };
+    const content = 'SCOPE -> ORCH (cc worker): slice 4 contract filed';
+    const response = await call({ content });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toEqual({ status: 'queued', submitted: false, wakeClass: 'digest', duplicate: false });
+    expect(tabEvents.route).toHaveBeenCalledWith({ workspaceId: WORKSPACE_ID, tabId: TAB_ID, kind: 'tab-send', text: content, class: 'digest' });
+    expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+    expect(ledger.store.tabEvents.list(WORKSPACE_ID, { since: 0, limit: 5 })).toEqual([]);
+
+    tabEvents.route.mockResolvedValueOnce({ class: 'digest', delivered: true, seq: 2, duplicate: false });
+    expect((await call({ content: 'kit -> ORCH: done. No reply needed.' })).body).toMatchObject({ status: 'sent', submitted: true });
+    tabEvents.route.mockResolvedValueOnce({ class: 'log', delivered: false, seq: 3, duplicate: true });
+    expect((await call({ content })).body).toMatchObject({ status: 'logged', submitted: false, wakeClass: 'log', duplicate: true });
+  });
+
+  it('types a message addressed to the tab at once even when it carries a cc list (architect ruling 09-C1)', async () => {
+    const response = await call({ content: 'kit -> worker (cc SM): please rebase' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toMatchObject({ status: 'sent', submitted: true });
+    expect(tabEvents.route).not.toHaveBeenCalled();
+    expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, 'kit -> worker (cc SM): please rebase');
+  });
+
+  it('404s a no-reply message to a tab that is not in the workspace, and holds nothing', async () => {
+    cliUtils.findTab.mockResolvedValue(null);
+    const response = await call({ content: 'kit -> ORCH (cc worker): note' });
+    expect(response.statusCode).toBe(404);
+    expect(tabEvents.route).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 session-not-running for a no-reply message to a tab whose session is gone, and holds nothing', async () => {
+    tmux.hasSession.mockResolvedValue(false);
+    const response = await call({ content: 'kit -> ORCH (cc worker): note' });
+    expect(response.statusCode).toBe(409);
+    expect(response.body).toMatchObject({ error: 'agent-not-ready', code: 'session-not-running', tabId: TAB_ID });
+    expect(tabEvents.route).not.toHaveBeenCalled();
+  });
+
+  it('types a no-reply message into a terminal tab at once: only an agent tab has a digest', async () => {
+    cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+    const response = await call({ content: 'kit -> ORCH (cc worker): note' });
+    expect(response.statusCode).toBe(200);
+    expect(tabEvents.route).not.toHaveBeenCalled();
+    expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, 'kit -> ORCH (cc worker): note');
   });
 
   it('a remote host that does not answer is retryable 503 remote-host-unreachable, never session-not-running (ADR-0022)', async () => {

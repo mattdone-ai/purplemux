@@ -1,4 +1,6 @@
 import { execFile } from 'child_process';
+import os from 'os';
+import { SsoConfigError, findSsoProfile, readSsoToken, type TSsoTokenState } from '@/lib/aws-sso-cache';
 import type { ICaller } from '@/lib/caller';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import type { IWatchFields } from '@/lib/inbox-templates';
@@ -6,10 +8,12 @@ import { createLogger } from '@/lib/logger';
 import {
   WATCH_FAILURES_BEFORE_NOTICE,
   WatchError,
+  authProfile,
   checkCaps,
   checkSpec,
   createWatch,
   isDue,
+  isGithub,
   isWatchId,
   mutateWatches,
   newWatchId,
@@ -40,6 +44,20 @@ export interface IWatchDeps {
   runGh: (args: string[]) => Promise<TGhResult>;
   /** True when no unexpired record of the lease exists: an acquire by anyone would succeed. */
   leaseFree: (name: string) => Promise<boolean>;
+  /**
+   * An auth watch's proof (ADR-0041): the profile's AWS SSO cache file, read as a file. Throws
+   * SsoConfigError when the profile is not an SSO profile or a file is unreadable. Never runs `aws`.
+   */
+  ssoToken: (profile: string, now: number) => Promise<TSsoTokenState>;
+  /** Refuses a profile the AWS config does not define as SSO, at creation. */
+  ssoProfile: (profile: string) => Promise<unknown>;
+  /**
+   * The remote host a tab runs on (null: a local tab): an auth watch reads only this server's ~/.aws. `known: false`
+   * when the layout cannot be read or does not hold the tab: never taken for a local tab (confirm NIT 4).
+   */
+  tabHost: (workspaceId: string, tabId: string) => Promise<{ known: false } | { known: true; host: string | null }>;
+  /** This server's host name, for the refusal of a remote tab's auth watch. */
+  hostName: () => string;
   /** Live tabs, and the workspaces whose layout could not be read (their tabs are unknown, not closed). */
   liveTabs: () => Promise<{ tabs: ReadonlyArray<{ workspaceId: string; tabId: string }>; uncertainWorkspaceIds: ReadonlySet<string> }>;
   enqueue: (req: IEnqueueRequest<'watch'>) => Promise<{ item: IInboxItem }>;
@@ -102,6 +120,9 @@ export const settleChecks = (runs: string, statuses: string): { settled: boolean
 
 const SHA = /^[0-9a-f]{7,40}$/;
 
+/** An auth watch's baseline: the valid token it was created under, or null when it was raised on none. */
+export const authBaseline = (token: TSsoTokenState): string | null => (token.state === 'valid' ? `sso:${token.expiresAt}` : null);
+
 export class WatchManager {
   constructor(private readonly deps: IWatchDeps) {}
 
@@ -135,6 +156,18 @@ export class WatchManager {
 
   private async evaluate(w: IWatch): Promise<TOutcome> {
     if (w.kind === 'lease') return (await this.deps.leaseFree(w.target)) ? { type: 'fire', fields: { notice: 'free' } } : { type: 'wait' };
+    if (w.kind === 'auth') {
+      try {
+        const token = await this.deps.ssoToken(authProfile(w.target), this.deps.now());
+        // A sign-in is a change: the token valid at creation (its baseline) does not fire, a new one does (R8).
+        return token.state === 'valid' && authBaseline(token) !== w.baseline
+          ? { type: 'fire', fields: { notice: 'signed-in', expiresAt: token.expiresAt } }
+          : { type: 'wait' };
+      } catch (err) {
+        if (err instanceof SsoConfigError) return { type: 'fail', code: 'sso-config', message: err.message };
+        throw err;
+      }
+    }
     if (w.kind === 'ref') {
       const r = await this.refSha(w.target);
       if (!r.ok) return { type: 'fail', code: r.code, message: r.message };
@@ -230,8 +263,9 @@ export class WatchManager {
     const outcomes = new Map<string, TOutcome | 'expired' | 'dropped'>();
     // Evaluated outside the lock: a GitHub read may take its full timeout.
     for (const w of watches) {
-      if ((w.kind === 'lease') !== (lane === 'lease')) continue;
-      if (onlyLease !== undefined && w.target !== onlyLease) continue;
+      // The local lane holds every watch that reads no GitHub: leases and auth (ADR-0041).
+      if (isGithub(w) !== (lane === 'github')) continue;
+      if (onlyLease !== undefined && !(w.kind === 'lease' && w.target === onlyLease)) continue;
       if (now >= w.expiresAt && !w.pendingNotice) {
         outcomes.set(w.id, 'expired');
         continue;
@@ -338,6 +372,15 @@ export class WatchManager {
   /** The baseline sha, and whether the creation read already shows a PR merged or closed. */
   private async baseline(spec: IWatchSpec): Promise<{ sha: string | null; holds: boolean }> {
     if (spec.kind === 'lease') return { sha: null, holds: false };
+    if (spec.kind === 'auth') {
+      try {
+        await this.deps.ssoProfile(authProfile(spec.target));
+        return { sha: authBaseline(await this.deps.ssoToken(authProfile(spec.target), this.deps.now())), holds: false };
+      } catch (err) {
+        if (err instanceof SsoConfigError) throw new WatchError('watch-invalid', err.message);
+        throw err;
+      }
+    }
     const r = spec.kind === 'pr' ? await this.pull(spec.target) : await this.refSha(spec.target);
     if (r.ok) {
       if (!('head' in r)) return { sha: r.sha, holds: false };
@@ -354,6 +397,15 @@ export class WatchManager {
     }
     const spec = checkSpec(input);
     const owner = { workspaceId: caller.workspaceId, tabId: caller.tabId, verified: caller.verified, identity: caller.identity };
+    if (spec.kind === 'auth') {
+      const where = await this.deps.tabHost(owner.workspaceId, owner.tabId);
+      if (!where.known) {
+        throw new WatchError('caller-unresolved', `the host of tab ${owner.tabId} could not be read from the layout of ${owner.workspaceId}; an auth watch reads only this server's SSO cache: retry`);
+      }
+      if (where.host) {
+        throw new WatchError('watch-invalid', `an auth watch reads the SSO cache of this server's host (${this.deps.hostName()}); tab ${owner.tabId} runs on ${where.host}, whose sign-in it cannot see`);
+      }
+    }
     // A cheap cap check before the GitHub read, then the binding one under the lock.
     checkCaps(await this.deps.read(), spec, owner);
     const baseline = await this.baseline(spec);
@@ -404,7 +456,8 @@ export class WatchManager {
 
 // ─── runtime ──────────────────────────────────────────────────────────────
 
-const defaultDeps = async (): Promise<IWatchDeps> => {
+/** The runtime wiring; exported so a test can drive the real `onFired` link (review r1, R7). */
+export const defaultWatchDeps = async (): Promise<IWatchDeps> => {
   const [leaseStore, tabLifecycle, inboxStore] = await Promise.all([
     import('@/lib/lease-store'),
     import('@/lib/tab-lifecycle'),
@@ -421,7 +474,27 @@ const defaultDeps = async (): Promise<IWatchDeps> => {
       !leaseStore.pruneExpired(await leaseStore.readLeaseState(), Date.now()).state.leases.some((l) => l.name === name),
     liveTabs: tabLifecycle.readLiveTabs,
     enqueue: inboxStore.enqueueNotice,
+    ssoToken: (profile, now) => readSsoToken(profile, now),
+    ssoProfile: (profile) => findSsoProfile(profile),
+    tabHost: async (workspaceId, tabId) => {
+      const { collectAllTabs, readLayoutFile, resolveLayoutFile } = await import('@/lib/layout-store');
+      const layout = await readLayoutFile(resolveLayoutFile(workspaceId));
+      const tab = layout ? collectAllTabs(layout.root).find((t) => t.id === tabId) : undefined;
+      return tab ? { known: true, host: tab.host ?? null } : { known: false };
+    },
+    hostName: () => os.hostname(),
     onFired: async (watch, fields) => {
+      if (watch.kind === 'auth') {
+        // The notice is out: a ledger that cannot be written must not send it twice.
+        try {
+          const [{ clearAuthWaits }, { getLedgerStore }] = await Promise.all([import('@/lib/auth-waits'), import('@/lib/ledger-store')]);
+          const cleared = clearAuthWaits(getLedgerStore(), watch, Date.now());
+          if (cleared.length) log.info({ watchId: watch.id, cleared }, 'deploy-auth waits cleared by a signed-in watch');
+        } catch (err) {
+          log.warn(`watch ${watch.id}: deploy-auth waits not cleared: ${err instanceof Error ? err.message : err}`);
+        }
+        return;
+      }
       const { getPortfolioStore } = await import('@/lib/portfolio-store');
       getPortfolioStore().clearByWatch(watch, fields);
     },
@@ -438,7 +511,7 @@ interface IWatchRuntime {
 const g = globalThis as unknown as { __ptWatchRuntime?: IWatchRuntime; __ptWatchManager?: WatchManager };
 
 export const getWatchManager = async (): Promise<WatchManager> => {
-  if (!g.__ptWatchManager) g.__ptWatchManager = new WatchManager(await defaultDeps());
+  if (!g.__ptWatchManager) g.__ptWatchManager = new WatchManager(await defaultWatchDeps());
   return g.__ptWatchManager;
 };
 

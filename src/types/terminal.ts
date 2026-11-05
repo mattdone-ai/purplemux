@@ -10,6 +10,8 @@ export type TConnectionStatus =
 export type TDisconnectReason = 'max-connections' | 'pty-error' | 'session-not-found' | 'reconnect-exhausted' | null;
 
 export type TPanelType = 'terminal' | 'claude-code' | 'codex-cli' | 'grok-cli' | 'agent-sessions' | 'web-browser' | 'diff';
+/** A claude-code tab's fixed tool configuration (ADR-0040). */
+export type TTabRole = 'evaluator';
 export type TDiffViewMode = 'split' | 'unified';
 export type TDiffTab = 'changes' | 'history';
 
@@ -30,6 +32,15 @@ export interface IAgentState {
 export interface IAgentLaunchConfig {
   model?: string;
   effort?: string;
+}
+
+/** What one launch of a tab's agent applies: its pins and its role (ADR-0040). */
+export interface IAgentLaunchOptions extends IAgentLaunchConfig {
+  role?: TTabRole;
+  /** An evaluator's one browsable origin (ADR-0040). */
+  previewOrigin?: string;
+  /** An evaluator's libpq service, exported as PGSERVICE at launch (ADR-0040). */
+  pgService?: string;
 }
 
 export interface ICodexLaunchProcessIdentity {
@@ -131,10 +142,26 @@ export interface ITab {
    */
   reportOn?: import('@/lib/turn-end').TTurnMarkerName[];
   /**
+   * The seat's handoff file (ADR-0036): set at create with `--handoff`, it makes the tab rotate from that file
+   * at its context threshold. Absent: the tab never rotates.
+   */
+  handoffPath?: string;
+  /** The tab's own rotate threshold (ADR-0036 §1); absent: the fleet's `context.rotate-at-tokens`. */
+  rotateAt?: import('@/types/context-lifecycle').TRotateAt;
+  /**
    * The ssh alias of the host whose tmux runs this tab (ADR-0022). Absent: this
    * server's host. Set once at create; a tab never changes host.
    */
   host?: string;
+  /**
+   * The tab's role (ADR-0040): every launch and resume applies its tool
+   * configuration. Set once at create; no update path clears it.
+   */
+  role?: TTabRole;
+  /** The origin an evaluator tab's browser may load (ADR-0040); set with the role, never changed. */
+  previewOrigin?: string;
+  /** The `~/.pg_service.conf` entry an evaluator tab's SQL probe connects to (ADR-0040); set with the role, never changed. */
+  pgService?: string;
   cliState?: TCliState;
   dismissedAt?: number | null;
   /** When `tab restart` last relaunched the tab under this id (ADR-0028), Unix ms. */

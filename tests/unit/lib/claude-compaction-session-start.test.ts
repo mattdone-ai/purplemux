@@ -7,6 +7,7 @@ import { translateClaudeHookEvent } from '@/lib/providers/claude/hook-handler';
 import { AutomatedPromptDispatcher, type IAutomatedPromptDispatcherDeps } from '@/lib/automated-prompt-dispatcher';
 import type { ITabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
+import { memoryLedgerTables } from './tab-events-harness';
 
 const workspaceStore = vi.hoisted(() => ({ getWorkspaceByIdCached: vi.fn(), getWorkspacesCached: vi.fn() }));
 vi.mock('@/lib/workspace-store', () => ({
@@ -82,7 +83,7 @@ describe('a compaction is not a turn end (L30)', () => {
     });
     await import('@/lib/providers');
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}));
+    const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), ...memoryLedgerTables());
     manager.registerTab('tab-o', { cliState: 'idle', workspaceId: 'ws-1', tabName: 'o', tmuxSession: 'tmux-tab-o', panelType: 'claude-code' });
     const entry: ITabStatusEntry = {
       cliState: 'busy', workspaceId: 'ws-1', tabName: 'w', tmuxSession: 'tmux-tab-w', panelType: 'claude-code', agentProviderId: 'claude',

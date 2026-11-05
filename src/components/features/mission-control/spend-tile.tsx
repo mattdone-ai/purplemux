@@ -5,6 +5,7 @@ import useSWR from 'swr';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatCost, formatTokenCount } from '@/lib/claude-tokens';
+import { formatCacheReads } from '@/lib/spend/spend-model';
 import type { ISpendRow, ISpendView } from '@/types/spend';
 
 const SPEND_URL = '/api/mission-control/spend';
@@ -68,6 +69,7 @@ const Figure = ({ title, view }: { title: string; view: ISpendView }) => (
     <p className="text-xs text-muted-foreground">{title}</p>
     <p className="text-xl font-semibold">{formatTokenCount(view.totals.totalTokens)} <span className="text-sm font-normal text-muted-foreground">tokens</span></p>
     <Cost row={view.totals} />
+    <p className="text-xs text-muted-foreground">{formatCacheReads(view.totals)}</p>
     {view.totals.sidechainTokens > 0 && <p className="text-xs text-muted-foreground">{formatTokenCount(view.totals.sidechainTokens)} by subagents</p>}
   </div>
 );

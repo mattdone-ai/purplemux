@@ -287,7 +287,7 @@ The existing route `POST /api/layout/pane/{p}/tabs/{t}` still recreates only a d
 
 ## Counting tabs from a repo hook
 
-A repository hook that limits parallel agents must count the tabs of its workspace. Obey three rules:
+The harness enforces one WIP cap: the per-workspace agent-tab cap (ADR-0027), fleet config `tabs.cap-per-workspace` (default 8), which `tabs.cap-per-workspace.<workspaceId>` overrides for one workspace (ADR-0039 §8). A repository hook that limits parallel agents reads that cap and keeps no number of its own. It must count the tabs of its workspace. Obey three rules:
 
 1. **purplemux runs tmux on its own socket, `-L purple`** (`TMUX_SOCKET` in `src/lib/tmux.ts`). A hook that runs `tmux ls` without `-L purple` reads the user's own tmux server. That server does not hold the purplemux tabs, so the count is wrong. A count of `tmux -L purple ls` is also wrong: it holds the sessions of every workspace and of every tab type.
 2. **Use `purplemux tab count -w WS`** (ADR-0027). It prints `<count> <cap>`: the agent tabs (`claude-code`, `codex-cli`, `grok-cli`) of workspace `WS`, and the WIP cap. `--json` adds `capSource` and `overCap`. Inside a tab, `WS` is `$PMUX_WORKSPACE_ID`. The server counts under the layout lock, the same count that refuses a create at the cap. The exit codes are in the api-guide (`GET /api/cli/workspaces/<WS>/tab-count`).

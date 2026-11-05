@@ -1,5 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { readMessageHistory, addMessageHistory, deleteMessageHistory } from '@/lib/message-history-store';
+import { curatorOnOwnerMessage } from '@/lib/curator-service';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('message-history');
@@ -20,6 +21,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 
     try {
       const entry = await addMessageHistory(wsId, message);
+      curatorOnOwnerMessage(wsId, entry.id, message, Date.parse(entry.sentAt) || Date.now());
       return res.status(201).json({ entry });
     } catch (e) {
       log.error({ err: e }, 'write failed');

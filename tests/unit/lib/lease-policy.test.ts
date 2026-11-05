@@ -25,6 +25,7 @@ describe('lease kind policy table (architecture.md "Lease kinds")', () => {
       'dev-write': [60 * M, 8 * H, false, false, false],
       deploy: [30 * M, 2 * H, false, false, true],
       epic: [null, 7 * D, false, false, false],
+      pool: [60 * M, D, false, false, false],
       num: [14 * D, 30 * D, true, true, false],
     });
     expect([OTHER_KIND.defaultTtlSeconds, OTHER_KIND.maxTtlSeconds, OTHER_KIND.survivesTab]).toEqual([30 * M, D, false]);
@@ -48,6 +49,8 @@ describe('parseLeaseName', () => {
     ['num:nomupay/treasury-api:rfc:0001', 'must be <owner>/<repo>:<adr|migration>:<nnnn>'],
     ['epic:a/b', 'must be an epic slug'],
     [`epic:${'a'.repeat(101)}`, 'must be an epic slug'],
+    ['pool:ai-lan/review-1', 'must be <host>/<gate|build|tab>-<n>'],
+    ['pool:ai-lan/gate-1000', 'must be <host>/<gate|build|tab>-<n>'],
   ])('refuses %j with a named rule', (raw, message) => {
     expect(() => parseLeaseName(raw)).toThrow(LeasePolicyError);
     expect(() => parseLeaseName(raw)).toThrow(message);
@@ -55,7 +58,7 @@ describe('parseLeaseName', () => {
 
   it('accepts every kind in its resource form', () => {
     for (const name of ['merge:nomupay/treasury-api', 'dev-deploy:nomupay/treasury-ui', 'dev-write:dev', 'deploy:purplemux',
-      'epic:purplemux-portfolio-coordination', 'num:nomupay/treasury-api:adr:0373', 'num:nomupay/treasury-event-consumer:migration:415', 'smoke:anything/goes#1']) {
+      'epic:purplemux-portfolio-coordination', 'num:nomupay/treasury-api:adr:0373', 'num:nomupay/treasury-event-consumer:migration:415', 'pool:ai-lan/gate-1', 'pool:mdserver1/tab-12', 'smoke:anything/goes#1']) {
       expect(parseLeaseName(name).name).toBe(name);
     }
   });

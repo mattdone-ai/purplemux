@@ -3,6 +3,7 @@ import { InboxDispatcher, type IInboxDispatcherDeps } from '@/lib/inbox-dispatch
 import { enqueueInState } from '@/lib/inbox-store';
 import type { IInboxState } from '@/types/inbox';
 import type { ITabStatusEntry } from '@/types/status';
+import { memoryLedgerTables } from './tab-events-harness';
 
 // The inbox asks the REAL StatusManager whether a busy tab is WAITING at its
 // prompt (architect ruling A′-inbox), so a relaunch since the stop closes it.
@@ -26,7 +27,7 @@ describe('inbox × StatusManager.isWaitingAtPrompt', () => {
 
   it('delivers to a WAITING tab, and types nothing after markAgentLaunch', async () => {
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(undefined, vi.fn(async () => true), vi.fn(async () => {}));
+    const manager = new StatusManager(undefined, vi.fn(async () => true), vi.fn(async () => {}), ...memoryLedgerTables());
     const stopAt = Date.now() - 1_000;
     const entry: ITabStatusEntry = {
       cliState: 'busy', workspaceId: 'ws-1', tabName: 'w', tmuxSession: 'pt-ws-1-pane-a-tab-w', panelType: 'claude-code',

@@ -7,6 +7,9 @@ import {
   buildFcmMessage,
   createFcmChannel,
   createFcmChannelFromEnv,
+  FCM_DATA_BUDGET_BYTES,
+  FCM_DATA_LIMIT_BYTES,
+  fcmDataBytes,
   isReapableFcmError,
   payloadViolationFields,
   registerFcmChannel,
@@ -175,8 +178,54 @@ describe('buildFcmMessage', () => {
     expect(buildFcmMessage(alert('review'), {}, 't').message.data).not.toHaveProperty('flag');
   });
 
-  it('asks for high priority only when the alert needs input', () => {
+  it('carries an attention-opened alert\'s itemId, and no itemId on another kind', () => {
+    const message = buildFcmMessage({ ...alert('attention-opened'), itemId: 'item-7' }, {}, 't');
+
+    expect(message.message.data.kind).toBe('attention-opened');
+    expect(message.message.data.itemId).toBe('item-7');
+    expect(buildFcmMessage(alert('review'), {}, 't').message.data).not.toHaveProperty('itemId');
+  });
+
+  it('carries a v2 question summary as JSON; a v1 summary, unbounded, is left to the socket (story 33 AC 3)', () => {
+    const question = {
+      formatVersion: 2 as const, decision: 'Ship?', answerType: 'confirm' as const, revision: 2,
+      options: [{ id: 'yes', label: 'Yes', needsText: false }, { id: 'no', label: 'No', needsText: false }],
+    };
+    const message = buildFcmMessage({ ...alert('attention-opened'), itemId: 'item-7', question }, {}, 't');
+    expect(JSON.parse(message.message.data.question)).toEqual(question);
+    const v1 = buildFcmMessage({ ...alert('attention-opened'), itemId: 'item-7', question: { ...question, formatVersion: 1 } }, {}, 't');
+    expect(v1.message.data).not.toHaveProperty('question');
+    expect(buildFcmMessage(alert('review'), {}, 't').message.data).not.toHaveProperty('question');
+  });
+
+  // Round 2 (R5): the data map is measured in UTF-8; past the budget the summary is left out (the phone opens the item).
+  it('measures the data map in UTF-8 bytes, CJK and control characters included', () => {
+    expect(fcmDataBytes({ a: 'abc' })).toBe(Buffer.byteLength('{"a":"abc"}', 'utf8'));
+    expect(fcmDataBytes({ a: '決定' })).toBe(Buffer.byteLength('{"a":"決定"}', 'utf8'));
+    expect(fcmDataBytes({ a: '\u0001' })).toBe(Buffer.byteLength(JSON.stringify({ a: '\u0001' }), 'utf8'));
+  });
+
+  it('keeps a v2 summary that fits, and omits one that would pass the budget', () => {
+    const question = (decision: string, label: string, idControls = 4) => ({
+      formatVersion: 2 as const, decision, answerType: 'single' as const, revision: 1,
+      options: Array.from({ length: 4 }, (_, i) => ({ id: `opt-${i}-${'\u0007'.repeat(idControls)}`, label, needsText: false })),
+    });
+    const fits = buildFcmMessage({ ...alert('attention-opened'), itemId: 'i', question: question('出荷しますか？', 'はい') }, {}, 't');
+    expect(JSON.parse(fits.message.data.question).decision).toBe('出荷しますか？');
+    expect(fcmDataBytes(fits.message.data)).toBeLessThanOrEqual(FCM_DATA_BUDGET_BYTES);
+
+    const big = { ...alert('attention-opened'), itemId: 'i', question: question('決'.repeat(120), '\u0001選'.repeat(30), 80) };
+    expect(fcmDataBytes({ ...buildFcmMessage({ ...big, question: undefined }, {}, 't').message.data, question: JSON.stringify(big.question) }))
+      .toBeGreaterThan(FCM_DATA_BUDGET_BYTES);
+    const omitted = buildFcmMessage(big, {}, 't');
+    expect(omitted.message.data).not.toHaveProperty('question');
+    expect(omitted.message.data.itemId).toBe('i');
+    expect(fcmDataBytes(omitted.message.data)).toBeLessThanOrEqual(FCM_DATA_BUDGET_BYTES);
+  });
+
+  it('asks for high priority only when the alert needs the human\'s input', () => {
     expect(buildFcmMessage(alert('needs-input'), {}, 't').message.android.priority).toBe('high');
+    expect(buildFcmMessage(alert('attention-opened'), {}, 't').message.android.priority).toBe('high');
     expect(buildFcmMessage(alert('review'), {}, 't').message.android.priority).toBe('normal');
     expect(buildFcmMessage(alert('work-stalled'), {}, 't').message.android.priority).toBe('normal');
   });
@@ -297,6 +346,27 @@ describe('createFcmChannel', () => {
     });
     await wrongProject.channel.deliver(alert(), {});
     expect(wrongProject.dropped).toEqual([]);
+  });
+
+  it('never sends a data map over the FCM limit, so an oversize send can never reap the registration (R5)', async () => {
+    const respond = vi.fn(() => errorResponse(400, { error: { status: 'INVALID_ARGUMENT', message: 'Message is too big' } }));
+    const { channel, sent, dropped } = setup([record('tok-a', 'D1')], { respond });
+    const huge = { ...alert('attention-opened'), workspaceName: '名'.repeat(FCM_DATA_LIMIT_BYTES) };
+
+    await channel.deliver(huge, {});
+
+    expect(sent).toEqual([]);
+    expect(respond).not.toHaveBeenCalled();
+    expect(dropped).toEqual([]);
+  });
+
+  it('never reaps on a size refusal, whatever its status', async () => {
+    const { channel, dropped } = setup([record('tok-a', 'D1')], {
+      respond: () => errorResponse(400, { error: { status: 'INVALID_ARGUMENT', message: 'Request payload size exceeds the limit: 4096 bytes.' } }),
+    });
+    await channel.deliver(alert(), {});
+    expect(dropped).toEqual([]);
+    expect(isReapableFcmError({ error: { status: 'INVALID_ARGUMENT', message: 'Message is too big' } })).toBe(false);
   });
 
   it('keeps sending to the remaining tokens when one request throws', async () => {

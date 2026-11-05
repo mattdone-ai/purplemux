@@ -179,6 +179,13 @@ describe('buildFleetView: WIP per workspace (ADR-0027)', () => {
     expect(Object.keys(view.wip ?? {})).toEqual(['ws-1', 'ws-2']);
   });
 
+  it('a workspace key overrides the fleet cap for that workspace only (story 17 AC 8)', async () => {
+    deps.workspaces = async () => [{ id: 'ws-ldhziO', name: 'v2' }, { id: 'ws-2', name: 'Other' }];
+    deps.agentTabs = async (id) => (id === 'ws-2' ? [tab('tab-x')] : [tab('tab-a'), tab('tab-b')]);
+    deps.config = async (key) => ({ 'tabs.cap-per-workspace': '8', 'tabs.cap-per-workspace.ws-ldhziO': '14' })[key] ?? null;
+    expect((await buildFleetView(deps, NOW)).wip).toEqual({ 'ws-ldhziO': { count: 2, cap: 14, overCap: false }, 'ws-2': { count: 1, cap: 8, overCap: false } });
+  });
+
   it('defaults to a cap of 8', async () => {
     expect((await buildFleetView(deps, NOW)).wip).toEqual({ 'ws-1': { count: 4, cap: 8, overCap: false } });
   });

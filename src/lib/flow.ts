@@ -27,13 +27,13 @@ export const MAX_FLOW_LOCKS = 20;
 export const MAX_FLOW_METERS = 50;
 export const MAX_FLOW_FLAGS = 20;
 
-const FUTURE_TOLERANCE_MS = 5 * 60_000;
+export const FUTURE_TOLERANCE_MS = 5 * 60_000;
 // `flow show` prints producer strings raw to other workspaces' terminals, so no string carries a
 // control character or a bidi control. An identifier also refuses every other format character:
 // two look-alike names must not both pass a uniqueness check. Prose (a label, a flag text) keeps
 // them, since ZWJ emoji, ZWNJ scripts, flag tags and soft hyphens are legitimate text.
-const IDENTIFIER_REFUSED = /[\p{Cc}\p{Cf}]/u;
-const PROSE_REFUSED = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
+export const IDENTIFIER_REFUSED = /[\p{Cc}\p{Cf}]/u;
+export const PROSE_REFUSED = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
 const UNPRINTABLE = /[\p{Cc}\p{Cf}]/gu;
 
 type TStringKind = 'identifier' | 'prose';
@@ -57,7 +57,7 @@ const escaped = (text: string): string =>
   text.replace(UNPRINTABLE, (char) => `\\u{${char.codePointAt(0)!.toString(16).toUpperCase()}}`);
 
 /** The seen value for a refusal: never a raw control, format or bidi character, never a split code point. */
-const show = (value: unknown): string => {
+export const show = (value: unknown): string => {
   if (value === undefined) return 'nothing';
   const text = escaped(JSON.stringify(value) ?? String(value));
   const points = Array.from(text);

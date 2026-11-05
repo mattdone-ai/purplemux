@@ -18,6 +18,8 @@ const log = createLogger('session-tabs');
 export interface ISessionTabBinding {
   workspaceId: string;
   tabId: string;
+  /** The tab's name at the last recorded sighting: the seat of a tab closed since (harness-flow-loop 04). */
+  tabName?: string;
   firstSeenAt: number;
   lastSeenAt: number;
 }
@@ -32,6 +34,7 @@ export interface ISessionTabSighting {
   sessionId: string;
   workspaceId: string;
   tabId: string;
+  tabName?: string;
   seenAt: number;
 }
 
@@ -70,6 +73,7 @@ const isBinding = (value: unknown): value is ISessionTabBinding => {
   if (!value || typeof value !== 'object') return false;
   const b = value as Record<string, unknown>;
   return typeof b.workspaceId === 'string' && typeof b.tabId === 'string'
+    && (b.tabName === undefined || typeof b.tabName === 'string')
     && Number.isFinite(b.firstSeenAt) && Number.isFinite(b.lastSeenAt);
 };
 
@@ -128,6 +132,7 @@ const apply = (data: ISessionTabsData, sighting: ISessionTabSighting): boolean =
   if (current && current.workspaceId === sighting.workspaceId && current.tabId === sighting.tabId) {
     if (sighting.seenAt <= current.lastSeenAt) return false;
     current.lastSeenAt = sighting.seenAt;
+    if (sighting.tabName) current.tabName = sighting.tabName;
     return true;
   }
   // A session moves to another tab only on a newer sighting (a resume in another tab).
@@ -135,6 +140,7 @@ const apply = (data: ISessionTabsData, sighting: ISessionTabSighting): boolean =
   data.bindings[key] = {
     workspaceId: sighting.workspaceId,
     tabId: sighting.tabId,
+    ...(sighting.tabName ? { tabName: sighting.tabName } : {}),
     firstSeenAt: sighting.seenAt,
     lastSeenAt: sighting.seenAt,
   };
@@ -158,7 +164,7 @@ export const recordSessionTab = async (sighting: Omit<ISessionTabSighting, 'seen
   const key = bindingKey(sighting.providerId, sighting.sessionId);
   const known = seen.get(key);
   if (known && known.workspaceId === sighting.workspaceId && known.tabId === sighting.tabId
-    && now - known.lastSeenAt < TOUCH_INTERVAL_MS) return;
+    && (!sighting.tabName || known.tabName === sighting.tabName) && now - known.lastSeenAt < TOUCH_INTERVAL_MS) return;
   if (refusedRecently(now)) return;
   await withLock(async () => {
     if (refusedRecently(now)) return;

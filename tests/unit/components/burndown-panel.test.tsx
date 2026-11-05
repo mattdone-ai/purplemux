@@ -128,18 +128,18 @@ describe('burndown panel through the SWR cache', () => {
 describe('burndown chart tokens line', () => {
   const history = [row('a', '2026-10-07T10:00:00Z', 16), row('a', '2026-10-08T10:00:00Z', 12), row('a', GENERATED, 8)];
   const tokens = [
-    { day: '2026-10-06', totalTokens: 9_000_000, sidechainTokens: 0 },
-    { day: '2026-10-07', totalTokens: 2_000_000, sidechainTokens: 500_000 },
-    { day: '2026-10-08', totalTokens: 4_000_000, sidechainTokens: 0 },
-    { day: '2026-10-09', totalTokens: 1_000_000, sidechainTokens: 0 },
+    { day: '2026-10-06', totalTokens: 9_000_000, sidechainTokens: 0, cacheReadTokens: 8_000_000 },
+    { day: '2026-10-07', totalTokens: 2_000_000, sidechainTokens: 500_000, cacheReadTokens: 1_000_000 },
+    { day: '2026-10-08', totalTokens: 4_000_000, sidechainTokens: 0, cacheReadTokens: 3_000_000 },
+    { day: '2026-10-09', totalTokens: 1_000_000, sidechainTokens: 0, cacheReadTokens: 500_000 },
   ];
 
   it('draws tokens per day on a second axis over the days the chart spans', () => {
     const html = renderToStaticMarkup(<BurndownChart rows={history} tokensByDay={tokens} />);
     expect(html).toContain('data-series="tokens"');
     expect(html).toContain('var(--ui-purple)');
-    expect(html).toContain('workspace 7.0M tokens over 3 days, peak 4.0M a day');
-    expect(html).toContain('Workspace tokens/day (own scale, peak 4.0M)');
+    expect(html).toContain('workspace 7.0M tokens over 3 days, peak 4.0M a day, 4.5M cache reads (64% of tokens)');
+    expect(html).toContain('Workspace tokens/day (own scale, peak 4.0M) · 4.5M cache reads (64% of tokens)');
     expect(html).not.toContain('right axis');
     const d = /data-series="tokens" d="([^"]+)"/.exec(html)?.[1] ?? '';
     expect(d.match(/[ML]/g)).toHaveLength(3);

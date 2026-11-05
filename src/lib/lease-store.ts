@@ -474,6 +474,30 @@ export const acquireLease = async (
   return { lease: result.value!.lease, outcome: result.value!.outcome };
 };
 
+/**
+ * Acquire a lease whose name is chosen from the state inside the lock (a pool
+ * slot: the placement and the free slot number are read and taken in one
+ * transaction, so two callers can never take the same slot). `choose` throws
+ * to refuse; nothing is written then.
+ */
+export const acquireChosenLease = async <T>(
+  holder: ILeaseHolder,
+  authority: ILeaseAuthority,
+  choose: (state: ILeaseState, now: number) => { name: string; ttlSeconds?: number; note?: string; value: T },
+): Promise<{ lease: ILease; value: T }> => {
+  requireHolder(holder);
+  const now = authority.now();
+  const result = await transact(now, (state) => {
+    const chosen = choose(state, now);
+    const { name, kind, resource } = parseLeaseName(chosen.name);
+    if (policyFor(kind).orchestratorOnly) throw new LeaseError('forbidden', `${kind} leases cannot be chosen by placement`);
+    const ttlSeconds = resolveTtl(kind, chosen.ttlSeconds, holder);
+    const r = acquireInState(state, { name, kind, resource, holder, ttlSeconds, epic: null, note: resolveNote(chosen.note) }, now);
+    return { state: r.state, value: { lease: r.lease, value: chosen.value }, effects: [{ type: 'acquired', lease: r.lease, outcome: r.outcome }] };
+  });
+  return result.value!;
+};
+
 export const renewLease = async (
   rawName: unknown,
   ttlSeconds: number | null | undefined,

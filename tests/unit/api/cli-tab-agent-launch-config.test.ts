@@ -52,6 +52,8 @@ vi.mock('@/lib/status-manager', () => ({
 }));
 vi.mock('@/lib/agent-dispatch-policy', () => dispatch);
 vi.mock('@/lib/providers/codex/managed-launch', () => managed);
+const browser = vi.hoisted(() => ({ checkEvaluatorBrowser: vi.fn() }));
+vi.mock('@/lib/tab-role', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/tab-role')>()), ...browser }));
 const reportsTo = vi.hoisted(() => ({ checkReportsTo: vi.fn() }));
 // The pure reportOn helpers (ADR-0025) run for real; only the tmux-backed target check is stubbed.
 vi.mock('@/lib/reports-to', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/reports-to')>()), ...reportsTo }));
@@ -76,6 +78,7 @@ describe('POST /api/cli/tabs launch config', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dispatch.checkAgentDispatchPolicy.mockResolvedValue({ ok: true });
+    browser.checkEvaluatorBrowser.mockResolvedValue({ ok: true, version: 'Google Chrome for Testing 156.0.8078.4' });
     codex.buildLaunchCommand.mockResolvedValue('codex-command');
     managed.prepareCodexManagedLaunch.mockResolvedValue({
       ok: true,
@@ -189,6 +192,55 @@ describe('POST /api/cli/tabs launch config', () => {
     expect(reportsTo.checkReportsTo).toHaveBeenCalledWith('ws-pins', 'tab-other');
     expect(response.statusCode).toBe(400);
     expect(response.body).toMatchObject({ code: 'reports-to-invalid' });
+    expect(layout.addTabToPane).not.toHaveBeenCalled();
+  });
+
+  it('creates an evaluator as a claude-code tab with the role and the preview origin stored (ADR-0040)', async () => {
+    layout.addTabToPane.mockResolvedValue({ id: 'tab-eval', sessionName: 'pt-ws-pins-pane-one-tab-eval', name: 'evaluator', order: 1, panelType: 'claude-code', role: 'evaluator', previewOrigin: 'http://localhost:3100' });
+    const { default: handler } = await import('@/pages/api/cli/tabs');
+    const response = fakeResponse();
+
+    await handler({
+      method: 'POST',
+      headers: { 'x-pmux-token': 'workspace-token' },
+      body: { workspaceId: 'ws-pins', role: 'evaluator', previewUrl: 'http://localhost:3100/batches', pgService: 'preview_42' },
+    } as unknown as NextApiRequest, response.res);
+
+    expect(browser.checkEvaluatorBrowser).toHaveBeenCalledTimes(1);
+    expect(layout.addTabToPane).toHaveBeenCalledWith(
+      'ws-pins', 'pane-one', undefined, '/repo', 'claude-code', undefined,
+      expect.objectContaining({ role: 'evaluator', previewOrigin: 'http://localhost:3100', pgService: 'preview_42' }),
+    );
+    expect(response.statusCode).toBe(201);
+    expect(response.body).toMatchObject({ panelType: 'claude-code', role: 'evaluator', previewOrigin: 'http://localhost:3100' });
+  });
+
+  it('refuses an evaluator on another engine, a remote host or an unknown role before creating anything', async () => {
+    const { default: handler } = await import('@/pages/api/cli/tabs');
+    const preview = 'http://localhost:3100';
+    for (const body of [
+      { workspaceId: 'ws-pins', panelType: 'codex-cli', role: 'evaluator', previewUrl: preview },
+      { workspaceId: 'ws-pins', role: 'evaluator', host: 'ai-server', previewUrl: preview },
+      { workspaceId: 'ws-pins', panelType: 'claude-code', role: 'reviewer', previewUrl: preview },
+      { workspaceId: 'ws-pins', role: 'evaluator' },
+      { workspaceId: 'ws-pins', role: 'evaluator', previewUrl: preview, pgService: 'bad name' },
+      { workspaceId: 'ws-pins', pgService: 'preview_42' },
+    ]) {
+      const response = fakeResponse();
+      await handler({ method: 'POST', headers: { 'x-pmux-token': 'workspace-token' }, body } as unknown as NextApiRequest, response.res);
+      expect(response.statusCode, JSON.stringify(body)).toBe(400);
+      expect(response.body).toMatchObject({ code: 'invalid-request', role: body.role ?? null });
+    }
+    expect(layout.addTabToPane).not.toHaveBeenCalled();
+  });
+
+  it('refuses the evaluator role on a headless Chrome under 149, naming the version', async () => {
+    browser.checkEvaluatorBrowser.mockResolvedValue({ ok: false, error: 'the evaluator role needs Chrome 149+ for its preview allow-list; /h/.local/bin/headless-chrome is Google Chrome for Testing 147.0.7727.15' });
+    const { default: handler } = await import('@/pages/api/cli/tabs');
+    const response = fakeResponse();
+    await handler({ method: 'POST', headers: { 'x-pmux-token': 'workspace-token' }, body: { workspaceId: 'ws-pins', role: 'evaluator', previewUrl: 'http://localhost:3100' } } as unknown as NextApiRequest, response.res);
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toMatchObject({ code: 'invalid-request', role: 'evaluator', error: expect.stringContaining('147.0.7727.15') });
     expect(layout.addTabToPane).not.toHaveBeenCalled();
   });
 

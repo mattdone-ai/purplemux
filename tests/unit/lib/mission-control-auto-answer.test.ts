@@ -119,6 +119,9 @@ const item = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionItem 
   class: 'bookkeeping',
   defaultOptionId: 'raise',
   autoAnswer: null,
+  evidenceLinks: [],
+  lint: [],
+  changes: null,
   createdAt: T0,
   updatedAt: T0,
   ...over,
@@ -246,7 +249,8 @@ describe('MissionControlStore.submitSystemAnswer', () => {
     const result = store.submitSystemAnswer('item-a', 1, rule, at);
     const recorded = store.snapshot().recentEvents.filter((entry) => entry.type === 'answer.recorded');
     expect(recorded).toHaveLength(1);
-    expect(recorded[0].payload).toEqual({ answerId: result.answer.id, submissionId: 'auto:item-a:1', actor: MISSION_AUTO_ANSWER_ACTOR });
+    expect(recorded[0].payload).toEqual({ answerId: result.answer.id, submissionId: 'auto:item-a:1', expectedRevision: 1,
+      appliedRevision: 1, actor: MISSION_AUTO_ANSWER_ACTOR });
   });
 
   it('writes the side-table row in the answer\'s transaction, with SCHEMA_VERSION 4 and no new column', () => {

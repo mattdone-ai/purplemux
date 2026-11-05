@@ -35,7 +35,7 @@ import { dismissTab } from '@/hooks/use-agent-status';
 import { navigateToTab, navigateToTabOrCreate, useLayoutStore } from '@/hooks/use-layout';
 import { findPane } from '@/lib/layout-tree';
 import type { ITabState } from '@/hooks/use-tab-store';
-import type { ICurrentAction } from '@/types/status';
+import type { ICurrentAction, IOrchestrationNudge } from '@/types/status';
 import GrokIcon from '@/components/icons/grok-icon';
 import { toSessionHistoryProvider } from '@/lib/agent-panel-types';
 import type { ISessionHistoryEntry, TSessionHistoryProvider } from '@/types/session-history';
@@ -51,6 +51,14 @@ const ACTION_ICONS: Record<string, typeof FileText> = {
   Grep: Search,
   Glob: Search,
   Agent: Users,
+};
+
+/** A held digest nudge is waiting by design, not undelivered (ADR-0035). */
+const nudgeDeliveryNote = (nudge: IOrchestrationNudge, t: (key: 'notDelivered' | 'heldForDigest' | 'logged') => string): string => {
+  if (nudge.delivered) return '';
+  if (nudge.wakeClass === 'digest') return ` · ${t('heldForDigest')}`;
+  if (nudge.wakeClass === 'log') return ` · ${t('logged')}`;
+  return ` · ${t('notDelivered')}`;
 };
 
 const ITEM_MOTION = {
@@ -674,7 +682,7 @@ export const NotificationPanel = ({ onNavigated, className }: { onNavigated?: ()
                       <span className="shrink-0 text-[10px] text-muted-foreground">{dayjs(nudge.at).format('HH:mm')}</span>
                     </span>
                     <span className="truncate pl-3 text-[11px] text-muted-foreground">
-                      {tOrch(`kind_${nudge.kind}`)}{nudge.delivered ? '' : ` · ${tOrch('notDelivered')}`}
+                      {tOrch(`kind_${nudge.kind}`)}{nudgeDeliveryNote(nudge, tOrch)}
                     </span>
                   </button>
                 ))}

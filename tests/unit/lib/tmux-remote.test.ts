@@ -324,4 +324,22 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(script.includes(token!)).toBe(false);
   });
 
+  it('ships the prompt with the standing orders active at each create: an order added between two creates is in the second only (ADR-0041)', async () => {
+    const { createSession } = await import('@/lib/tmux');
+    const { addOrder } = await import('@/lib/standing-orders-store');
+    const shippedPrompt = (script: string) => {
+      const m = script.match(/^put 'workspaces\/ws-r\/claude-prompt\.md' '([A-Za-z0-9+/=]*)' \d+$/m);
+      return m ? Buffer.from(m[1], 'base64').toString('utf-8') : null;
+    };
+    await createSession(REMOTE, 120, 40, '/srv/r', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    const first = shippedPrompt(calls.list[0].input ?? '');
+    expect(first).toContain('## Standing orders');
+    expect(first).not.toContain('Ship the remote prompt with every create.');
+    const { order } = await addOrder('ws-r', { text: 'Ship the remote prompt with every create.', source: 's' }, [], Date.now());
+    calls.list = [];
+    hostOf.map = new Map([[REMOTE, 'ai-server']]);
+    await createSession(REMOTE, 120, 40, '/srv/r', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    expect(shippedPrompt(calls.list[0].input ?? '')).toContain(`- **${order.id}** (ws-r; check: prose) Ship the remote prompt with every create.`);
+  });
+
 });

@@ -1,0 +1,77 @@
+{
+  "id": "q-multi",
+  "workspaceId": "ws-fixture",
+  "runId": "run-fixture",
+  "revision": 1,
+  "state": "open",
+  "storyIds": [],
+  "blockingScope": "story",
+  "canContinue": true,
+  "recommendation": null,
+  "context": "",
+  "evidence": {
+    "source": "agent",
+    "sourceId": "evt-q-multi",
+    "observedAt": 1762128000000,
+    "confidence": "confirmed"
+  },
+  "answerId": null,
+  "resolution": null,
+  "humanReview": {
+    "humanNeed": "decision",
+    "humanReason": "Only the owner can choose this.",
+    "handling": "The orchestrator checked the epic documents; they leave this open.",
+    "reviewerTabId": "tab-orch",
+    "binding": {
+      "tabId": "tab-orch",
+      "providerId": "claude",
+      "sessionId": "session-1",
+      "generation": 1,
+      "runtimeGeneration": "launch-1"
+    },
+    "eventId": "evt-review",
+    "reviewedAt": 1762128000000
+  },
+  "candidateReason": null,
+  "class": null,
+  "defaultOptionId": null,
+  "autoAnswer": null,
+  "lint": [],
+  "changes": null,
+  "createdAt": 1762124400000,
+  "updatedAt": 1762128000000,
+  "formatVersion": 2,
+  "kind": "question",
+  "title": "Owner decisions batch",
+  "decision": "Which of these owner decisions do you approve?",
+  "whyNow": "Five stories wait on these answers.",
+  "answerType": "multi",
+  "options": [
+    {
+      "id": "od-1",
+      "label": "OD-1 evaluator defines done",
+      "recommended": true,
+      "needsText": false
+    },
+    {
+      "id": "od-2",
+      "label": "OD-2 one gate outside the lock",
+      "recommended": true,
+      "needsText": false
+    },
+    {
+      "id": "od-3",
+      "label": "OD-3 freeze the rule archives",
+      "recommended": false,
+      "needsText": false
+    },
+    {
+      "id": "od-5",
+      "label": "OD-5 one execution pool",
+      "recommended": true,
+      "needsText": false
+    }
+  ],
+  "recommendationWhy": "Each has a measured cost per day while it waits.",
+  "evidenceLinks": []
+}

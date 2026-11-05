@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // ADR-0031: the events route accepts the producer's class and stated default, and refuses the
 // whole batch, naming the field, before any write when either is invalid.
 
-const store = vi.hoisted(() => ({ applyEvents: vi.fn(), unreplayedEventIds: vi.fn(), humanInboxPolicy: vi.fn() }));
+// `itemStates`: the events route reads the touched items' states before applying (story 33 R2).
+const store = vi.hoisted(() => ({ applyEvents: vi.fn(), unreplayedEventIds: vi.fn(), humanInboxPolicy: vi.fn(), itemStates: vi.fn(() => new Map()) }));
 const scope = vi.hoisted(() => ({ resolveCliScope: vi.fn() }));
 
 vi.mock('@/lib/mission-control-store', () => ({ getMissionControlStore: () => store }));
@@ -53,15 +54,15 @@ describe('POST /api/cli/mission-control/events: attention class and stated defau
   });
 
   it.each([
-    ['an unknown class', { class: 'urgent' }, /^class must be one of money, irreversible, scope, bookkeeping$/],
-    ['a default that names no option', { defaultOptionId: 'maybe' }, /^defaultOptionId must name one of the item's options$/],
-    ['a default on an action item', { kind: 'action', options: [] }, /^defaultOptionId is refused on an action item$/],
-  ])('refuses %s with 400, the field named, and nothing stored', async (_case, over, message) => {
+    ['an unknown class', { class: 'urgent' }, 'class', /class must be one of money, irreversible, scope, bookkeeping/],
+    ['a default that names no option', { defaultOptionId: 'maybe' }, 'defaultOptionId', /defaultOptionId must name one of the item's options/],
+    ['a default on an action item', { kind: 'action', options: [] }, 'defaultOptionId', /defaultOptionId is refused on an action item/],
+  ])('refuses %s with 400 question-invalid, the field named, and nothing stored (ADR-0037)', async (_case, over, field, message) => {
     const good = { ...opened, eventId: 'e-good', payload: { ...opened.payload, itemId: 'item-good' } };
     const bad = { ...opened, payload: { ...opened.payload, ...over } };
     const r = await post([good, bad]);
     expect(r.status).toBe(400);
-    expect(r.body).toMatchObject({ code: 'invalid-request' });
+    expect(r.body).toMatchObject({ code: 'question-invalid', defects: [{ eventId: bad.eventId, field }] });
     expect(r.body.error).toMatch(message);
     expect(store.applyEvents).not.toHaveBeenCalled();
   });

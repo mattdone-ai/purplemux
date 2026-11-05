@@ -40,11 +40,12 @@ export const ackNotificationInput = (tabId: string, seq: number) => {
 const MISSION_CONTROL_PATH = '/mission-control';
 
 /**
- * A `flag` alert is a fleet-level fact (ADR-0032): it is shown whatever the tab's orchestrator role,
- * with a link to the panel that holds the flag.
+ * A `flag` alert is a fleet-level fact (ADR-0032), and an `attention-opened` alert is a Mission
+ * Control item opened for the human: both are shown whatever the tab's orchestrator role, with a
+ * link to Mission Control.
  */
 export const showNotificationAlert = ({ alert }: INotificationAlertMessage): void => {
-  if (alert.kind === 'flag') {
+  if (alert.kind === 'flag' || alert.kind === 'attention-opened') {
     toast.warning(alert.workspaceName ? `${alert.title} · ${alert.workspaceName}` : alert.title, {
       id: alert.id,
       description: alert.body,

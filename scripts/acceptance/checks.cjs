@@ -5,7 +5,12 @@
 // background work, hook-time identity, drive grants, the grants read, the coordination panel, Mission
 // Control delivery through the inbox) live in checks-wave4.cjs; the wave-5 recovery checks in
 // checks-wave5.cjs; the wave-6 epic burndown publish and board read in checks-burndown.cjs; the wave-7
-// default Mission Control page (Needs you before the portfolio board) in checks-mission-control-page.cjs, run last.
+// Mission Control page (the owner board by default, Needs you at ?view=answers) in checks-mission-control-page.cjs;
+// the wave-8 question format v2 checks (ADR-0037) in checks-mc-question-v2.cjs; the wave-9 event digest checks
+// (ADR-0035) in checks-event-digest.cjs; the wave-10 owner board and pulse (story 12) in checks-board.cjs; the
+// wave-11 context lifecycle checks (ADR-0036) in checks-context-lifecycle.cjs; the wave-12 attention alert (story 33:
+// one alert per item that becomes owner-visible) in checks-attention-alert.cjs; the wave-13 effect counts (story 15)
+// in checks-effects.cjs; the wave-14 local curator (ADR-0038) in checks-curator.cjs, run last.
 // Before wave 1, checks-wip-cap.cjs sets the scratch fleet's WIP cap that the fixtures need and proves
 // the refusal at the cap (story 20; ADR-0027).
 //
@@ -52,6 +57,14 @@ const { wave4, request, humanSession, liveStandIn, standInRecord } = require('./
 const { wave5 } = require('./checks-wave5.cjs');
 const { wave6 } = require('./checks-burndown.cjs');
 const { wave7 } = require('./checks-mission-control-page.cjs');
+const { wave8 } = require('./checks-mc-question-v2.cjs');
+const { wave9 } = require('./checks-event-digest.cjs');
+const { wave10 } = require('./checks-board.cjs');
+const { wave11 } = require('./checks-context-lifecycle.cjs');
+const { waveAttentionAlert } = require('./checks-attention-alert.cjs');
+const { wave13 } = require('./checks-effects.cjs');
+const { wave14 } = require('./checks-curator.cjs');
+const { wave15 } = require('./checks-curator-routing.cjs');
 const { fixtureCapGate } = require('./checks-wip-cap.cjs');
 
 const POLL_MS = 200;
@@ -138,11 +151,17 @@ class Instance {
     return run(this.state.node, [this.cliPath, ...args], { env, timeoutMs });
   }
 
-  async human(method, endpoint, body) {
+  /** The scratch human session's cookie (`session-token=...`); throws with the reason when none is issued. */
+  async humanCookie() {
     const password = `acc-pw-${crypto.createHash('sha256').update(this.state.scratch).digest('hex').slice(0, 16)}`;
     const session = await humanSession(this.state.port, password);
     if (!session.cookie) throw new Error(session.why);
-    return request(this.state.port, method, endpoint, { body, headers: { cookie: session.cookie, origin: `http://localhost:${this.state.port}` } });
+    return session.cookie;
+  }
+
+  async human(method, endpoint, body) {
+    const cookie = await this.humanCookie();
+    return request(this.state.port, method, endpoint, { body, headers: { cookie, origin: `http://localhost:${this.state.port}` } });
   }
 
   /** Intentional fixture ownership changes use the same displayed-revision human replacement as the UI. */
@@ -1572,7 +1591,10 @@ const freePort = () =>
 
 /** The waves in run order; `--only-wave N` selects the Nth. Building the list calls no wave. */
 const wavesFor = (inst, opts, helpers) => [() => wave1(inst, opts), () => wave2(inst), () => wave3(inst, helpers), () => wave4(inst, helpers),
-  () => wave5(inst, helpers), () => wave6(inst, helpers), () => wave7(inst)];
+  () => wave5(inst, helpers), () => wave6(inst, helpers), () => wave7(inst), () => wave8(inst),
+  () => wave9(inst, helpers), () => wave10(inst, helpers), () => wave11(inst, helpers), () => waveAttentionAlert(inst, helpers),
+  () => wave13(inst, helpers), () => wave14(inst, helpers),
+  () => wave15(inst, helpers)];
 const WAVE_COUNT = wavesFor(null, {}, {}).length;
 
 const parseArgs = (argv) => {

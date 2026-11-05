@@ -1,0 +1,38 @@
+{
+  "source": "reviews/03-constraint-premise-consult.md tables F1 and F2 (architect consult 03, 2026-11-03): all three sections (lane, sk, fold) of evidence/receipt-to-main-decompose.out, re-parsed per interval, split by critical flag",
+  "critical": "the lanes in .v2/critical-path of 2026-11-02T22:12Z: E2 E3 fold46 CF1 C1 fold44 kit",
+  "note": "queued is split per interval into land-queue/lock-busy and land-queue/head-blocked; staging and restage carry no reason; landing maps to lock-wait.",
+  "F1": {
+    "window": "the run 2026-10-26T22:00Z to 2026-11-03T03:20Z",
+    "days": 7.22,
+    "hours": {
+      "not-armed": { "critical": 343.0, "other": 3453.4 },
+      "land-queue/lock-busy": { "critical": 159.6, "other": 1279.2 },
+      "own-lane-order": { "critical": 35.2, "other": 837.7 },
+      "chain-down": { "critical": 55.4, "other": 376.2 },
+      "pre-flight-gate": { "critical": 114.2, "other": 134.5 },
+      "lock-wait": { "critical": 51.0, "other": 206.7 },
+      "group-partner": { "critical": 38.1, "other": 164.9 },
+      "land-queue/head-blocked": { "critical": 11.6, "other": 122.1 },
+      "under-lock-gate": { "critical": 17.2, "other": 45.0 },
+      "rework": { "critical": 4.5, "other": 44.6 },
+      "guard-hold": { "critical": 6.4, "other": 1.5 },
+      "receipt-rekey": { "critical": 0.0, "other": 0.4 }
+    }
+  },
+  "F2": {
+    "window": "2026-11-02T03:20Z to 2026-11-03T03:20Z",
+    "hours": {
+      "not-armed": { "critical": 120.6, "other": 588.7 },
+      "pre-flight-gate": { "critical": 37.9, "other": 56.1 },
+      "own-lane-order": { "critical": 4.0, "other": 67.8 },
+      "lock-wait": { "critical": 11.7, "other": 27.9 },
+      "land-queue/lock-busy": { "critical": 16.1, "other": 6.7 },
+      "group-partner": { "critical": 20.7, "other": 0.0 },
+      "under-lock-gate": { "critical": 4.6, "other": 11.5 },
+      "chain-down": { "critical": 0.1, "other": 10.8 },
+      "land-queue/head-blocked": { "critical": 2.1, "other": 0.3 },
+      "rework": { "critical": 0.2, "other": 0.4 }
+    }
+  }
+}

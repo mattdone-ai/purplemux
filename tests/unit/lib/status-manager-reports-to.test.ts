@@ -3,6 +3,7 @@ import { AutomatedPromptDispatcher, type IAutomatedPromptDispatcherDeps } from '
 import type { TLivenessEvent } from '@/types/liveness';
 import type { ITabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
+import { memoryLedgerTables, memoryTabEvents } from './tab-events-harness';
 
 const workspaceStore = vi.hoisted(() => ({
   getWorkspaceByIdCached: vi.fn(),
@@ -51,14 +52,18 @@ const setup = async (orchestration: { enabled: boolean; orchestratorTabId: strin
     paste,
   });
   const { StatusManager } = await import('@/lib/status-manager');
-  const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}));
+  const tabEvents = memoryTabEvents();
+  const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), tabEvents, memoryLedgerTables()[1]);
   const internals = manager as unknown as {
     nudgeOrchestrator: (tabId: string, e: ITabStatusEntry, kind: 'stuck', detail?: string) => Promise<void>;
     handleLivenessEvent: (event: TLivenessEvent) => Promise<void>;
     stuckNudgedTabs: Map<string, number>;
   };
   const targets = () => paste.mock.calls.map(([session]) => session.replace('tmux-', ''));
-  return { manager, internals, paste, targets };
+  // Who each nudge was routed to, whatever its wake class (ADR-0035): a digest one is typed later.
+  const recipients = () => tabEvents().list('ws-1', { since: 0, limit: 100 }).map((row) => row.tabId);
+  const classes = () => tabEvents().list('ws-1', { since: 0, limit: 100 }).map((row) => row.class);
+  return { manager, internals, paste, targets, recipients, classes };
 };
 
 const bgFailed = (notify?: 'self' | 'orchestrator', tabId = 'w'): TLivenessEvent => ({
@@ -89,14 +94,14 @@ describe('nudge routing — reportsTo and notify self (ADR-0018)', () => {
   });
 
   it('sends W\'s nudge to O2 only while O2 is live, then to O1 after O2 closes', async () => {
-    const { manager, internals, targets } = await setup({ enabled: true, orchestratorTabId: 'o1' });
+    const { manager, internals, recipients } = await setup({ enabled: true, orchestratorTabId: 'o1' });
     manager.registerTab('o1', entry('o1'));
     manager.registerTab('o2', entry('o2'));
     const w = entry('w', { reportsTo: 'o2' });
     manager.registerTab('w', w);
 
     await internals.nudgeOrchestrator('w', w, 'stuck');
-    expect(targets()).toEqual(['o2']);
+    expect(recipients()).toEqual(['o2']);
 
     manager.removeTab('o2');
     manager.forgetReportsTo('ws-1', 'o2');
@@ -104,49 +109,49 @@ describe('nudge routing — reportsTo and notify self (ADR-0018)', () => {
     expect(layout.clearReportsTo).toHaveBeenCalledWith('ws-1', 'o2');
 
     await internals.nudgeOrchestrator('w', w, 'stuck');
-    expect(targets()).toEqual(['o2', 'o1']);
+    expect(recipients()).toEqual(['o2', 'o1']);
   });
 
   it('falls back to the orchestrator when reportsTo names a tab that is not live', async () => {
-    const { manager, internals, targets } = await setup({ enabled: true, orchestratorTabId: 'o1' });
+    const { manager, internals, recipients } = await setup({ enabled: true, orchestratorTabId: 'o1' });
     manager.registerTab('o1', entry('o1'));
     const w = entry('w', { reportsTo: 'gone' });
     manager.registerTab('w', w);
 
     await internals.nudgeOrchestrator('w', w, 'stuck');
-    expect(targets()).toEqual(['o1']);
+    expect(recipients()).toEqual(['o1']);
   });
 
   it('never routes across workspaces even when an entry names a tab of another one', async () => {
-    const { manager, internals, targets } = await setup({ enabled: true, orchestratorTabId: 'o1' });
+    const { manager, internals, recipients } = await setup({ enabled: true, orchestratorTabId: 'o1' });
     manager.registerTab('o1', entry('o1'));
     manager.registerTab('x', entry('x', { workspaceId: 'ws-2' }));
     const w = entry('w', { reportsTo: 'x' });
     manager.registerTab('w', w);
 
     await internals.nudgeOrchestrator('w', w, 'stuck');
-    expect(targets()).toEqual(['o1']);
+    expect(recipients()).toEqual(['o1']);
   });
 
   it('delivers to a live reportsTo even when workspace orchestration is off', async () => {
-    const { manager, internals, targets } = await setup({ enabled: false, orchestratorTabId: null });
+    const { manager, internals, recipients } = await setup({ enabled: false, orchestratorTabId: null });
     manager.registerTab('o2', entry('o2'));
     const w = entry('w', { reportsTo: 'o2' });
     manager.registerTab('w', w);
 
     await internals.nudgeOrchestrator('w', w, 'stuck');
-    expect(targets()).toEqual(['o2']);
+    expect(recipients()).toEqual(['o2']);
   });
 
   it('never routes to a non-agent tab, even if the layout names one', async () => {
-    const { manager, internals, targets } = await setup({ enabled: true, orchestratorTabId: 'o1' });
+    const { manager, internals, recipients } = await setup({ enabled: true, orchestratorTabId: 'o1' });
     manager.registerTab('o1', entry('o1'));
     manager.registerTab('sh', entry('sh', { panelType: 'terminal' }));
     const w = entry('w', { reportsTo: 'sh' });
     manager.registerTab('w', w);
 
     await internals.nudgeOrchestrator('w', w, 'stuck');
-    expect(targets()).toEqual(['o1']);
+    expect(recipients()).toEqual(['o1']);
   });
 
   it('keeps today\'s silence with no reportsTo and orchestration off', async () => {
@@ -169,7 +174,7 @@ describe('nudge routing — reportsTo and notify self (ADR-0018)', () => {
   });
 
   it('routes a default bg outcome to reportsTo, else the orchestrator (today\'s behaviour)', async () => {
-    const { manager, internals, targets } = await setup({ enabled: true, orchestratorTabId: 'o1' });
+    const { manager, internals, recipients, classes } = await setup({ enabled: true, orchestratorTabId: 'o1' });
     manager.registerTab('o1', entry('o1'));
     manager.registerTab('o2', entry('o2'));
     manager.registerTab('w', entry('w', { reportsTo: 'o2' }));
@@ -185,7 +190,9 @@ describe('nudge routing — reportsTo and notify self (ADR-0018)', () => {
     await internals.handleLivenessEvent(secondJob);
     manager.removeTab('o2');
     await internals.handleLivenessEvent(bgCompleted());
-    expect(targets()).toEqual(['o2', 'o2', 'o1']);
+    expect(recipients()).toEqual(['o2', 'o2', 'o1']);
+    // A job's report to a tab other than the one that waits on it waits for that tab's digest (ADR-0035).
+    expect(classes()).toEqual(['digest', 'digest', 'digest']);
   });
 });
 

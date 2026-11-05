@@ -4,6 +4,9 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ILayoutData, ITab } from '@/types/terminal';
 import type { IRestartTabInput } from '@/lib/tab-restart';
+import type { IAgentLaunchTarget } from '@/lib/agent-launch';
+import type { IAgentProvider } from '@/lib/providers/types';
+import { agentLaunchOptionsForTab } from '@/lib/agent-launch-policy';
 
 // ADR-0028 (story 04): a restart kills and relaunches a tab's processes under
 // the same tab id, without the close events that drop what is keyed on it.
@@ -165,6 +168,25 @@ describe('restartTab (ADR-0028)', () => {
     await (globalThis as { __ptTabTokenLock?: Promise<void> }).__ptTabTokenLock;
     resetGlobals();
     await fs.rm(mockHome.value, { recursive: true, force: true });
+  });
+
+  it('relaunches an evaluator tab with its role: dontAsk, the four built-ins, the preview allow-list and no bypass (ADR-0040)', async () => {
+    await writeLayout([claudeTab({ role: 'evaluator', previewOrigin: 'http://localhost:3100', pgService: 'preview_42' })]);
+    await (await import('@/lib/config-store')).updateConfig({ dangerouslySkipPermissions: true });
+    const { restartTab } = await import('@/lib/tab-restart');
+
+    expect((await restartTab(input())).status).toBe(200);
+    const [target, options] = launcher.launchAgentInTab.mock.calls[0] as [IAgentLaunchTarget, { provider: IAgentProvider; resumeSessionId: string }];
+    expect(target).toMatchObject({ role: 'evaluator', previewOrigin: 'http://localhost:3100', pgService: 'preview_42' });
+    // The command launchAgentInTab builds from that target (agent-launch.ts).
+    const command = await options.provider.buildResumeCommand(options.resumeSessionId, { workspaceId: WS, ...agentLaunchOptionsForTab(target) });
+    expect(command).toMatch(/^PGSERVICE=preview_42 claude --resume /);
+    expect(command).toContain('--permission-mode dontAsk');
+    expect(command).toContain('--tools Read,Grep,Glob,Bash');
+    expect(command).toContain('http://localhost:3100/*');
+    expect(command).not.toContain('--dangerously-skip-permissions');
+    const ordinary = await options.provider.buildResumeCommand(options.resumeSessionId, { workspaceId: WS });
+    expect(ordinary).toContain('--dangerously-skip-permissions');
   });
 
   it('restarts an idle claude-code tab: reap, same session name, resume with the persisted launch settings', async () => {
@@ -345,6 +367,24 @@ describe('restartTab (ADR-0028)', () => {
     expect((await readTabs())[0].orchestrationActivity).toBeUndefined();
   });
 
+  it('interruptIf is read inside the lock on a busy tab: its answer decides, and the audit records it (ADR-0036)', async () => {
+    status.states.set('tab-t', 'busy');
+    await writeLayout([claudeTab()]);
+    const { restartTab } = await import('@/lib/tab-restart');
+    const seen: string[] = [];
+    const refused = await restartTab(input({ interruptIf: (tab) => { seen.push(tab.id); return false; } }));
+    expect(refused).toMatchObject({ status: 409, body: { code: 'tab-busy' } });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    const allowed = await restartTab(input({ interruptIf: (tab) => { seen.push(tab.id); return true; } }));
+    expect(allowed.status).toBe(200);
+    expect(seen).toEqual(['tab-t', 'tab-t']);
+    expect(await auditLines()).toEqual([expect.objectContaining({ interrupt: true, abandoned: expect.objectContaining({ cliState: 'busy' }) })]);
+    status.states.set('tab-t', 'idle');
+    seen.length = 0;
+    expect((await restartTab(input({ interruptIf: (tab) => { seen.push(tab.id); return true; } }))).status).toBe(200);
+    expect(seen).toEqual([]);
+  });
+
   it('abandoned work needs a proven reaper: a reap without /proc is not confirmed', async () => {
     status.states.set('tab-t', 'busy');
     tmux.killSession.mockResolvedValue({ ...REAP, reaper: 'unavailable' });
@@ -356,6 +396,8 @@ describe('restartTab (ADR-0028)', () => {
 
   it('a remote tab restarts on the same host, fresh only', async () => {
     tmux.killSession.mockResolvedValue({ ...REAP, reaper: 'remote', sessionGone: true });
+    // Present before the reap, gone after it, as the remote tmux answers.
+    tmux.hasSessionOrUnreachable.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     await writeLayout([claudeTab({ host: 'ai-server' })]);
     const { restartTab } = await import('@/lib/tab-restart');
     const { sessionHostOf } = await import('@/lib/session-host');
@@ -369,6 +411,9 @@ describe('restartTab (ADR-0028)', () => {
       expect.objectContaining({ host: 'ai-server' }),
       expect.objectContaining({ resumeSessionId: null }),
     );
+    // The identity is what makes createRemoteSession rewrite the prompt file and ship it: a remote restart
+    // loads the standing orders active at the restart (ADR-0041; architect ruling on story 14 AC 2).
+    expect(tmux.createSession).toHaveBeenCalledWith(session('tab-t'), 80, 24, '/srv/r', { workspaceId: WS, tabId: 'tab-t' });
   });
 
   it('a remote host that does not answer kills nothing: 503 remote-host-unreachable', async () => {

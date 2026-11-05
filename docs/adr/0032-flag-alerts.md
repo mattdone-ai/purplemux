@@ -62,3 +62,65 @@ Option 3.
 - Some fleet stamps are in memory (ADR-0023), so a deploy can still raise a fleet flag once. The composer clock restarts
   at boot, so a STALL? for unsubmitted composer text can alert once after a deploy. A tab restored `inactive` after a
   restart has no observed stop time, so it may not raise "agent not running".
+
+## Amendment (2026-11-03, epic `harness-flow-loop`, story 13: alarm routing; architecture ADR-HFL-03 decisions 1 and 5)
+
+Section 5 is amended for source `ledger`; fleet and flow flags keep it unchanged. Sections 3 and 4 gain one rule for
+item alarms (consult ruling 13).
+
+1. **Ledger flags.** Source `ledger` carries two kinds: the finder's breached anomalies (ADR-0034 §8; rule the
+   anomaly id) and, new, every open wait past its threshold (rule the counted reason, subject the item key). A
+   threshold is fleet config `ledger.threshold.<reason>`, minutes in 0..10080 or `off`; the defaults are
+   ADR-HFL-03's: `red-main` 0, `chain-down` 10, `not-armed` 20, `group-partner` 30, `agent-idle` 30, `land-queue` 60
+   (its derived `land-queue/*` split too), `own-lane-order` 60, `owner` 120. A reason with no threshold raises no
+   alarm until one is set; the derived `unknown` takes none (the `unknown-share` anomaly covers it).
+2. **Target (§5 for source `ledger`).** A ledger flag names its routed tab: fleet config `ledger.route.<ws>`, groups
+   `<target>[+<target>]=<pattern>[,<pattern>]` joined by `;`. A target is a tab name or id, `$holder` (the item's
+   holder; an anomaly's subject seat), `$orchestrator`, or `$board` (recorded, typed into no tab). A pattern is a wait
+   reason, a derived reason, an anomaly id, or a prefix ending in `*`; the exact reason wins, then its producer
+   reason, then the longest prefix. A reason the table does not name, and a holder or tab name that names no tab of
+   a readable layout, go to the workspace's enabled orchestrator. A table that does not parse is refused at write
+   time (`config-invalid`) and, if one is found at read time, routes the workspace to the orchestrator with one log
+   line. With no orchestrator and no other routed tab, nothing is sent and `flag-alert-no-target` is logged. **An
+   unknown target stays pending as before:** an unreadable fleet view or layout, or a routed row in state `unknown`,
+   defers the raise to the next tick (`flag-alert-target-unknown`). So does a fleet config the tick cannot read: with
+   no route table and no thresholds known, every `ledger:<ws>` source is unread that tick, so ledger flags neither
+   raise, repeat nor clear, and a configured `off` is never overridden by a default. Both `ledger.*` keys have
+   ADR-0019's writers (the admin token or an enabled orchestrator) and are checked at write time; a route key names a
+   workspace (`ledger.route.<workspaceId>`, never an empty suffix).
+
+   **The v2 default table** (`V2_DEFAULT_ROUTE`, 238 characters; ADR-HFL-03 decision 1 amended by consult 13):
+   `not-armed`, `own-lane-order`, `review-findings`, `rework` and `agent-idle` go to `$holder`; `land-queue/*`,
+   `lock-wait`, `under-lock-gate`, `pre-flight-gate`, `gate-slot`, `host-load` and `chain-down` to `v2-kit`;
+   `red-main` to `$holder` (the arming tab of the last landed range, v2 note n-YQMUaheJdq) and the orchestrator;
+   `owner` to the board only; `group-partner` and `deploy-*` to the orchestrator. group-partner goes to the
+   orchestrator by name: its clear needs a `.v2/train-groups` edit or a stop of another lane's unit, and its holder
+   (`keyed-group`) names no seat. The holder is a tab id or name: a lane id such as `E2` names no tab and falls back to
+   the orchestrator until the v2 producers send the arming tab id (story 02).
+3. **Delivery.** A ledger flag reaches its tabs through the tab event router (ADR-0035), never typed directly. An item
+   alarm is a tab line only, kind `alarm`: urgent (`block`) for `red-main` and a critical-path `chain-down`, a digest
+   line (`warn`) otherwise; the line reads `<item> <reason> for <age> (threshold <n> min); clear: <clear input>`, and
+   a tab that is not the holder also reads `; holder <holder>`. It never reaches the phone. An anomaly keeps its §8
+   alert, now naming its first routed tab, and that tab gets one digest line, kind `flag`; as before this amendment,
+   only a sent phone alert marks the anomaly alerted. An item alarm raise that reaches no routed tab (the router
+   refused every line) stays pending and is retried on the next tick.
+4. **The held-copy guard, raise and repeat (item alarms only).** §3's edge and window are unchanged. On a raise of a
+   digest line, a routed tab whose digest still holds a copy of the same item and reason gets no second line; the copy
+   counts as the alert there (review r1, R2). An urgent raise is typed whatever the tab's digest holds. It never waits
+   in a digest, so it cannot stack there, and a held line of an earlier episode cannot stand in for it (confirmation
+   N2). While an item alarm stands, and only while every source it rests on read well this tick (a repeat is a
+   re-raise, §6), the tick routes it again to each routed tab once `alerts.flag-repeat-minutes` have passed since the
+   later of the last copy to that tab (with none: the later of the key's last alert and the tick that recorded it,
+   read once per tick before that tick's sends) and that copy's delivery, and never while a copy of the same item and
+   reason still waits in that tab's digest. The guard reads `tab_events` (`TabEventsTable.copies`, the text's fixed
+   opening `<item> <reason> for `, matched in SQLite characters, 7 days back), so it holds across a restart. An
+   unreadable log sends the raise anyway (delivery never waits on a ledger read, ADR-0035 §4) and skips the repeat. A
+   repeat is always a digest line. Under §4's baseline, after a restart or after `alerts.flags` comes back on, a
+   standing alarm is recorded without a word. Its first repeat comes one window after that tick. A repeat counts as an
+   alert for §3's window, so a new episode of the same item inside one window of a repeat is not raised again, and its
+   next line is the digest repeat; red main is keyed per blocked range, so a new red main also raises urgent lines on
+   the other blocked ranges (confirmation N2, residual). An anomaly flag stays edge-only.
+
+Why (consult ruling 13): edge-only never says a missed line again, and an item that crossed its threshold while the
+server was down would never be alarmed at all. The guard keeps a busy or dead holder to one held line per item; the
+router's held-tab report (ADR-0035 §3) tells the human after an hour.

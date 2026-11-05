@@ -12,6 +12,7 @@ const lifecycle = vi.hoisted(() => ({
 const status = vi.hoisted(() => ({
   applyAgentHookMeta: vi.fn(),
   handleProviderEvent: vi.fn(),
+  handleToolCall: vi.fn(),
   codexLaunchLifecycle: vi.fn(() => null),
   recordSkippedReplay: vi.fn(),
   agentSessionIdForTmuxSession: vi.fn((): string | null => null),
@@ -71,6 +72,14 @@ describe('Codex hook generation gate', () => {
     expect(status.handleProviderEvent).toHaveBeenCalledWith(
       'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'session-start' }, undefined,
     );
+  });
+
+  it('passes a PostToolUse\'s tool name to the tab\'s turn, and nothing for another event (story 15)', async () => {
+    const { dispatchHook } = await import('@/lib/hook-dispatch');
+    const { query } = request();
+    await dispatchHook({ query, body: { hook_event_name: 'PostToolUse', session_id: 's', tool_name: 'exec_command' }, occurredAt: 1_790_576_100_000 });
+    await dispatchHook({ query, body: { hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'exec_command' } });
+    expect(status.handleToolCall.mock.calls).toEqual([['codex', 'pt-ws-pins-pane-one-tab-pins', 'exec_command', 1_790_576_100_000]]);
   });
 
   it('a replayed hook goes through the attribution-only gate, never the live process proof (ADR-0020)', async () => {

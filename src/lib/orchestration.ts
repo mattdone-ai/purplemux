@@ -46,7 +46,7 @@ export const DEFAULT_KICKOFF_TEMPLATE = `You are the ORCHESTRATOR for workspace 
 ## Event loop (your whole job)
 purplemux's built-in watchdog sends you '${NUDGE_PREFIX} ...' messages when a worker changes state. On each one:
 - NEEDS INPUT: read the worker's pane (tab result), answer the question yourself from context via tab send. Escalate to the human only for real product/scope decisions, and keep other work moving.
-- "ended: DONE:/BLOCKED:/NEEDS-DECISION:/READY-TO-MERGE:/CHECKPOINTED: …": the worker's own end line, verbatim — act on it. Only a turn whose last line is one of these markers nudges you when it ends. A worker that ends its turn with no marker while its background jobs, subagents or purplemux watches run is WAITING and sends no nudge; the job's completion wakes it.
+- "ended: DONE:/BLOCKED:/NEEDS-DECISION:/READY-TO-MERGE:/CHECKPOINTED: …": the worker's own end line, verbatim — act on it. A NEEDS-DECISION line ends with one of five server notes (ADR-0041): "[MC item <id> opened for the owner by the server: do not open another]" and "[MC item <id> already open for the owner: do not open another]" — the question is in Mission Control for the owner; never copy it into Mission Control again, and relay the owner's answer to the worker when it reaches you. "[MC item <id> opened by the tab this turn: handle it as any worker item]" — the worker asked itself; treat that item as you treat any worker's item. "[no MC item (<reason>): open it yourself: resume or start your Mission Control run, then open item <id> from this line with your human review. The owner has not been told.]" — do exactly that, with that item id, so the worker's repeat of the line finds it. "[no MC item (<reason>): owner push dispatched, delivery not confirmed]" or "[… owner push for this line already dispatched at <time>]" — no tab could open the item, so the server pushed the question to the owner's devices; it is not in Mission Control. Only a turn whose last line is one of these markers nudges you when it ends. A worker that ends its turn with no marker while its background jobs, subagents or purplemux watches run is WAITING and sends no nudge; the job's completion wakes it.
 - IDLE WITHOUT AN END LINE: the worker stopped with no marker and nothing it waits on, and stayed quiet for the idle window (default 15 min). Read its output, then accept it, send follow-up work, or ask it for its end line.
 - WAITING (long wait): the worker has waited hours (default 4) on a registered job or watch with no end line. The work is still live; check it is still expected to finish, else stop it or tell the worker to end its turn.
 - API ERROR: the worker's turn failed at the provider and its one automatic resume failed too (or could not be delivered). Re-prompt it when the provider recovers, or park its task.
@@ -65,7 +65,7 @@ One item per task with its current status; every blocker names the exact input t
 Mission Control is the durable decision record. At kickoff/resume and on ordinary turns, read outstanding answers and human-inbox policy guidance with purplemux mission answers -w {{WORKSPACE_ID}}. Acknowledge each exact answer ID with the ackCommand that purplemux mission answers prints for it (its generation, revision, and event ID) after applying it, then explicitly resolve the attention item. Workers route blockers to you; ordinary attention events create durable workspace candidates. Use existing instructions, authority, evidence, and delegated handling first. Routine setup, coordination, already-granted permissions, and parked-work choices are not human questions merely because a worker stopped. Only the remaining human-exclusive decision, approval, information, or external action receives an explicit human review from the configured orchestrator. Record workspace handling with a none review or cancel an issue handled elsewhere. Reuse stable item IDs and report transitions, not repeated unchanged issues. Emit stable Mission Control events when the run starts/resumes, meaningful progress changes, an attention item opens/changes, an answer is applied, or the run finishes. Do not turn standup blockers or historical transcript questions into confirmed decisions. Completion requires an explicit run.finished event — silence, an idle tab, or a "done" standup alone does not complete a run.
 
 ## Rules
-- Max {{MAX_WORKERS}} concurrent workers. One task per worker tab.
+- The workspace's WIP cap bounds concurrent workers: purplemux tab count -w {{WORKSPACE_ID}} prints "<count> <cap>", and an agent tab create at the cap exits 3 wip-cap. One task per worker tab.
 - Never assume a worker's state — capture its pane before acting.
 
 ## The work
@@ -77,14 +77,14 @@ export interface IKickoffTemplateVars {
   workspaceId: string;
   workspaceName: string;
   task?: string;
-  maxWorkers?: number;
 }
 
 export const resolveKickoffTemplate = (template: string, vars: IKickoffTemplateVars): string =>
   template
     .replaceAll('{{WORKSPACE_ID}}', vars.workspaceId)
     .replaceAll('{{WORKSPACE_NAME}}', vars.workspaceName)
-    .replaceAll('{{MAX_WORKERS}}', String(vars.maxWorkers ?? 3))
+    // A stored template from before the one-cap rule (story 15) names the enforced cap, not a count of its own.
+    .replaceAll('{{MAX_WORKERS}}', `the WIP cap (purplemux tab count -w ${vars.workspaceId})`)
     .replaceAll('{{TASK}}', vars.task ?? '(described in the next message)');
 
 export const buildNudgeMessage = (

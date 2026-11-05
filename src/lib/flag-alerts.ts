@@ -1,15 +1,25 @@
 import { alertFor, isOrchestratorTab } from '@/lib/alert-policy';
+import { FINDER_STALE_MS, cachedFinderResults } from '@/lib/constraint-tick';
 import type { TAlertDraft } from '@/lib/alert-policy';
 import { DEFAULT_FLOW_THRESHOLDS, deriveFlowFlags } from '@/lib/flow-flags';
+import {
+  EMPTY_ROUTE_TABLE, LEDGER_ALARM_KEYS, alarmFor, alarmOpening, alarmText, parseRouteTable, resolveThresholds, routeFor,
+} from '@/lib/ledger-alarms';
+import type { ILedgerAlarm, IRouteTable, TAlarmThresholds } from '@/lib/ledger-alarms';
 import { createLogger } from '@/lib/logger';
 import type { IAlertContext } from '@/lib/notification-dispatcher';
+import type { ITabEventRoute, ITabEventRouteResult } from '@/lib/tab-event-router';
+import { classifyWake } from '@/lib/wake-class';
+import type { IFinderResult } from '@/types/constraint';
 import type { IFleetRow, IFleetView } from '@/types/fleet-status';
 import type { IFlowRecord, IFlowThresholds } from '@/types/flow';
 import type { IAlertFlag, TAlertProviderId } from '@/types/status';
 import type { IWorkspace } from '@/types/terminal';
 
-// Flag alerts (ADR-0032): a 60 s tick reads the fleet flags and the derived flow flags, and sends
-// one `flag` alert when a flag is raised. Each flag names the reads it rests on: any of them failing
+// Flag alerts (ADR-0032): a 60 s tick reads the fleet flags, the derived flow flags and the
+// constraint finder's breached anomalies and the items waiting past their thresholds (ADR-0034, source
+// `ledger`), and sends one `flag` alert when a flag is raised. A ledger flag goes to the tab its
+// `ledger.route.<ws>` names (ADR-0032 §5 amended, story 13) through the tab event router. Each flag names the reads it rests on: any of them failing
 // keeps it from clearing, and the narrower set whose failure could make it false keeps it from
 // raising. A flag first seen in a source with no good read since the start, or since the switch came
 // back on, is recorded and sends nothing, so a deploy or a read that recovers replays nothing.
@@ -36,7 +46,12 @@ export const FLAG_SOURCES = {
   layout: (workspaceId: string) => `layout:${workspaceId}`,
   tab: (workspaceId: string, tabId: string) => `tab:${workspaceId}/${tabId}`,
   flow: (workspaceId: string) => `flow:${workspaceId}`,
+  ledger: (workspaceId: string) => `ledger:${workspaceId}`,
+  ledgerSubject: (workspaceId: string, id: string, subject: string) => `ledger:${workspaceId}/${id}/${subject}`,
 } as const;
+
+/** A finder answer older than two ticks is not a read (`FINDER_STALE_MS`). */
+export const LEDGER_STALE_MS = FINDER_STALE_MS;
 
 export interface IRaisedFlag extends IAlertFlag {
   key: string;
@@ -47,6 +62,8 @@ export interface IRaisedFlag extends IAlertFlag {
   sources: string[];
   /** The reads whose failure could make this flag false: while one fails, it is not raised. */
   raiseSources: string[];
+  /** A ledger item waiting past its threshold (story 13): its rule is the reason, its subject the item. */
+  alarm?: ILedgerAlarm;
 }
 
 export interface IFlagScan {
@@ -68,6 +85,8 @@ export interface IFlagAlertState {
   /** Sources with a good read since the start or the last switch-on. */
   readSources: Set<string>;
   entries: Map<string, IFlagAlertEntry>;
+  /** Per ledger alarm key, when a copy was last routed to each tab: the repeat anchor while it stands. */
+  alarmSends: Map<string, Map<string, number>>;
 }
 
 export interface IFlagAlertConfig {
@@ -80,7 +99,7 @@ export const flagKey = (flag: Pick<IRaisedFlag, 'source' | 'workspaceId' | 'rule
 
 const raised = (flag: Omit<IRaisedFlag, 'key'>): IRaisedFlag => ({ ...flag, key: flagKey(flag) });
 
-export const createFlagAlertState = (): IFlagAlertState => ({ readSources: new Set(), entries: new Map() });
+export const createFlagAlertState = (): IFlagAlertState => ({ readSources: new Set(), entries: new Map(), alarmSends: new Map() });
 
 /**
  * `alerts.flags` is off only when it reads `off`. `alerts.flag-repeat-minutes` is a plain decimal
@@ -195,6 +214,52 @@ export const flowFlagScan = (reads: TFlowRead[], thresholds: IFlowThresholds, no
   return { flags, read, failed };
 };
 
+/**
+ * The constraint finder's breached anomalies (ADR-0034) and every open wait past its threshold
+ * (story 13), each routed by `ledger.route.<ws>`. A workspace the finder has not reached, whose
+ * ledger it could not read, or whose answer is older than two ticks is an unread source: its flags
+ * neither raise nor clear. Each anomaly subject is its own source, failed while its value cannot be
+ * judged (`judged: false`), so an anomaly that turns unknown or unflaggable keeps its flag standing.
+ */
+export const ledgerFlagScan = (
+  results: ReadonlyMap<string, IFinderResult>, workspaces: Array<Pick<IWorkspace, 'id'>>, now: number,
+  thresholds: TAlarmThresholds | null = resolveThresholds(new Map()).thresholds,
+): IFlagScan => {
+  const read = new Set<string>();
+  const failed = new Set<string>();
+  const flags: IRaisedFlag[] = [];
+  for (const { id } of workspaces) {
+    const source = FLAG_SOURCES.ledger(id);
+    const result = results.get(id);
+    // No routing read (thresholds null): which alarms stand, and where they go, is unknown this tick.
+    if (!thresholds || !result || result.inputs.ledger.state !== 'ok' || now - result.generatedAt > LEDGER_STALE_MS) {
+      failed.add(source);
+      continue;
+    }
+    read.add(source);
+    for (const a of result.anomalies) {
+      const subject = FLAG_SOURCES.ledgerSubject(id, a.id, a.subject);
+      // A value that cannot be judged (unknown, no threshold, or too few to flag) can neither raise nor clear.
+      if (a.judged) read.add(subject);
+      else failed.add(subject);
+      if (!a.breached) continue;
+      flags.push(raised({
+        source: 'ledger', workspaceId: id, rule: a.id, subject: a.subject, text: a.text, tabId: null,
+        sources: [source, subject], raiseSources: [source],
+      }));
+    }
+    for (const item of result.stuck) {
+      const alarm = alarmFor(item, thresholds, now);
+      if (!alarm) continue;
+      flags.push(raised({
+        source: 'ledger', workspaceId: id, rule: alarm.reason, subject: alarm.itemKey, text: alarmText(alarm, now, true), tabId: null,
+        sources: [source], raiseSources: [source], alarm,
+      }));
+    }
+  }
+  return { flags, read, failed };
+};
+
 export const mergeFlagScans = (...scans: IFlagScan[]): IFlagScan => ({
   flags: scans.flatMap((scan) => scan.flags),
   read: new Set(scans.flatMap((scan) => [...scan.read])),
@@ -229,6 +294,7 @@ export const stepFlagAlerts = (state: IFlagAlertState, scan: IFlagScan, now: num
   for (const [key, entry] of state.entries) {
     if (entry.raisedAt === null && (entry.lastAlertAt === null || now - entry.lastAlertAt >= repeatMs)) state.entries.delete(key);
   }
+  for (const key of state.alarmSends.keys()) if (!state.entries.has(key)) state.alarmSends.delete(key);
   return raises;
 };
 
@@ -239,13 +305,13 @@ export const stepFlagAlerts = (state: IFlagAlertState, scan: IFlagScan, now: num
 export const pruneFlagSources = (state: IFlagAlertState, workspaces: Array<Pick<IWorkspace, 'id'>>, scan: IFlagScan): void => {
   const ids = new Set(workspaces.map((w) => w.id));
   for (const source of state.readSources) {
-    const match = /^(layout|flow|tab):([^/]+)(\/.+)?$/.exec(source);
+    const match = /^(layout|flow|ledger|tab):([^/]+)(\/.+)?$/.exec(source);
     if (!match) continue;
-    const [, kind, workspaceId] = match;
+    const [, kind, workspaceId, rest] = match;
+    // A tab the layout no longer shows, or an anomaly subject the finder no longer reports.
+    const parent = kind === 'tab' ? FLAG_SOURCES.layout(workspaceId) : kind === 'ledger' && rest ? FLAG_SOURCES.ledger(workspaceId) : null;
     if (!ids.has(workspaceId)) state.readSources.delete(source);
-    else if (kind === 'tab' && scan.read.has(FLAG_SOURCES.layout(workspaceId)) && !scan.read.has(source) && !scan.failed.has(source)) {
-      state.readSources.delete(source);
-    }
+    else if (parent && scan.read.has(parent) && !scan.read.has(source) && !scan.failed.has(source)) state.readSources.delete(source);
   }
 };
 
@@ -260,10 +326,14 @@ export const deferFlagRaise = (state: IFlagAlertState, key: string): void => {
   if (entry) entry.raisedAt = null;
 };
 
-/** Switched off: forget what stands and what was read, so switching on starts from a fresh baseline. The repeat window is kept. */
+/**
+ * Switched off: forget what stands, what was read and where each alarm was last sent, so switching on starts from a
+ * fresh baseline. The repeat window is kept.
+ */
 export const pauseFlagAlerts = (state: IFlagAlertState): void => {
   state.readSources.clear();
   for (const entry of state.entries.values()) entry.raisedAt = null;
+  state.alarmSends.clear();
 };
 
 const toAlertProvider = (providerId: string | null): TAlertProviderId =>
@@ -295,6 +365,59 @@ export const flagAlertTarget = (flag: IRaisedFlag, workspace: IWorkspace | undef
   return { ok: true, row };
 };
 
+export type TLedgerTargets =
+  | {
+    ok: true;
+    /** The routed tabs, each once. Empty when the route is the board only. */
+    rows: IFleetRow[];
+    /** A route target that named no tab of the workspace, so the orchestrator stood in. */
+    fellBack: string[];
+  }
+  | { ok: false; unknown: boolean; reason: string };
+
+const namesTab = (row: Pick<IFleetRow, 'tabId' | 'tabName'>, name: string | null): boolean =>
+  name !== null && (row.tabId === name || row.tabName === name);
+
+/**
+ * The tabs a ledger flag goes to (ADR-0032 §5 amended, story 13): its `ledger.route.<ws>` targets, the workspace's
+ * enabled orchestrator for a reason the table does not name, and the orchestrator in place of a holder or tab name
+ * that names no tab of a readable layout. `$holder` is the item's holder, or an anomaly's subject seat. A tab the
+ * fleet view cannot vouch for this tick is `unknown` (the raise is retried), never a missing target.
+ */
+export const ledgerFlagTargets = (
+  flag: IRaisedFlag, table: IRouteTable, workspace: IWorkspace | undefined, view: IFleetView | null,
+): TLedgerTargets => {
+  if (!view) return { ok: false, unknown: true, reason: 'fleet-view-unreadable' };
+  if (fleetFailures(view).has(FLAG_SOURCES.layout(flag.workspaceId))) return { ok: false, unknown: true, reason: 'layout-unreadable' };
+  const rows = view.rows.filter((r) => r.workspaceId === flag.workspaceId);
+  const holder = flag.alarm ? flag.alarm.holder : flag.subject;
+  const picked: IFleetRow[] = [];
+  const fellBack: string[] = [];
+  let orchestrator = false;
+  let board = false;
+  for (const target of routeFor(table, flag.alarm?.reason ?? flag.rule)) {
+    if (target.kind === 'board') board = true;
+    else if (target.kind === 'orchestrator') orchestrator = true;
+    else {
+      const name = target.kind === 'holder' ? holder : target.name;
+      const row = rows.find((r) => namesTab(r, name));
+      if (row) picked.push(row);
+      else {
+        orchestrator = true;
+        fellBack.push(target.kind === 'holder' ? `holder ${holder ?? 'none named'}` : `tab ${target.name}`);
+      }
+    }
+  }
+  if (orchestrator) {
+    const target = flagAlertTarget({ ...flag, tabId: null }, workspace, view);
+    if (target.ok) picked.push(target.row);
+    else if (target.unknown) return target;
+    else if (!picked.length && !board) return target;
+  }
+  if (picked.some((r) => r.state === 'unknown')) return { ok: false, unknown: true, reason: 'tab-state-unknown' };
+  return { ok: true, rows: picked.filter((r, i) => picked.findIndex((p) => p.tabId === r.tabId) === i), fellBack };
+};
+
 export const flagAlertDraft = (flag: IRaisedFlag, target: IFleetRow, workspace: IWorkspace | undefined, at: number): TAlertDraft =>
   alertFor({
     kind: 'flag',
@@ -316,8 +439,24 @@ export interface IFlagAlertDeps {
   fleetView: (now: number) => Promise<IFleetView>;
   flowThresholds: () => Promise<IFlowThresholds>;
   readFlow: (workspaceId: string) => Promise<IFlowRecord | null>;
+  /** The constraint finder's cached answers per workspace (ADR-0034). */
+  finderResults: () => ReadonlyMap<string, IFinderResult>;
   dispatch: (draft: TAlertDraft, ctx: IAlertContext) => Promise<unknown>;
+  /** `ledger.route.<ws>` and `ledger.threshold.<reason>`; throws when the fleet config cannot be read. */
+  ledgerRouting: () => Promise<ILedgerRouting>;
+  /** Hand an event to the tab event router (ADR-0035): urgent is typed at once, digest waits for the tab's digest. */
+  routeTabEvent: (event: ITabEventRoute) => Promise<ITabEventRouteResult>;
+  /** The copies of an alarm sent to a tab (`TabEventsTable.copies`); throws when the ledger cannot be read. */
+  alarmCopies: (workspaceId: string, tabId: string, opening: string, since: number) => Promise<{ held: boolean; lastDeliveredAt: number | null }>;
 }
+
+export interface ILedgerRouting {
+  routes: ReadonlyMap<string, IRouteTable>;
+  thresholds: TAlarmThresholds;
+}
+
+/** How far back the repeat guard looks for a held or delivered copy: the tab event log keeps 30 days. */
+export const ALARM_COPY_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
 
 export interface IFlagAlertTickResult {
   /** Why the tick read no flag; absent when it did. */
@@ -329,6 +468,8 @@ export interface IFlagAlertTickResult {
   noTarget: string[];
   /** Keys whose tab this tick could not check; they are retried on the next tick. */
   targetUnknown: string[];
+  /** Ledger alarm lines handed to the router this tick, raises and repeats (story 13). */
+  routed: ITabEventRoute[];
 }
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -336,7 +477,7 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
 /** One tick over `deps`. A failed read is logged and leaves the state it covers as it was. */
 export const runFlagAlertTick = async (deps: IFlagAlertDeps, state: IFlagAlertState, now: number): Promise<IFlagAlertTickResult> => {
   const idle = (skipped: NonNullable<IFlagAlertTickResult['skipped']>): IFlagAlertTickResult =>
-    ({ skipped, baseline: false, sent: [], noTarget: [], targetUnknown: [] });
+    ({ skipped, baseline: false, sent: [], noTarget: [], targetUnknown: [], routed: [] });
   let config: IFlagAlertConfig;
   try {
     config = await deps.config();
@@ -355,7 +496,7 @@ export const runFlagAlertTick = async (deps: IFlagAlertDeps, state: IFlagAlertSt
     log.warn(`flag alert tick skipped: workspaces unreadable (${errorText(err)})`);
     return idle('workspaces-unreadable');
   }
-  const [view, thresholds, reads] = await Promise.all([
+  const [view, thresholds, reads, routing] = await Promise.all([
     deps.fleetView(now).catch((err) => {
       log.warn(`flag alert tick: fleet view unreadable (${errorText(err)})`);
       return null;
@@ -368,15 +509,26 @@ export const runFlagAlertTick = async (deps: IFlagAlertDeps, state: IFlagAlertSt
         return { workspaceId: w.id, error: errorText(err) };
       }
     })),
+    deps.ledgerRouting().catch((err): ILedgerRouting | null => {
+      log.warn(`flag alert tick: ledger routing unreadable, ledger flags wait for the next tick (${errorText(err)})`);
+      return null;
+    }),
   ]);
   const baseline = state.readSources.size === 0;
-  const scan = mergeFlagScans(fleetFlagScan(view, workspaces), flowFlagScan(reads, thresholds, now));
+  const scan = mergeFlagScans(
+    fleetFlagScan(view, workspaces), flowFlagScan(reads, thresholds, now), ledgerFlagScan(deps.finderResults(), workspaces, now, routing?.thresholds ?? null),
+  );
   const raises = stepFlagAlerts(state, scan, now, config.repeatMinutes * 60_000);
   pruneFlagSources(state, workspaces, scan);
   const byId = new Map(workspaces.map((w) => [w.id, w]));
-  const result: IFlagAlertTickResult = { baseline, sent: [], noTarget: [], targetUnknown: [] };
+  const result: IFlagAlertTickResult = { baseline, sent: [], noTarget: [], targetUnknown: [], routed: [] };
+  const ledger: ILedgerDelivery = { deps, state, view, routes: routing?.routes ?? new Map(), result, now };
   for (const flag of raises) {
     const workspace = byId.get(flag.workspaceId);
+    if (flag.source === 'ledger') {
+      await deliverLedgerRaise(ledger, flag, workspace);
+      continue;
+    }
     const target = flagAlertTarget(flag, workspace, view);
     if (!target.ok) {
       if (target.unknown) {
@@ -389,16 +541,151 @@ export const runFlagAlertTick = async (deps: IFlagAlertDeps, state: IFlagAlertSt
       }
       continue;
     }
-    const draft = flagAlertDraft(flag, target.row, workspace, now);
-    try {
-      await deps.dispatch(draft, { workspaceDir: workspace?.directories[0] ?? null });
-      markFlagAlerted(state, flag.key, now);
-      result.sent.push(draft);
-    } catch (err) {
-      log.warn(`flag alert dispatch failed for ${flag.key}: ${errorText(err)}`);
+    if (await dispatchFlag(deps, flag, target.row, workspace, now, result)) markFlagAlerted(state, flag.key, now);
+  }
+  const raisedNow = new Set(raises.map((flag) => flag.key));
+  for (const entry of state.entries.values()) {
+    // A repeat is a re-raise: a source that failed this tick neither raises nor clears (ADR-0032 §6).
+    if (entry.flag.raiseSources.some((source) => scan.failed.has(source))) continue;
+    if (entry.flag.alarm && entry.raisedAt !== null && !raisedNow.has(entry.flag.key)) {
+      await repeatLedgerAlarm(ledger, entry, byId.get(entry.flag.workspaceId), config.repeatMinutes * 60_000);
     }
   }
   return result;
+};
+
+const dispatchFlag = async (
+  deps: IFlagAlertDeps, flag: IRaisedFlag, row: IFleetRow, workspace: IWorkspace | undefined, now: number, result: IFlagAlertTickResult,
+): Promise<boolean> => {
+  const draft = flagAlertDraft(flag, row, workspace, now);
+  try {
+    await deps.dispatch(draft, { workspaceDir: workspace?.directories[0] ?? null });
+    result.sent.push(draft);
+    return true;
+  } catch (err) {
+    log.warn(`flag alert dispatch failed for ${flag.key}: ${errorText(err)}`);
+    return false;
+  }
+};
+
+interface ILedgerDelivery {
+  deps: IFlagAlertDeps;
+  state: IFlagAlertState;
+  view: IFleetView | null;
+  routes: ReadonlyMap<string, IRouteTable>;
+  result: IFlagAlertTickResult;
+  now: number;
+}
+
+/** One line to one tab through the router; false when the router refused it. */
+const routeLine = async (
+  ledger: ILedgerDelivery, flag: IRaisedFlag, row: IFleetRow, kind: 'alarm' | 'flag', text: string, severity: 'warn' | 'block',
+): Promise<boolean> => {
+  const event: ITabEventRoute = {
+    workspaceId: flag.workspaceId, tabId: row.tabId, kind, text, class: classifyWake(kind, { severity }), rule: flag.rule,
+  };
+  try {
+    await ledger.deps.routeTabEvent(event);
+  } catch (err) {
+    log.warn(`ledger ${kind} for ${flag.key} not routed to ${row.tabId}: ${errorText(err)}`);
+    return false;
+  }
+  ledger.result.routed.push(event);
+  if (flag.alarm) {
+    const sends = ledger.state.alarmSends.get(flag.key) ?? new Map<string, number>();
+    sends.set(row.tabId, ledger.now);
+    ledger.state.alarmSends.set(flag.key, sends);
+  }
+  return true;
+};
+
+const alarmLine = (alarm: ILedgerAlarm, row: IFleetRow, now: number): string => alarmText(alarm, now, namesTab(row, alarm.holder));
+
+/**
+ * A raised ledger flag goes to its routed tabs. An item alarm is a tab line only: urgent for `red-main` and a
+ * critical-path `chain-down`, else a digest line (ADR-HFL-03 decision 1). An anomaly keeps its phone alert, now naming
+ * its routed tab, and gives that tab a digest line (consult ruling 13, b).
+ */
+const deliverLedgerRaise = async (ledger: ILedgerDelivery, flag: IRaisedFlag, workspace: IWorkspace | undefined): Promise<void> => {
+  const { state, result, now } = ledger;
+  const targets = ledgerFlagTargets(flag, ledger.routes.get(flag.workspaceId) ?? EMPTY_ROUTE_TABLE, workspace, ledger.view);
+  if (!targets.ok) {
+    if (targets.unknown) {
+      deferFlagRaise(state, flag.key);
+      result.targetUnknown.push(flag.key);
+      log.warn({ key: flag.key, workspaceId: flag.workspaceId, reason: targets.reason }, 'flag-alert-target-unknown');
+    } else {
+      result.noTarget.push(flag.key);
+      log.warn({ key: flag.key, workspaceId: flag.workspaceId, reason: targets.reason }, 'flag-alert-no-target');
+    }
+    return;
+  }
+  if (targets.fellBack.length) {
+    log.info({ key: flag.key, workspaceId: flag.workspaceId, fellBack: targets.fellBack }, 'ledger-flag-route-fallback');
+  }
+  if (!targets.rows.length) {
+    markFlagAlerted(state, flag.key, now);
+    return;
+  }
+  if (!flag.alarm) {
+    // As before story 13, the phone alert alone marks the anomaly alerted: a failed dispatch leaves the next raise free.
+    if (await dispatchFlag(ledger.deps, flag, targets.rows[0], workspace, now, result)) markFlagAlerted(state, flag.key, now);
+    for (const row of targets.rows) await routeLine(ledger, flag, row, 'flag', flag.text, 'warn');
+    return;
+  }
+  let alerted = false;
+  for (const row of targets.rows) {
+    // A digest line's copy still held in this tab's digest already says it (review r1, R2): the raise counts as alerted
+    // there. An urgent raise is typed whatever the digest holds (confirmation N2).
+    if (flag.alarm.severity === 'warn' && await heldAt(ledger, flag, flag.alarm, row, 'raise')) alerted = true;
+    else if (await routeLine(ledger, flag, row, 'alarm', alarmLine(flag.alarm, row, now), flag.alarm.severity)) alerted = true;
+  }
+  if (alerted) markFlagAlerted(state, flag.key, now);
+  else deferFlagRaise(state, flag.key);
+};
+
+/**
+ * Whether a copy of the alarm still waits in the tab's digest. An unreadable log answers no on a raise (delivery
+ * never depends on a ledger read, ADR-0035 §4) and yes on a repeat (no repeat on a guess).
+ */
+const heldAt = async (ledger: ILedgerDelivery, flag: IRaisedFlag, alarm: ILedgerAlarm, row: IFleetRow, path: 'raise' | 'repeat'): Promise<boolean> =>
+  (await copiesAt(ledger, flag, alarm, row, path))?.held ?? path === 'repeat';
+
+const copiesAt = async (
+  ledger: ILedgerDelivery, flag: IRaisedFlag, alarm: ILedgerAlarm, row: IFleetRow, path: 'raise' | 'repeat',
+): Promise<{ held: boolean; lastDeliveredAt: number | null } | null> => {
+  try {
+    return await ledger.deps.alarmCopies(flag.workspaceId, row.tabId, alarmOpening(alarm), ledger.now - ALARM_COPY_LOOKBACK_MS);
+  } catch (err) {
+    log.warn(`ledger alarm ${flag.key}: copies at ${row.tabId} unreadable on the ${path} (${errorText(err)})`);
+    return null;
+  }
+};
+
+/**
+ * A standing item alarm is said again to each routed tab once the repeat window has passed since the later of its
+ * last copy to that tab (or, with none, its last alert, or the tick that recorded it) and that copy's delivery; never
+ * while a copy still waits in the tab's digest. A repeat is a digest line whatever the raise was (consult ruling 13, a).
+ */
+const repeatLedgerAlarm = async (
+  ledger: ILedgerDelivery, entry: IFlagAlertEntry, workspace: IWorkspace | undefined, repeatMs: number,
+): Promise<void> => {
+  const { flag } = entry;
+  const alarm = flag.alarm!;
+  const targets = ledgerFlagTargets(flag, ledger.routes.get(flag.workspaceId) ?? EMPTY_ROUTE_TABLE, workspace, ledger.view);
+  if (!targets.ok) return;
+  const sends = ledger.state.alarmSends.get(flag.key);
+  // Read once, before any send below moves lastAlertAt: a tab with no copy of its own never waits on a sibling's send.
+  const keyAnchor = Math.max(entry.lastAlertAt ?? -Infinity, entry.raisedAt!);
+  for (const row of targets.rows) {
+    const lastSent = sends?.get(row.tabId) ?? keyAnchor;
+    if (ledger.now - lastSent < repeatMs) continue;
+    const copies = await copiesAt(ledger, flag, alarm, row, 'repeat');
+    if (!copies || copies.held) continue;
+    const anchor = Math.max(lastSent, copies.lastDeliveredAt ?? -Infinity);
+    if (ledger.now - anchor < repeatMs) continue;
+    if (await routeLine(ledger, flag, row, 'alarm', alarmLine(alarm, row, ledger.now), 'warn')) markFlagAlerted(ledger.state, flag.key, ledger.now);
+  }
 };
 
 const realDeps = (): IFlagAlertDeps => ({
@@ -419,8 +706,43 @@ const realDeps = (): IFlagAlertDeps => ({
   fleetView: async (now) => (await import('@/lib/fleet-status-snapshot')).readFleetView(now),
   flowThresholds: async () => (await import('@/lib/flow-view')).readFlowThresholds(),
   readFlow: async (workspaceId) => (await import('@/lib/flow-store')).readFlow(workspaceId),
+  finderResults: () => cachedFinderResults(),
   dispatch: async (draft, ctx) => (await import('@/lib/notification-dispatcher')).getNotificationDispatcher().dispatch(draft, ctx),
+  ledgerRouting: async () => {
+    const { readFleetConfig } = await import('@/lib/fleet-config-store');
+    const { routing, errors } = parseLedgerRouting((await readFleetConfig()).values);
+    const logged = errors.join('\n') || null;
+    if (g.__ptLedgerRoutingLogged !== logged) {
+      g.__ptLedgerRoutingLogged = logged;
+      for (const error of errors) log.warn(error);
+    }
+    return routing;
+  },
+  routeTabEvent: async (event) => (await import('@/lib/status-manager')).getStatusManager().routeTabEvent(event),
+  alarmCopies: async (workspaceId, tabId, opening, since) => (await import('@/lib/ledger-store')).getLedgerStore()
+    .tabEvents.copies(workspaceId, tabId, 'alarm', opening, since),
 });
+
+/**
+ * The route tables and thresholds the fleet config holds. A route table that does not parse routes its workspace to
+ * the orchestrator, as an unset one does, and is named in `errors`.
+ */
+export const parseLedgerRouting = (values: Readonly<Record<string, { value: string }>>): { routing: ILedgerRouting; errors: string[] } => {
+  const routes = new Map<string, IRouteTable>();
+  const thresholdValues = new Map<string, string>();
+  const errors: string[] = [];
+  for (const [key, { value }] of Object.entries(values)) {
+    if (key.startsWith(LEDGER_ALARM_KEYS.routePrefix)) {
+      const { table, error } = parseRouteTable(value);
+      if (error) errors.push(`${key}: ${error}; the orchestrator gets every alarm of the workspace`);
+      else routes.set(key.slice(LEDGER_ALARM_KEYS.routePrefix.length), table);
+    } else if (key.startsWith(LEDGER_ALARM_KEYS.thresholdPrefix)) {
+      thresholdValues.set(key.slice(LEDGER_ALARM_KEYS.thresholdPrefix.length), value);
+    }
+  }
+  const { thresholds, errors: thresholdErrors } = resolveThresholds(thresholdValues);
+  return { routing: { routes, thresholds }, errors: [...errors, ...thresholdErrors] };
+};
 
 interface IFlagAlertTimer {
   timer: ReturnType<typeof setInterval> | null;
@@ -431,6 +753,7 @@ const g = globalThis as unknown as {
   __ptFlagAlertState?: IFlagAlertState;
   __ptFlagAlertTick?: IFlagAlertTimer;
   __ptFlagAlertConfigLogged?: string | null;
+  __ptLedgerRoutingLogged?: string | null;
 };
 if (!g.__ptFlagAlertState) g.__ptFlagAlertState = createFlagAlertState();
 if (!g.__ptFlagAlertTick) g.__ptFlagAlertTick = { timer: null, running: null };

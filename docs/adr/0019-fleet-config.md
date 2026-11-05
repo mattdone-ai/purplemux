@@ -14,7 +14,7 @@ On 2026-09-26 the orchestrator changed one number, the gate slot cap, from 4 to 
 ## Decision
 Option 3.
 - Store: `{ values: { <key>: { value, version, setAt, setBy } }, versions: { <key>: n }, history: [last 200] }`, file mode 0600, one process lock, tmp + rename. A malformed file is refused (`config-store-unreadable`), never read as empty.
-- Keys match `^[a-z][a-z0-9.-]{1,63}$`. A value is one line of text of at most 256 characters, without control or format characters; the reader parses it.
+- Keys match `^[a-z][A-Za-z0-9._-]{1,63}$` (widened 2026-11-03 by ADR-0039 so a key can end in a workspace id). A value is one line of text of at most 256 characters, without control or format characters; the reader parses it.
 - Versions count per key and never repeat: an unset raises the version too, and `versions` remembers it, so an `--expect-version` taken before an unset cannot match after a new set. Setting the value a key already holds is not a change.
 - Routes: `GET /api/cli/fleet-config[?key=|?history=1[&key=]]` (any valid scope); `PUT` and `DELETE /api/cli/fleet-config/<key>` with an optional `expectedVersion`.
 - Authority: the admin token, or the tab that is its workspace's enabled `orchestratorTabId` — the rule of the deploy lease. This is cooperative, not a security boundary (C-312 class): every agent can read the admin token.

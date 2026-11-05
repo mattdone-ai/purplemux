@@ -12,6 +12,7 @@ import {
   withdrawInState,
 } from '@/lib/inbox-store';
 import { createLogger } from '@/lib/logger';
+import { classifyWake } from '@/lib/wake-class';
 import type { TAgentDispatchPolicyCheck } from '@/lib/agent-dispatch-policy';
 import type { IInboxItem, IInboxState, TInboxKind } from '@/types/inbox';
 import type { IClientTabStatusEntry } from '@/types/status';
@@ -70,6 +71,8 @@ export interface IInboxDispatcherDeps {
   deliver: (sessionName: string, line: string) => Promise<void>;
   /** The pasted line still sits in the composer (the Enter was swallowed). */
   isPending: (sessionName: string, line: string) => Promise<boolean>;
+  /** Write a delivered notice to the tab's durable event log (ADR-0035); a failure never undoes the delivery. */
+  recordDelivered?: (item: IInboxItem) => void;
 }
 
 type TAttempt = (
@@ -174,7 +177,14 @@ export class InboxDispatcher {
       // This makes terminal owner transitions serialize with both the paste and its receipt.
       await attempt.settle?.();
     }
-    if (attempt.outcome === 'delivered') log.info({ id: item.id, kind: item.kind, tabId: item.targetTabId }, 'inbox delivered');
+    if (attempt.outcome === 'delivered') {
+      log.info({ id: item.id, kind: item.kind, tabId: item.targetTabId }, 'inbox delivered');
+      try {
+        this.deps.recordDelivered?.(item);
+      } catch (err) {
+        log.warn(`inbox delivery of ${item.id} not recorded: ${err instanceof Error ? err.message : err}`);
+      }
+    }
     else if (attempt.outcome !== 'refused' && attempt.outcome !== 'withdrawn') log.info({ id: item.id, tabId: item.targetTabId, ...attempt }, `inbox ${attempt.outcome}`);
   }
 
@@ -273,13 +283,15 @@ const g = globalThis as unknown as { __ptInboxRuntime?: IInboxRuntime };
 
 /** The server's dispatcher dependencies (exported for the wiring test). */
 export const defaultInboxDeps = async (): Promise<IInboxDispatcherDeps> => {
-  const [{ readLayoutFile, resolveLayoutFile, collectAllTabs }, { hasSession, isContentPendingInComposer }, { getStatusManager }, { capturePaneAtWidth }, { withAgentDispatchLock }, { deliverPrompt }] = await Promise.all([
+  const [{ readLayoutFile, resolveLayoutFile, collectAllTabs }, { hasSession, isContentPendingInComposer }, { getStatusManager }, { capturePaneAtWidth }, { withAgentDispatchLock }, { deliverPrompt }, { getLedgerStore }, { appendDelivered }] = await Promise.all([
     import('@/lib/layout-store'),
     import('@/lib/tmux'),
     import('@/lib/status-manager'),
     import('@/lib/capture-at-width'),
     import('@/lib/agent-dispatch-policy'),
     import('@/lib/agent-prompt-delivery'),
+    import('@/lib/ledger-store'),
+    import('@/lib/tab-event-router'),
   ]);
   return {
     now: () => Date.now(),
@@ -306,6 +318,10 @@ export const defaultInboxDeps = async (): Promise<IInboxDispatcherDeps> => {
     withDispatchLock: (workspaceId, tab, work) => withAgentDispatchLock(workspaceId, tab, work),
     deliver: deliverPrompt,
     isPending: isContentPendingInComposer,
+    // Inbox notices keep their own delivery and receipts (consult ruling 3); the log records each with its class.
+    recordDelivered: (item) => appendDelivered(getLedgerStore().tabEvents, {
+      workspaceId: item.targetWorkspaceId, tabId: item.targetTabId, kind: item.kind, text: item.line, class: classifyWake(item.kind),
+    }, Date.now()),
   };
 };
 

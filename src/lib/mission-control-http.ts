@@ -60,7 +60,13 @@ export const sendMissionError = (res: NextApiResponse, error: unknown): void => 
     if (error.code === 'storage-unavailable') {
       log.error({ status: error.status, code: error.code }, 'Mission Control storage failure');
     }
-    res.status(error.status).json({ error: error.message, code: error.code, ...(error.current ? { current: error.current } : {}) });
+    res.status(error.status).json({
+      error: error.message,
+      code: error.code,
+      ...(error.current ? { current: error.current } : {}),
+      ...(error.detail?.defects ? { defects: error.detail.defects } : {}),
+      ...(error.detail?.changes ? { changes: error.detail.changes } : {}),
+    });
     return;
   }
   const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name)

@@ -24,8 +24,8 @@ const GRAMMAR = {
   missionId: /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z]{1,16}-[0-9a-f]{32})$/,
   workspaceId: /^ws-[A-Za-z0-9_-]{1,32}$/,
   tabId: /^tab-[A-Za-z0-9_-]{1,32}$/,
-  // owner/repo#123, owner/repo@ref, or a lease name (lease-policy grammar).
-  watchTarget: /^(?:[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}(?:#\d{1,7}|@[A-Za-z0-9_./-]{1,100})|[a-z][a-z0-9-]{1,31}:[a-z0-9._/@#:+-]{1,200})$/,
+  // owner/repo#123, owner/repo@ref, a lease name (lease-policy grammar), or aws-sso:<profile> (ADR-0041).
+  watchTarget: /^(?:[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}(?:#\d{1,7}|@[A-Za-z0-9_./-]{1,100})|[a-z][a-z0-9-]{1,31}:[a-z0-9._/@#:+-]{1,200}|aws-sso:[A-Za-z0-9._-]{1,64})$/,
 } as const;
 
 type TGrammar = keyof typeof GRAMMAR;
@@ -81,14 +81,15 @@ export const noteFromWords = (from: {
 export interface INoteFields { noteId: string; fromWorkspaceId: string | null; fromTabId: string | null;
   fromHuman?: boolean; fromOwner?: boolean; sentAt: number; event?: TNoteEvent }
 /** What a watch notice reports (ADR-0015). Every value is a server enum or a grammar-checked id. */
-export type TWatchNotice = 'merged' | 'closed' | 'head-moved' | 'checks-settled' | 'moved' | 'free' | 'failing' | 'expired';
-const WATCH_NOTICES: readonly TWatchNotice[] = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'failing', 'expired'];
-const WATCH_FAILURES = ['http-404', 'http-403', 'timeout', 'auth', 'gh-missing', 'other'] as const;
-const WATCH_UNTILS = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free'] as const;
+export type TWatchNotice = 'merged' | 'closed' | 'head-moved' | 'checks-settled' | 'moved' | 'free' | 'signed-in' | 'failing' | 'expired';
+const WATCH_NOTICES: readonly TWatchNotice[] = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'signed-in', 'failing', 'expired'];
+const WATCH_FAILURES = ['http-404', 'http-403', 'timeout', 'auth', 'gh-missing', 'sso-config', 'other'] as const;
+const WATCH_UNTILS = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'signed-in'] as const;
 
 /**
  * `sha` is the head (or ref) now, `fromSha` the baseline; `green`/`red` count settled checks;
- * `code` is a failing notice's server-classified token; `until` the condition an expired watch waited for.
+ * `code` is a failing notice's server-classified token; `until` the condition an expired watch waited for;
+ * `expiresAt` the SSO token's own expiry on a `signed-in` notice (ADR-0041).
  */
 export interface IWatchFields {
   watchId: string;
@@ -102,6 +103,7 @@ export interface IWatchFields {
   successful?: number;
   code?: (typeof WATCH_FAILURES)[number];
   until?: (typeof WATCH_UNTILS)[number];
+  expiresAt?: number;
 }
 export interface IDeployFields { deployId: string; restartAt: number; inMinutes: number }
 /**
@@ -172,6 +174,7 @@ const TEMPLATES: { [K in TInboxKind]: TRenderer<K> } = {
       'checks-settled': () => `${target} checks settled at ${sha('sha')}: ${count('green', f.green)} green, ${count('red', f.red)} red${cleared}`,
       moved: () => `${target} moved ${sha('fromSha')} -> ${sha('sha')}${cleared}`,
       free: () => `${target} is free${cleared}`,
+      'signed-in': () => `${target} is signed in: its SSO token is valid until ${time('expiresAt', f.expiresAt)}; retry the step that needed it${cleared}`,
       failing: () => `${target} is failing: ${oneOf('code', f.code, WATCH_FAILURES)} — purplemux watch list shows the error; still trying until it expires`,
       expired: () => `${target} expired without ${oneOf('until', f.until, WATCH_UNTILS)}${cleared}`,
     }[f.notice]();

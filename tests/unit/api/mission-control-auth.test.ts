@@ -6,6 +6,8 @@ const store = vi.hoisted(() => ({
   submitAnswer: vi.fn(),
   applyEvents: vi.fn(),
   unreplayedEventIds: vi.fn(),
+  // The events route reads the touched items' states before applying (story 33 R2).
+  itemStates: vi.fn(() => new Map()),
   humanInboxPolicy: vi.fn(),
 }));
 const runtime = vi.hoisted(() => ({
@@ -163,7 +165,7 @@ describe('Mission Control agent authorization', () => {
     await handler({ method: 'POST', query: { workspaceId: 'ws-a' }, headers: {}, body: { events: [start] } } as unknown as NextApiRequest, res);
     expect(state.statusCode).toBe(200);
     expect(runtime.resolveMissionTargetIdentity).toHaveBeenCalledWith('ws-a', 'tab-a');
-    expect(store.applyEvents).toHaveBeenCalledWith([start], expect.any(Map));
+    expect(store.applyEvents).toHaveBeenCalledWith([start], expect.any(Map), { questionMinVersion: 1 });
   });
 
   it('rejects a batch containing another workspace before storage', async () => {
@@ -230,6 +232,6 @@ describe('Mission Control agent authorization', () => {
     expect(state.statusCode).toBe(200);
     expect(runtime.resolveMissionTargetIdentity).not.toHaveBeenCalled();
     expect(workspace.getWorkspaceById).not.toHaveBeenCalled();
-    expect(store.applyEvents).toHaveBeenCalledWith([replay], new Map());
+    expect(store.applyEvents).toHaveBeenCalledWith([replay], new Map(), { questionMinVersion: 1 });
   });
 });

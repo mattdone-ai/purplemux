@@ -1,11 +1,11 @@
 import { collectAllTabs, parseSessionName, readLayoutFile, resolveLayoutFile } from '@/lib/layout-store';
-import type { IAgentLaunchConfig, ITab } from '@/types/terminal';
+import type { IAgentLaunchConfig, IAgentLaunchOptions, ITab } from '@/types/terminal';
 
 export interface IResolvedAgentLaunchPolicy {
   workspaceId: string;
   tabId: string;
   sessionName: string;
-  options: IAgentLaunchConfig;
+  options: IAgentLaunchOptions;
 }
 
 export const agentLaunchConfigFromOptions = (
@@ -20,10 +20,13 @@ export const agentLaunchConfigFromOptions = (
 };
 
 export const agentLaunchOptionsForTab = (
-  tab: Pick<ITab, 'agentLaunchConfig'>,
-): IAgentLaunchConfig => ({
+  tab: Pick<ITab, 'agentLaunchConfig' | 'role' | 'previewOrigin' | 'pgService'>,
+): IAgentLaunchOptions => ({
   ...(tab.agentLaunchConfig?.model !== undefined ? { model: tab.agentLaunchConfig.model } : {}),
   ...(tab.agentLaunchConfig?.effort !== undefined ? { effort: tab.agentLaunchConfig.effort } : {}),
+  ...(tab.role !== undefined ? { role: tab.role } : {}),
+  ...(tab.previewOrigin !== undefined ? { previewOrigin: tab.previewOrigin } : {}),
+  ...(tab.pgService !== undefined ? { pgService: tab.pgService } : {}),
 });
 
 export const resolveAgentLaunchPolicy = async (

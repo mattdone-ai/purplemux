@@ -45,6 +45,8 @@ Answer transaction: require an item that is open with a stamped human-exclusive 
 
 **Attention class and stated default (ADR-0031).** `attention.opened` and `attention.updated` accept optional `class` (`money` | `irreversible` | `scope` | `bookkeeping`) and optional `defaultOptionId`, which must name one of the item's `options[].id` and is refused on an `action` item. An unknown class or a foreign default refuses the whole batch with 400 and a message that names the field. Both fields live inside `question_json` (read by the plain spread), so `SCHEMA_VERSION` stays 4 and a schema-4 binary rolled back onto the file passes the keys through on read and refuses them on write (`.strict()`; ruling R10). `IMissionAttentionItem` carries `class` and `defaultOptionId`, `null` when absent; the server never guesses a class. `attention.updated` replaces both under the item revision rule, and a change of either on an open item needs renewed review. `IMissionSnapshot.answersByClass` lists `{day, class, by, count}` for the 7 UTC days that end on the UTC day of the snapshot's `generatedAt` (today included), from `answers` joined to `attention_items` in the snapshot read; `class` is `unclassified` for an item without one, and `by` is `rule` only for the actor `system:auto-answer`. Rows are sparse: when `answersByClass` is present, a missing (day, class, by) row is a count of 0; when the field is absent (an older server), the counts are unknown. "Needs you" groups items Money, Irreversible, Scope, Bookkeeping, Unclassified; a card shows its class and "Default: <option label>" and never pre-selects the default.
 
+**Question format v2 (ADR-0037).** `question_json.formatVersion: 2` marks the format-2 question (`decision`, `whyNow`, `answerType`, options with `consequence`/`recommended`/`needsText`, `recommendationWhy`, `evidence`, markdown `context`, `source`); an item without it is v1. One pure validator (`validateMissionQuestion`, `src/lib/mission-question-format.ts`) checks both attention events; a refusal is 400 `question-invalid` with every defect (`field`, `measured`, `limit`) and nothing written. Fleet config `mission.question-format.min-version` (admin only, default 1) decides whether a new v1 question is accepted with `lint` (1) or refused (2); at 2 an update may keep a v1 item v1 but not turn a format-2 item back into v1. Each `attention.updated` stores a `changes` record in the side table `mission_item_changes`; an answer on revision r applies to the current r' when every revision between them is compatible (same decision and answer type, no option removed) and records `appliedRevision`; otherwise 409 with `changes`. The served item carries `evidenceLinks`, `lint` and `changes`. The web card renders the decision first, the markdown context, and an answer control per answer type; a revision never leaves Submit disabled without a reason on screen. `purplemux mc ask` runs the check route before it posts.
+
 **Bookkeeping auto-answer (ADR-0031 §4-§8).** Fleet config `attention.auto-answer.bookkeeping-minutes` (admin token only) is an integer 1..10080; unset or invalid is off, and an invalid value is logged. A 60 s tick (`globalThis.__ptAutoAnswerTick`, started beside the Mission Control runtime, stopped in `shutdownWs`) calls `MissionControlStore.submitSystemAnswer` for each item that is `open`, has a review whose `humanNeed` is not `none`, has `class: bookkeeping`, is not an `action`, has a `defaultOptionId` naming a current option, and whose `updated_at` is at least N minutes old. Inside the answer transaction the store re-checks all of these and the revision the tick read (`expectedRevision`), so a human answer or a cancel that came first wins (409) and a race leaves one answer. The answer is `optionIds: [defaultOptionId]`, actor `system:auto-answer`, `submissionId` `auto:<itemId>:<revision>` (a repeat replays, so a restart never answers twice) and text equal to the note: `Auto-answered under fleet config attention.auto-answer.bookkeeping-minutes=<N> (version <v>) at <ISO time>: applied the stated default "<option label>".` Its `answer.recorded` payload adds `actor: system:auto-answer`. The same transaction writes one row of the unversioned side table `mission_auto_answers(answer_id PRIMARY KEY, item_id, workspace_id, rule, rule_version, applied_option_id, at, note)` (`CREATE TABLE IF NOT EXISTS`; `SCHEMA_VERSION` stays 4). Delivery, acknowledgement and resolution are the human path; the rule never resolves or cancels. Each item carries `autoAnswer: {rule, ruleVersion, appliedOptionId, at, note} | null`; the snapshot carries `autoAnswered` (7 days, newest first, at most 100). The submission namespace `auto:` and the event-ID namespace `answer:auto:` are reserved (400). Each rule answer appends one `attention-auto-answer` audit line (`itemId`, `workspaceId`, `rule`, `ruleVersion`, `optionId`, `ageMs`).
 
 ## Delivery and bootstrap worker
@@ -147,6 +149,41 @@ side table `mission_item_openers`, inside the same transaction. The opener comes
 credential (ADR-0010), never from the payload: `launch` is verified, `hook` and `session` are asserted. It is not
 authorization, and `IMissionSnapshot` and the event feed do not carry it. A missing row means unattributed. The
 trust-boundary sentence above still holds for a workspace-token caller; a launch tab token does name its tab.
+
+## Board (ADR-0034)
+
+`GET /api/mission-control/board?workspaceId=all|WS` (human session only; a CLI token gets 401; default `all`)
+answers `IBoard` (`src/types/constraint.ts`) for one workspace, or `{boards: IBoard[]}` for all; an unknown
+workspace answers 404. `GET /api/cli/workspaces/{ws}/board[?mine=1]` serves the same answer with read scope, and
+`board show -w WS [--json|--line|--mine]` prints it. The answer is the constraint finder's cached result (a 60 s tick,
+`src/lib/constraint-tick.ts`) plus `needsYou`, Mission Control's open items (`{id, title, createdAt, blocked}`; null
+when the store is unreadable), and `experiments` (the ledger's experiments with no verdict; null when unreadable).
+`blocked` is `{items, hours, critical}`: the open ledger items waiting `owner` whose link (parent) is `mc-item:<id>`,
+their summed waiting hours and whether any is critical; null when no ledger item links to the MC item, and null for
+every row when the ledger is not measured (the faces then say "blocked cost not measured: <ledger reason>", apart
+from "no ledger item links to this item"). `inputs.ledger.state` other than `ok` means the ledger measures (constraint, stuck, windows,
+anomalies, `ownerBlocks`) were not taken; `onTrack.goal` is null until `purplemux board goal set`, and `onTrack.state`
+is then `at-risk` with `reason` "no goal set" and `goalState: none`; an unreadable goal file is `goalState: unknown`
+with `reason` "goal not measured: <reason>", never "no goal set".
+
+**Goal** (story 12 AC 5). `GET|PUT|DELETE /api/cli/workspaces/{ws}/board-goal` (`PUT {label, items}`; writes from the
+workspace's own token only) and `purplemux board goal set -w WS --items KEY,KEY --label TEXT | show | clear`. The goal
+is stored in `workspaces/{ws}/board-goal.json`; a write drops the finder's cached answer, so the next read forecasts it.
+`onTrack` then carries `itemsLeft` (goal keys the ledger does not hold closed), `throughputPerDay` (closes of the goal
+keys' item types in each of the last 3 days, dropped and superseded left out), and `p50At` / `p90At` from an exact
+bootstrap over those days (`src/lib/board-forecast.ts`, pure); no close in 3 days is no forecast, never a date.
+
+**Pulse** (ADR-0034 §9). `GET /api/mission-control/pulse?workspaceId=all|WS` (human session; `{pulses: IPulse[]}` for
+all) and `GET /api/cli/workspaces/{ws}/pulse` (read scope; `purplemux board pulse -w WS [--json]`) answer `IPulse`
+(`src/types/pulse.ts`): 48 clock-hour bars of movement, each source's own state, the stall marker, work in progress
+with its basis, and priority now. Cached 60 s per workspace; each source read has a 10 s deadline, and reads on the sshfs `_output` mount run at most 2
+at a time behind a breaker ("<mount> not answering since <time>"). `scope` says whose
+movement it is: an epic lease's records and repositories, or the workspace's own directories; a source read from a
+directory another workspace lists too carries `sharedWith` and is never counted (ADR-0034 §9).
+
+**The view.** `/mission-control` (`?view=board`, the default) is the board: the pulse rows first, then one workspace's
+sections in ADR-HFL-02 order. `?view=answers` is the Needs you answer list and `?item=<id>` opens it on that item's
+card; `?view=portfolio` is the portfolio board. The board sends no write.
 
 ## Flow (ADR-0026)
 

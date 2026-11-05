@@ -8,6 +8,7 @@ import type { IHookSpoolDrainResult } from '@/lib/hook-spool';
 import type { StatusManager } from '@/lib/status-manager';
 import type { ITabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
+import { memoryLedgerTables } from './tab-events-harness';
 
 // ADR-0020: the server replays what hooks spooled while no server answered —
 // once it listens and on every poll, oldest first, through the hook route's own
@@ -125,7 +126,7 @@ const managerWithPaste = async (afterReplay?: () => Promise<void>) => {
   });
   await import('@/lib/providers');
   const { StatusManager } = await import('@/lib/status-manager');
-  const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}));
+  const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), ...memoryLedgerTables());
   // The route's dispatcher reaches the manager through the singleton.
   g.__ptStatusManager = manager;
   const { dispatchHook } = await import('@/lib/hook-dispatch');
@@ -544,25 +545,29 @@ describe('the status manager replays the hook spool (ADR-0020)', () => {
         await vi.advanceTimersByTimeAsync(10);
       }
     };
-    // The write itself is real I/O: yield to the event loop until it has started (bounded).
-    const flushed = async (expected: number) => {
-      for (let i = 0; i < 5_000 && floorWrites() < expected; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    // The write itself is real I/O: yield to the event loop until it has started, bounded by real time (performance is not
+    // faked). A wait for a write that must NOT have started uses a short bound; a wait for one that must start uses a long
+    // one, because under host load the real rename can take longer than a fixed number of event-loop turns (gate
+    // int-14-merge: expected 1 to be 2).
+    const flushed = async (expected: number, boundMs: number) => {
+      const deadline = performance.now() + boundMs;
+      while (floorWrites() < expected && performance.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
     };
     sync.broadcastSync.mockClear();
     for (const writer of Object.values(layoutWrites)) writer.mockClear();
 
     await burst(); // 0 s to 2 s
-    await flushed(1);
+    await flushed(1, 250);
     expect(floorWrites()).toBe(0);
     await vi.advanceTimersByTimeAsync(3_000); // 5 s
-    await flushed(1);
+    await flushed(1, 10_000);
     expect(floorWrites()).toBe(1);
     await burst(); // 5 s to 7 s
     await vi.advanceTimersByTimeAsync(2_900); // 9.9 s
-    await flushed(2);
+    await flushed(2, 250);
     expect(floorWrites()).toBe(1);
     await vi.advanceTimersByTimeAsync(200); // 10.1 s
-    await flushed(2);
+    await flushed(2, 10_000);
     expect(floorWrites()).toBe(2);
     await manager.shutdown(); // the last write has landed
 
@@ -572,7 +577,7 @@ describe('the status manager replays the hook spool (ADR-0020)', () => {
     expect(JSON.parse(await fs.readFile(floorsFile, 'utf-8'))).toEqual({ c: entry.lastEvent!.at });
     expect(sync.broadcastSync.mock.calls.filter(([message]) => message.type === 'layout')).toEqual([]);
     for (const writer of Object.values(layoutWrites)) expect(writer).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it('a stale replayed hook meta patch changes nothing and says stale', async () => {
     const { manager } = await managerWithPaste();

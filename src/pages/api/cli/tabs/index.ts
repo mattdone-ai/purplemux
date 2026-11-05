@@ -16,14 +16,19 @@ import { agentLaunchConfigFromOptions } from '@/lib/agent-launch-policy';
 import { checkAgentDispatchPolicy } from '@/lib/agent-dispatch-policy';
 import { checkReportOn, checkReportsTo, isReportOnInvalid } from '@/lib/reports-to';
 import { tabIdentityOf } from '@/lib/tab-token';
-import { RemoteHostError, isValidRemoteHostName, readRemoteHosts, remoteDirExists } from '@/lib/remote-host';
+import { RemoteHostError, isValidRemoteHostName, originName, readRemoteHosts, remoteDirExists } from '@/lib/remote-host';
 import fs from 'fs/promises';
 import path from 'path';
-import type { TPanelType } from '@/types/terminal';
+import type { TPanelType, TTabRole } from '@/types/terminal';
 import type { TCliState } from '@/types/timeline';
 import type { ILastEvent } from '@/types/status';
 import { remoteHostUnreachableBody } from '@/lib/cli-error';
 import { WipCapError, admitAgentCreate, auditOverCap } from '@/lib/tab-cap';
+import { checkEvaluatorBrowser, checkTabRole } from '@/lib/tab-role';
+import { AUTO_HOST, resolveAutoHost, type IAutoPlacement } from '@/lib/pool-tab-placement';
+import { placeOnPool } from '@/lib/pool-service';
+import { checkSeatOptions } from '@/lib/context-lifecycle';
+import type { TRotateAt } from '@/types/context-lifecycle';
 
 const log = createLogger('api:cli:tabs');
 
@@ -62,11 +67,14 @@ type TCwdCheck = { ok: true } | { ok: false; status: number; body: Record<string
  * remote worker works in its own checkout there; this host's tree says nothing
  * about it (ADR-0022).
  */
+const isCwdShape = (cwd: unknown): cwd is string => typeof cwd === 'string' && path.isAbsolute(cwd) && !/[\0\n\r]/.test(cwd);
+
+const CWD_SHAPE_REFUSAL = (cwd: unknown): TCwdCheck =>
+  ({ ok: false, status: 400, body: { error: 'cwd must be an absolute directory path', code: 'cwd-missing', cwd: typeof cwd === 'string' ? cwd : null } });
+
 const checkCwd = async (cwd: unknown, host: string | undefined): Promise<TCwdCheck> => {
   const where = host ?? 'this host';
-  if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || /[\0\n\r]/.test(cwd)) {
-    return { ok: false, status: 400, body: { error: 'cwd must be an absolute directory path', code: 'cwd-missing', cwd: typeof cwd === 'string' ? cwd : null } };
-  }
+  if (!isCwdShape(cwd)) return CWD_SHAPE_REFUSAL(cwd);
   let exists: boolean;
   if (host) {
     try {
@@ -110,6 +118,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       identity: 'launch' | 'hook' | 'none';
       /** The remote host that runs the tab (ADR-0022); absent for a local tab. */
       host?: string;
+      /** The tab's fixed tool configuration (ADR-0040); absent for an ordinary tab. */
+      role?: TTabRole;
+      previewOrigin?: string;
+      pgService?: string;
+      /** The seat's handoff file (ADR-0036); absent for a tab that never rotates. */
+      handoffPath?: string;
+      rotateAt?: TRotateAt;
     }> = [];
 
     // An unscoped list must not become a directory of every other epic's
@@ -149,6 +164,11 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
             reportOn: tab.reportOn ?? null,
             identity: tab.panelType === 'web-browser' ? 'none' : tabIdentityOf(id, tab.id),
             ...(tab.host ? { host: tab.host } : {}),
+            ...(tab.role ? { role: tab.role } : {}),
+            ...(tab.previewOrigin ? { previewOrigin: tab.previewOrigin } : {}),
+            ...(tab.pgService ? { pgService: tab.pgService } : {}),
+            ...(tab.handoffPath ? { handoffPath: tab.handoffPath } : {}),
+            ...(tab.rotateAt !== undefined ? { rotateAt: tab.rotateAt } : {}),
           });
         }
       }
@@ -157,7 +177,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   if (req.method === 'POST') {
-    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, reportOn, host, cwd, overCap } = req.body as {
+    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, reportOn, host, cwd, role, previewUrl, pgService, overCap, handoff, rotateAt } = req.body as {
       workspaceId?: string;
       name?: string;
       panelType?: string;
@@ -169,7 +189,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       reportOn?: unknown;
       host?: unknown;
       cwd?: unknown;
+      role?: unknown;
+      previewUrl?: unknown;
+      pgService?: unknown;
       overCap?: unknown;
+      handoff?: unknown;
+      rotateAt?: unknown;
     };
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspaceId is required' });
@@ -189,6 +214,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     // The markers whose end lines reach the target (ADR-0025); absent or null forwards every marker.
     const reportOnChecked = reportOn === undefined ? { markers: null } : checkReportOn(reportOn);
     if (isReportOnInvalid(reportOnChecked)) return res.status(400).json(reportOnChecked);
+    const seat = checkSeatOptions(handoff, rotateAt, host);
+    if (!seat.ok) return res.status(400).json(seat);
     const dispatchPolicy = await checkAgentDispatchPolicy(workspaceId);
     if (!dispatchPolicy.ok) {
       return res.status(409).json(dispatchPolicy);
@@ -203,14 +230,37 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         validPanelTypes: VALID_PANEL_TYPES,
       });
     }
-    const resolvedType: TPanelType = panelType ? (panelType as TPanelType) : 'terminal';
+    // `--host auto` (ADR-0039 §4): a role tab is placed here, so its role check sees no host.
+    const roleCheck = checkTabRole(role, panelType as TPanelType | undefined, host === AUTO_HOST ? undefined : host, previewUrl, pgService);
+    if (!roleCheck.ok) return res.status(400).json(roleCheck.body);
+    if (roleCheck.role === 'evaluator') {
+      const browser = await checkEvaluatorBrowser();
+      if (!browser.ok) return res.status(400).json({ error: browser.error, code: 'invalid-request', role: roleCheck.role });
+    }
+    const resolvedType: TPanelType = panelType ? (panelType as TPanelType) : roleCheck.role ? 'claude-code' : 'terminal';
     let remoteHost: string | undefined;
-    if (host !== undefined) {
-      const checked = await checkRemoteHost(host, resolvedType);
+    let autoPlacement: IAutoPlacement | null = null;
+    let requestedHost: unknown = host;
+    let cwdCheckedOnHost = false;
+    if (host === AUTO_HOST) {
+      if (cwd !== undefined && !isCwdShape(cwd)) {
+        const refused = CWD_SHAPE_REFUSAL(cwd);
+        if (!refused.ok) return res.status(refused.status).json(refused.body);
+      }
+      const auto = await resolveAutoHost(
+        { panelType: resolvedType, role: roleCheck.role ?? undefined, cwd: isCwdShape(cwd) ? cwd : undefined },
+        { place: placeOnPool, cwdOnHost: remoteDirExists, localName: originName },
+      );
+      autoPlacement = auto.placement;
+      requestedHost = auto.host;
+      cwdCheckedOnHost = !!auto.cwdChecked;
+    }
+    if (requestedHost !== undefined) {
+      const checked = await checkRemoteHost(requestedHost, resolvedType);
       if (!checked.ok) return res.status(checked.status).json(checked.body);
       remoteHost = checked.host;
     }
-    if (cwd !== undefined) {
+    if (cwd !== undefined && !cwdCheckedOnHost) {
       const checkedCwd = await checkCwd(cwd, remoteHost);
       if (!checkedCwd.ok) return res.status(checkedCwd.status).json(checkedCwd.body);
     }
@@ -237,7 +287,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     const shouldLaunch = launch !== false && isAgentPanelType(resolvedType);
     const agentLaunchConfig = agentLaunchConfigFromOptions(model, reasoning);
     const command = shouldLaunch
-      ? await buildFreshLaunchCommand(workspaceId, { panelType: resolvedType, host: remoteHost, agentLaunchConfig })
+      ? await buildFreshLaunchCommand(workspaceId, { panelType: resolvedType, host: remoteHost, agentLaunchConfig, role: roleCheck.role, previewOrigin: roleCheck.previewOrigin, pgService: roleCheck.pgService })
       : undefined;
 
     try {
@@ -247,7 +297,11 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         reportsTo: typeof reportsTo === 'string' ? reportsTo : undefined,
         reportOn: reportOnChecked.markers ?? undefined,
         host: remoteHost,
+        role: roleCheck.role,
+        previewOrigin: roleCheck.previewOrigin,
+        pgService: roleCheck.pgService,
         admit: admission?.admit,
+        ...seat.options,
       });
       if (!tab) return res.status(500).json({ error: 'Failed to create tab' });
       const wip = admission?.wip() ?? null;
@@ -267,9 +321,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
           agentSessionId: provider?.readSessionId(tab) ?? null,
           reportsTo: tab.reportsTo ?? null,
           reportOn: tab.reportOn ?? null,
+          handoffPath: tab.handoffPath ?? null,
+          rotateAt: tab.rotateAt ?? null,
           lastEvent: null,
           eventSeq: 0,
         });
+        if (tab.handoffPath) getStatusManager().registerSeat(tab.id);
         if (command) getStatusManager().markAgentLaunch(tab.id);
       }
 
@@ -323,7 +380,13 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         ...(tab.reportOn ? { reportOn: tab.reportOn } : {}),
         ...(codexLaunchState ? { launchState: codexLaunchState } : {}),
         ...(tab.host ? { host: tab.host } : {}),
+        ...(tab.role ? { role: tab.role } : {}),
+        ...(tab.previewOrigin ? { previewOrigin: tab.previewOrigin } : {}),
+        ...(tab.pgService ? { pgService: tab.pgService } : {}),
+        ...(tab.handoffPath ? { handoffPath: tab.handoffPath } : {}),
+        ...(tab.rotateAt !== undefined ? { rotateAt: tab.rotateAt } : {}),
         ...(wip ? { wip } : {}),
+        ...(autoPlacement ? { placement: autoPlacement } : {}),
       });
     } catch (err) {
       if (err instanceof WipCapError) return res.status(409).json(err.body);

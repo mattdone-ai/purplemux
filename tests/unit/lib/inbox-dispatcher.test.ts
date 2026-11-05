@@ -27,6 +27,7 @@ interface IWorld {
   deliverFails: boolean;
   stranded: boolean;
   turnEndAt: number | null;
+  recordFails?: boolean;
 }
 
 const setup = (overrides: Partial<IWorld> = {}) => {
@@ -40,6 +41,7 @@ const setup = (overrides: Partial<IWorld> = {}) => {
   });
   const tab = (): ITab => ({ id: 'tab-w', name: 'w', order: 0, sessionName: world.sessionName, panelType: world.panelType });
   const calls: string[] = [];
+  const recorded: string[] = [];
   const deps: IInboxDispatcherDeps = {
     now: () => world.clock,
     mutate: async (fn) => {
@@ -68,6 +70,7 @@ const setup = (overrides: Partial<IWorld> = {}) => {
     },
     deliver: async (session: string, line: string) => { calls.push('deliver'); await deliver(session, line); },
     isPending: async () => world.stranded,
+    recordDelivered: (item) => { if (world.recordFails) throw new Error('ledger down'); recorded.push(item.id); },
   };
   const dispatcher = new InboxDispatcher(deps);
   const enqueue = (dedupeKey = 'k1', resumeId = 'r-abcd12') => {
@@ -85,12 +88,30 @@ const setup = (overrides: Partial<IWorld> = {}) => {
     return result.item;
   };
   const item = (id = 'i-k1') => world.state.items.find((i) => i.id === id)!;
-  return { world, dispatcher, deliver, enqueue, enqueueWatch, item, calls };
+  return { world, dispatcher, deliver, enqueue, enqueueWatch, item, calls, recorded };
 };
 
 const LINE = '[purplemux resume r-abcd12] the last turn ended on an API error — continue from where it was cut off';
 
 describe('inbox dispatcher (ADR-0012)', () => {
+  it('records each delivered notice in the tab event log once, and only a delivered one (ADR-0035)', async () => {
+    const { dispatcher, enqueue, recorded, world } = setup({ cliState: 'busy' });
+    enqueue();
+    await dispatcher.tick();
+    expect(recorded).toEqual([]);
+    world.cliState = 'idle';
+    await dispatcher.tick();
+    await dispatcher.tick();
+    expect(recorded).toEqual(['i-k1']);
+  });
+
+  it('a log that cannot be written leaves the delivery delivered', async () => {
+    const { dispatcher, enqueue, item } = setup({ recordFails: true });
+    enqueue();
+    await dispatcher.tick();
+    expect(item()).toMatchObject({ state: 'delivered' });
+  });
+
   it('delivers the exact rendered line once to an idle agent with an empty composer', async () => {
     const { dispatcher, deliver, enqueue, item } = setup();
     enqueue();

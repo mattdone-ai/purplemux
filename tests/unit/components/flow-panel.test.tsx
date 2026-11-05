@@ -9,6 +9,8 @@ import FlowPanel, {
   FLOW_LIST_URL, FLOW_REFRESH_MS, FlowPanelContent, flowDetailUrl, flowSelection, newestFlowWorkspace,
 } from '@/components/features/mission-control/flow-panel';
 import type { IFlowPanelContentProps } from '@/components/features/mission-control/flow-panel';
+import { BOARD_URL, PULSE_URL } from '@/components/features/mission-control/owner-board';
+import { deriveConstraint } from '@/lib/constraint';
 import MissionControlPage from '@/pages/mission-control';
 import type { IFlowDerived, IFlowRecord, IMissionFlowDetailResponse, IMissionFlowListResponse, IMissionFlowSummary } from '@/types/flow';
 
@@ -263,17 +265,22 @@ describe('FlowPanel through the SWR cache', () => {
 });
 
 describe('the default Mission Control view', () => {
-  it('mounts the flow panel after Needs you and before the portfolio board', () => {
+  it('mounts the flow panel inside the board\'s flow section, not beside the answer list (story 12 AC 6)', () => {
     const router = { pathname: '/mission-control', asPath: '/mission-control', query: {}, push: async () => true } as unknown as NextRouter;
+    const board = (generatedAt: number) => ({ boards: [{ ...deriveConstraint(null, null, null, null, generatedAt), workspaceId: 'ws-a',
+      stuckTotal: 0, needsYou: [], experiments: null, ageMs: 0, staleSince: null }] });
     const html = renderToStaticMarkup(
-      <SWRConfig value={{ provider: () => new Map() as never, fallback: { [FLOW_LIST_URL]: list(), [flowDetailUrl('ws-a')]: detail() } }}>
+      <SWRConfig value={{ provider: () => new Map() as never, fallback: {
+        [FLOW_LIST_URL]: list(), [flowDetailUrl('ws-a')]: detail(), [BOARD_URL]: board(NOW), [PULSE_URL]: { pulses: [] },
+      } }}>
         <RouterContext.Provider value={router}><MissionControlPage /></RouterContext.Provider>
       </SWRConfig>,
     );
-    const needsYou = html.indexOf('id="needs-you-heading"');
+    const flowSection = html.indexOf('data-board-section="flow"');
     const flow = html.indexOf('aria-label="Flow"');
-    expect(needsYou).toBeGreaterThan(-1);
-    expect(flow).toBeGreaterThan(needsYou);
-    expect(flow).toBeLessThan(html.indexOf('>Portfolio board</h1>'));
+    expect(flowSection).toBeGreaterThan(-1);
+    expect(flow).toBeGreaterThan(flowSection);
+    expect(flow).toBeLessThan(html.indexOf('data-board-section="experiments"'));
+    expect(html).not.toContain('id="needs-you-heading"');
   });
 });

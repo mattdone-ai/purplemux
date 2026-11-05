@@ -5,9 +5,12 @@ import { FLEET_CONFIG_KEYS } from '@/lib/fleet-status-snapshot';
 import { FLAG_ALERT_CONFIG_KEYS } from '@/lib/flag-alerts';
 import { FLOW_CONFIG_KEYS } from '@/lib/flow-flags';
 import { AUTO_ANSWER_KEY } from '@/lib/mission-control-auto-answer';
+import { QUESTION_MIN_VERSION_KEY } from '@/lib/mission-question-config';
 import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY } from '@/lib/remote-host';
 import { TAB_CAP_KEY } from '@/lib/tab-cap';
 import { IDLE_NUDGE_CONFIG_KEY, WAIT_BACKSTOP_CONFIG_KEY } from '@/lib/turn-end';
+import { ROTATE_AT_CONFIG_KEY } from '@/lib/context-lifecycle';
+import { CURATOR_KEYS } from '@/lib/curator-service';
 
 vi.mock('@/lib/workspace-token', () => ({ resolveCliScope: () => ({ type: 'admin' }) }));
 
@@ -21,9 +24,16 @@ const SERVER_KEYS = [
   REMOTE_CALLBACK_URL_KEY,
   REMOTE_CALLBACK_ALLOW_HOSTS_KEY,
   TAB_CAP_KEY,
+  `${TAB_CAP_KEY}.<workspaceId>`,
+  'pool.slots.<host>.<gate|build|tab>',
+  'pool.fallback.<alias>',
+  'pool.gate-host.<host>',
   ...Object.values(FLOW_CONFIG_KEYS),
   AUTO_ANSWER_KEY,
+  QUESTION_MIN_VERSION_KEY,
   ...Object.values(FLAG_ALERT_CONFIG_KEYS),
+  ROTATE_AT_CONFIG_KEY,
+  ...Object.values(CURATOR_KEYS),
 ];
 
 const keysInUse = async (): Promise<string> => {

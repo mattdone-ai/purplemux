@@ -38,3 +38,10 @@ parser reads and sanitised (no prompts, secrets or paths beyond what the parser 
 
 Not recorded anywhere on this host, so not fixtured and not classified: a Claude usage-limit HALT, and any
 Grok error (named gaps, ADR-0018 story-26 amendment).
+
+## `owner-issues/`
+
+`owner-issues.yaml` is a synthetic file in the shape of treasury-v2's `.v2/owner-issues.yaml` (story 35; no owner
+text copied). `tests/unit/lib/owner-found-defects.test.ts` turns it into the ledger events the v2 feed sends after the
+kit fix of consult Q2 (`open` at the file's mtime, `attrs.raisedAt` = 00:00 `Australia/Sydney` of the `raised` date) and
+pins that the finder counts by the raised time, not by when the feed first saw the row.

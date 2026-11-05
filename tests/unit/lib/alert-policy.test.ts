@@ -125,6 +125,15 @@ describe('alertFor', () => {
     expect(unknown.body).toBe('pid 4242 exited with unknown status');
   });
 
+  it('a needs-decision alert has its fixed title and a body cut at 100 code points (ADR-0041)', () => {
+    const detail = `w1 · ws-a: ${'€'.repeat(150)}`;
+    const alert = alertFor({ ...base, kind: 'needs-decision', detail });
+    expect(alert.title).toBe('Decision needed: no Mission Control item');
+    expect(Array.from(alert.body)).toHaveLength(100);
+    expect(alert.body).toBe(Array.from(detail).slice(0, 100).join(''));
+    expect(alertFor({ ...base, kind: 'needs-decision', detail: 'w1 · ws-a: Ship it?' }).body).toBe('w1 · ws-a: Ship it?');
+  });
+
   it('clamps liveness alert bodies and falls back to the tab name', () => {
     expect(alertFor({ ...base, kind: 'work-stalled', detail: 'x'.repeat(200) }).body).toHaveLength(100);
     expect(alertFor({ ...base, kind: 'bg-job-died', detail: null }).body).toBe('orchestrator');
@@ -227,5 +236,58 @@ describe('isStallEpisodeEnd', () => {
   it('stays quiet before the heartbeat budget is spent', () => {
     expect(isStallEpisodeEnd(1, 3, false)).toBe(false);
     expect(isStallEpisodeEnd(2, 3, false)).toBe(false);
+  });
+});
+
+describe('alertFor kind attention-opened', () => {
+  const source = (overrides: Partial<Parameters<typeof alertFor>[0]> = {}) => ({
+    kind: 'attention-opened' as const,
+    tabId: ORCH_TAB,
+    workspaceId: 'ws-1',
+    workspaceName: 'Epic',
+    tabName: 'orchestrator',
+    providerId: 'claude' as const,
+    isOrchestrator: true,
+    at: AT,
+    itemId: 'item-1',
+    itemTitle: '  Approve the go-live?  ',
+    ...overrides,
+  });
+
+  it('titles the alert for Mission Control, uses the trimmed item title as body and carries the itemId', () => {
+    expect(alertFor(source())).toEqual({
+      kind: 'attention-opened',
+      tabId: ORCH_TAB,
+      workspaceId: 'ws-1',
+      workspaceName: 'Epic',
+      tabName: 'orchestrator',
+      providerId: 'claude',
+      isOrchestrator: true,
+      title: 'Mission Control: answer needed',
+      body: 'Approve the go-live?',
+      at: AT,
+      itemId: 'item-1',
+    });
+  });
+
+  it('cuts a long title to 100 code points', () => {
+    expect(alertFor(source({ itemTitle: 'x'.repeat(150) })).body).toBe('x'.repeat(100));
+  });
+
+  it('falls back to the workspace name when the item has no title', () => {
+    expect(alertFor(source({ itemTitle: '   ' })).body).toBe('Epic');
+    expect(alertFor(source({ itemTitle: null, workspaceName: '' })).body).toBe('orchestrator');
+    expect(alertFor(source({ itemTitle: null, workspaceName: '', tabName: '' })).body).toBe(ORCH_TAB);
+  });
+
+  it('carries no itemId when none is given', () => {
+    expect(alertFor(source({ itemId: undefined }))).not.toHaveProperty('itemId');
+  });
+
+  it('carries the question summary on attention-opened only (story 33 AC 3)', () => {
+    const question = { formatVersion: 2 as const, decision: 'Ship?', answerType: 'confirm' as const, revision: 1, options: [] };
+    expect(alertFor(source({ question })).question).toEqual(question);
+    expect(alertFor(source())).not.toHaveProperty('question');
+    expect(alertFor({ ...source({ question }), kind: 'review' })).not.toHaveProperty('question');
   });
 });

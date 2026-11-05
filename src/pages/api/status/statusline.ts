@@ -8,6 +8,7 @@ import { writeProviderRateLimits } from '@/lib/rate-limits-cache';
 import { writeSessionStats, readSessionStats } from '@/lib/session-stats';
 import { broadcastSessionStats } from '@/lib/timeline-server';
 import { createLogger } from '@/lib/logger';
+import { getStatusManager } from '@/lib/status-manager';
 import type { ISessionStats } from '@/types/timeline';
 
 const log = createLogger('statusline');
@@ -132,6 +133,23 @@ const buildSessionStats = (input: IClaudeStatusInput): ISessionStats | null => {
   };
 };
 
+/** The context a seat is measured on (ADR-0036 §1): the last request's input, cache writes and cache reads. */
+const contextTokensOf = (input: IClaudeStatusInput): number | null => {
+  const cu = input.context_window?.current_usage;
+  if (!input.session_id || !cu) return null;
+  return (cu.input_tokens ?? 0) + (cu.cache_creation_input_tokens ?? 0) + (cu.cache_read_input_tokens ?? 0);
+};
+
+const recordContextIfPresent = (input: IClaudeStatusInput): void => {
+  const tokens = contextTokensOf(input);
+  if (tokens === null || !input.session_id) return;
+  try {
+    getStatusManager().recordContextReading(input.session_id, tokens);
+  } catch (err) {
+    log.debug({ err }, 'context reading not kept');
+  }
+};
+
 const persistSessionStatsIfPresent = async (input: IClaudeStatusInput): Promise<void> => {
   const stats = buildSessionStats(input);
   if (!stats) return;
@@ -154,6 +172,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   const input = (req.body ?? {}) as IClaudeStatusInput;
+  recordContextIfPresent(input);
 
   await Promise.all([
     writeRateLimitsIfPresent(input),

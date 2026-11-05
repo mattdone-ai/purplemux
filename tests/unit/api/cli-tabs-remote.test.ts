@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const layout = vi.hoisted(() => ({ addTabToPane: vi.fn() }));
 const registry = vi.hoisted(() => ({ hosts: ['ai-server'] as string[] | Error }));
 const registerTab = vi.hoisted(() => vi.fn());
+const pool = vi.hoisted(() => ({ place: vi.fn() }));
+vi.mock('@/lib/pool-service', () => ({ placeOnPool: pool.place }));
 
 vi.mock('@/lib/workspace-layout-read', () => ({ readWorkspaceLayout: vi.fn(async () => ({ root: {} })) }));
 vi.mock('@/lib/layout-store', () => ({
@@ -199,5 +201,89 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
     const tabs = (state.body as { tabs: Array<Record<string, unknown>> }).tabs;
     expect(tabs.find((t) => t.tabId === 'tab-r')?.host).toBe('ai-server');
     expect(tabs.find((t) => t.tabId === 'tab-l')).not.toHaveProperty('host');
+  });
+});
+
+describe('POST /api/cli/tabs with host auto (ADR-0039 §4; consult ruling, story 17)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    registry.hosts = ['ai-lan'];
+    dirs.remote = true;
+    pool.place.mockResolvedValue({ ok: true, host: 'ai-lan', local: false, reason: 'most free memory: 250 GiB' });
+    layout.addTabToPane.mockImplementation(async (_ws, _pane, name, cwd, panelType, _cmd, opts) => ({
+      id: 'tab-new', sessionName: 'pt-ws-a-pane-one-tab-new', name, order: 0, cwd, panelType, ...(opts?.host ? { host: opts.host } : {}),
+    }));
+  });
+
+  it('a claude-code tab goes where the pool places it, through the --host checks, and says why', async () => {
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code' });
+    expect(state.statusCode).toBe(201);
+    expect(pool.place).toHaveBeenCalledWith({ kind: 'tab', memGb: 0, panelType: 'claude-code' });
+    expect(state.body).toMatchObject({ host: 'ai-lan', placement: { host: 'ai-lan', local: false, reason: 'most free memory: 250 GiB', fallback: false } });
+    expect(layout.addTabToPane.mock.calls[0][6]).toMatchObject({ host: 'ai-lan' });
+  });
+
+  it('a placement on this host creates a local tab', async () => {
+    pool.place.mockResolvedValue({ ok: true, host: 'mdserver1', local: true, reason: 'type-local-only: a codex-cli tab runs on this host (ADR-0022 §13)' });
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'terminal' });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).not.toHaveProperty('host');
+    expect(state.body).toMatchObject({ placement: { local: true, fallback: false } });
+    expect(layout.addTabToPane.mock.calls[0][6].host).toBeUndefined();
+  });
+
+  it('the placement asks with the tab type it will create', async () => {
+    pool.place.mockResolvedValue({ ok: true, host: 'mdserver1', local: true, reason: 'role-local-only' });
+    await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'codex-cli' });
+    expect(pool.place).toHaveBeenLastCalledWith({ kind: 'tab', memGb: 0, panelType: 'codex-cli' });
+  });
+
+  it('a pool that refuses or fails places the tab here and logs it; the create never fails on the pool', async () => {
+    pool.place.mockResolvedValue({ ok: false, refusal: 'no-known-host', reason: 'no host can be read' });
+    const refused = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code', launch: false });
+    expect(refused.statusCode).toBe(201);
+    expect(refused.body).toMatchObject({ placement: { local: true, fallback: true, reason: expect.stringContaining('no-known-host') } });
+    pool.place.mockRejectedValue(new Error('fleet-config.json is malformed'));
+    const failed = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code', launch: false });
+    expect(failed.statusCode).toBe(201);
+    expect(failed.body).not.toHaveProperty('host');
+  });
+
+  it('a --cwd missing on the chosen host places the tab here', async () => {
+    dirs.remote = false;
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code', cwd: '/tmp', launch: false });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).toMatchObject({ placement: { local: true, fallback: true, reason: expect.stringContaining('/tmp is not a directory on ai-lan') } });
+    expect(layout.addTabToPane.mock.calls[0][6].host).toBeUndefined();
+  });
+
+  it('a --cwd the placement proved on the chosen host is probed once, not twice (r2 F4)', async () => {
+    const { remoteDirExists } = await import('@/lib/remote-host');
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code', cwd: '/home/mdone/pool/x', launch: false });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).toMatchObject({ host: 'ai-lan' });
+    expect(remoteDirExists).toHaveBeenCalledTimes(1);
+  });
+
+  it('an ssh failure while probing the --cwd names the host, never "not a directory" (r2 F4)', async () => {
+    const { RemoteHostError } = await import('@/lib/remote-host');
+    dirs.remote = new RemoteHostError('ai-lan', 'remote host ai-lan did not answer over ssh');
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code', cwd: '/tmp', launch: false });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).toMatchObject({ placement: { local: true, fallback: true, reason: expect.stringContaining('ai-lan did not answer') } });
+  });
+
+  it.each(['relative/dir', '/x\ny'])('a --cwd that is not an absolute path is refused before the pool is asked: %j', async (cwd) => {
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code', cwd, launch: false });
+    expect(state.statusCode).toBe(400);
+    expect(state.body).toMatchObject({ code: 'cwd-missing' });
+    expect(pool.place).not.toHaveBeenCalled();
+  });
+
+  it('a chosen host that left remote.hosts is refused by the same check as --host', async () => {
+    registry.hosts = [];
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'auto', panelType: 'claude-code' });
+    expect(state.statusCode).toBe(400);
+    expect(state.body).toMatchObject({ code: 'remote-host-invalid' });
   });
 });

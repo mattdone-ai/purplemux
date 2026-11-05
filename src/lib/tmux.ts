@@ -158,7 +158,12 @@ const createRemoteSession = async (
     env.PMUX_URL = await resolveCallbackUrl();
     tabEnv = { tabId: identity.tabId, content: remoteTabEnvFile({ PMUX_TAB_TOKEN: await ensureTabToken(identity, name) }) };
   }
-  const { getClaudePromptPath } = await import('@/lib/claude-prompt');
+  const { getClaudePromptPath, writeClaudePromptFile } = await import('@/lib/claude-prompt');
+  // The kit copies the prompt file now, so it carries the standing orders active at this create (ADR-0041).
+  if (identity) {
+    await writeClaudePromptFile({ id: identity.workspaceId }).catch((err) => log.error(
+      `claude prompt for ${identity.workspaceId} not rewritten before remote create; the kit gets the last file written: ${err instanceof Error ? err.message : err}`));
+  }
   const [tmuxConf, cliJs, prompt] = await Promise.all([
     fs.readFile(TMUX_CONFIG_PATH, 'utf-8'),
     fs.readFile(CLI_JS_PATH, 'utf-8').catch(() => null),

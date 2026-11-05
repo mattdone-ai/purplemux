@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MissionControlError } from '@/lib/mission-control-errors';
-import { parseMissionEvents } from '@/lib/mission-control-validation';
+import { parseMissionAnswer, parseMissionEvents } from '@/lib/mission-control-validation';
 
 const event = (humanReview: unknown) => ({
   eventId: 'event-review',
@@ -147,5 +147,18 @@ describe('Mission Control attention class and stated default (ADR-0031)', () => 
     }
     expect(thrown).toBeInstanceOf(MissionControlError);
     expect((thrown as MissionControlError).status).toBe(400);
+  });
+});
+
+describe('answer source (story 33 R3)', () => {
+  const answer = { submissionId: 's-1', expectedRevision: 1, optionIds: ['a'], text: '', actionCompleted: false };
+
+  it('accepts web, phone and notification, and an answer with none', () => {
+    for (const source of ['web', 'phone', 'notification'] as const) expect(parseMissionAnswer({ ...answer, source }).source).toBe(source);
+    expect(parseMissionAnswer(answer)).not.toHaveProperty('source');
+  });
+
+  it('refuses an unknown source with 400', () => {
+    expect(() => parseMissionAnswer({ ...answer, source: 'desktop' })).toThrowError(MissionControlError);
   });
 });

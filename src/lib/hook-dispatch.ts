@@ -111,6 +111,10 @@ const handleCodexHook = async ({ query, body, replayedAt, occurredAt }: IHookDel
       ? statusManager.applyAgentHookMeta('codex', tmuxSession, translation.meta, replayedAt ?? occurredAt)
       : null;
     if (!applied) return { applied: null };
+    // Codex reports each tool call to no signal engine; the turn counts it for the effect counts (story 15).
+    if (payload.hook_event_name === 'PostToolUse' && typeof payload.tool_name === 'string') {
+      statusManager.handleToolCall('codex', tmuxSession, payload.tool_name, replayedAt ?? occurredAt ?? Date.now());
+    }
     if (translation.sessionInfo && !applied.stale) {
       codexHookEvents.emit('session-info', tmuxSession, translation.sessionInfo);
       if (translation.clearSession) codexHookEvents.emit('session-clear', tmuxSession);

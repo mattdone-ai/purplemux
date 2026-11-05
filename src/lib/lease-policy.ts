@@ -29,6 +29,8 @@ export const LEASE_KINDS: Readonly<Record<string, IKindPolicy>> = Object.freeze(
   'dev-write': { defaultTtlSeconds: 60 * MIN, maxTtlSeconds: 8 * HOUR, survivesTab: false, requiresEpic: false, orchestratorOnly: false, resourcePattern: null, resourceForm: '<env>' },
   deploy: { defaultTtlSeconds: 30 * MIN, maxTtlSeconds: 2 * HOUR, survivesTab: false, requiresEpic: false, orchestratorOnly: true, resourcePattern: null, resourceForm: '<service>' },
   epic: { defaultTtlSeconds: null, maxTtlSeconds: 7 * DAY, survivesTab: false, requiresEpic: false, orchestratorOnly: false, resourcePattern: EPIC_SLUG, resourceForm: `an epic slug (${EPIC_SLUG.source})` },
+  // A pool slot (ADR-0039): placed and numbered by `pool acquire`; it ends with its holder tab or its TTL.
+  pool: { defaultTtlSeconds: 60 * MIN, maxTtlSeconds: DAY, survivesTab: false, requiresEpic: false, orchestratorOnly: false, resourcePattern: /^[a-z0-9._-]+\/(gate|build|tab)-[0-9]{1,3}$/, resourceForm: '<host>/<gate|build|tab>-<n>' },
   num: { defaultTtlSeconds: 14 * DAY, maxTtlSeconds: 30 * DAY, survivesTab: true, requiresEpic: true, orchestratorOnly: false, resourcePattern: /^[a-z0-9._-]+\/[a-z0-9._-]+:(adr|migration):[0-9]{1,6}$/, resourceForm: '<owner>/<repo>:<adr|migration>:<nnnn>' },
 });
 

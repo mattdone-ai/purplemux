@@ -38,7 +38,9 @@ const entryFor = (agentSessionId: string | null): ITabStatusEntry => ({
 describe('watchdogTurnEnd persists through the real layout file (review r2 nit 4)', () => {
   afterEach(async () => {
     const store = await import('@/lib/layout-store');
-    await fs.rm(store.resolveLayoutDir(wsId), { recursive: true, force: true });
+    // The real status manager can still be writing into the workspace directory when the test ends (seen as ENOTEMPTY
+    // under the full parallel suite): rm retries until the late write has landed.
+    await fs.rm(store.resolveLayoutDir(wsId), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it('writes the record through layout-store, and a rebuilt manager reads it back and restores the stop; another session\'s record is dropped from disk', async () => {

@@ -1,0 +1,19 @@
+{
+  "source": "_output/harness-flow-loop/evidence/receipt-to-main-decompose.out, section \"== lane\" (run 2026-11-03 ~03:20Z, since 2026-10-26T22:00:00Z, 568 ranges)",
+  "note": "Hours per parsed state over the 7.2-day run. 'queued' is the ledger's land-queue; the lock was held during 936 of its 1,026 h (91%), so 936 h is land-queue/lock-busy and the rest land-queue/head-blocked. 'staging' and 'restage' are chain work, not waits (ADR-HFL-01 section 5: landchain sends 'state staged'), so they carry no reason. 'preflight-gate' is pre-flight-gate, 'under-lock' under-lock-gate, 'receipt-mismatch' receipt-rekey.",
+  "days": 7.22,
+  "hours": {
+    "land-queue/lock-busy": 936.0,
+    "land-queue/head-blocked": 89.6,
+    "not-armed": 523.5,
+    "own-lane-order": 187.5,
+    "group-partner": 112.3,
+    "lock-wait": 108.8,
+    "chain-down": 85.8,
+    "pre-flight-gate": 41.8,
+    "under-lock-gate": 36.9,
+    "rework": 30.7,
+    "guard-hold": 7.9,
+    "receipt-rekey": 0.3
+  }
+}

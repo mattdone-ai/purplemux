@@ -7,6 +7,7 @@ import {
 import {
   buildClaudeFlags,
   buildResumeCommand as buildClaudeResumeCommand,
+  claudeCommand,
   isValidSessionId as isValidClaudeSessionId,
 } from '@/lib/claude-command';
 import { writeClaudePromptFile } from '@/lib/claude-prompt';
@@ -82,11 +83,11 @@ export const claudeProvider: IAgentProvider = {
   isAgentRunning: (panePid, childPids) => isClaudeRunning(panePid, childPids),
   watchSessions: (panePid, onChange, options) => watchSessionsDir(panePid, onChange, options),
 
-  buildResumeCommand: (sessionId, { workspaceId, model, effort }) =>
-    buildClaudeResumeCommand(sessionId, workspaceId, { model, effort }),
-  buildLaunchCommand: async ({ workspaceId, model, effort }) => {
-    const flags = await buildClaudeFlags(workspaceId, { model, effort });
-    return `claude ${flags}`;
+  buildResumeCommand: (sessionId, { workspaceId, model, effort, role, previewOrigin, pgService }) =>
+    buildClaudeResumeCommand(sessionId, workspaceId, { model, effort, role, previewOrigin, pgService }),
+  buildLaunchCommand: async ({ workspaceId, model, effort, role, previewOrigin, pgService }) => {
+    const opts = { model, effort, role, previewOrigin, pgService };
+    return claudeCommand(await buildClaudeFlags(workspaceId, opts), opts);
   },
 
   readSessionId: (tab) => readField(tab, 'sessionId'),

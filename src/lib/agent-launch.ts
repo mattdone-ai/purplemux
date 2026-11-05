@@ -1,5 +1,5 @@
 import { getStatusManager } from '@/lib/status-manager';
-import { buildClaudeFlags, buildRemoteClaudeLaunch } from '@/lib/claude-command';
+import { buildClaudeFlags, buildRemoteClaudeLaunch, claudeCommand } from '@/lib/claude-command';
 import { grokProvider } from '@/lib/providers/grok';
 import { agentLaunchOptionsForTab } from '@/lib/agent-launch-policy';
 import {
@@ -10,7 +10,7 @@ import {
   waitForCodexManagedLaunch,
 } from '@/lib/providers/codex/managed-launch';
 import type { IAgentProvider } from '@/lib/providers/types';
-import type { IAgentLaunchConfig, TPanelType } from '@/types/terminal';
+import type { IAgentLaunchConfig, TPanelType, TTabRole } from '@/types/terminal';
 
 // One place builds every agent launch (ADR-0028 §8): tab create, auto-resume
 // and tab restart. The server builds the command from the tab's persisted
@@ -21,6 +21,10 @@ export interface IAgentLaunchTab {
   /** A remote tab (ADR-0022) launches claude through the remote kit. */
   host?: string;
   agentLaunchConfig?: IAgentLaunchConfig;
+  /** Every launch of an evaluator tab carries its tool configuration (ADR-0040). */
+  role?: TTabRole;
+  previewOrigin?: string;
+  pgService?: string;
 }
 
 export interface IAgentLaunchTarget extends IAgentLaunchTab {
@@ -58,11 +62,13 @@ export type TAgentLaunchResult =
 
 /** The fresh launch command of a claude-code or grok-cli tab; a Codex tab launches through its managed path. */
 export const buildFreshLaunchCommand = async (workspaceId: string, tab: IAgentLaunchTab): Promise<string | undefined> => {
-  const { model, effort } = agentLaunchOptionsForTab(tab);
+  const { model, effort, role, previewOrigin, pgService } = agentLaunchOptionsForTab(tab);
   if (tab.panelType === 'claude-code') {
+    // The remote kit has no evaluator tool configuration: refuse rather than launch it unrestricted (ADR-0040).
+    if (tab.host && role) throw new Error(`a ${role} tab cannot run on remote host ${tab.host} (ADR-0040)`);
     return tab.host
       ? buildRemoteClaudeLaunch(workspaceId, { model, effort })
-      : `claude ${await buildClaudeFlags(workspaceId, { model, effort })}`;
+      : claudeCommand(await buildClaudeFlags(workspaceId, { model, effort, role, previewOrigin }), { role, pgService });
   }
   // The catch-all used to be codex, which launched codex inside a grok tab.
   if (tab.panelType === 'grok-cli') return grokProvider.buildLaunchCommand({ workspaceId, model, effort });

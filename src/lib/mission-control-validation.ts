@@ -1,7 +1,12 @@
 import { z } from 'zod';
-import type { IMissionAnswerRequest, TMissionProducerEvent } from '@/types/mission-control';
+import type {
+  IMissionAnswerRequest,
+  IMissionEventDefect,
+  IMissionEventLint,
+  TMissionProducerEvent,
+} from '@/types/mission-control';
 import { MissionControlError } from '@/lib/mission-control-errors';
-import { ATTENTION_CLASSES } from '@/lib/attention-class';
+import { validateMissionQuestion } from '@/lib/mission-question-format';
 
 const id = z.string().trim().min(1).max(128);
 const timestamp = z.number().int().safe().nonnegative();
@@ -18,11 +23,6 @@ const storyCounts = z.object({
   done: revision,
   blocked: revision,
 }).strict().refine((value) => value.done <= value.total && value.blocked <= value.total, 'invalid story counts');
-const option = z.object({
-  id,
-  label: shortText,
-  description: z.string().trim().max(8000).optional(),
-}).strict();
 const reviewText = z.string().trim().min(1).max(1000);
 const humanReview = z.discriminatedUnion('humanNeed', [
   z.object({
@@ -37,34 +37,6 @@ const humanReview = z.discriminatedUnion('humanNeed', [
     reviewerTabId: id,
   }).strict(),
 ]);
-const question = z.object({
-  kind: z.enum(['question', 'action']),
-  title: shortText,
-  context: z.string().trim().min(1).max(8000),
-  storyIds: z.array(id).max(20),
-  options: z.array(option).max(20),
-  recommendation: z.string().trim().max(8000).nullable(),
-  blockingScope: z.enum(['none', 'story', 'run']),
-  canContinue: z.boolean(),
-  class: z.enum(ATTENTION_CLASSES, { error: `class must be one of ${ATTENTION_CLASSES.join(', ')}` }).optional(),
-  defaultOptionId: z.string({ error: 'defaultOptionId must be an option ID' }).trim()
-    .min(1, { error: 'defaultOptionId must be a nonempty option ID' })
-    .max(128, { error: 'defaultOptionId must be at most 128 characters' })
-    .optional(),
-}).strict().superRefine((value, context) => {
-  if (new Set(value.storyIds).size !== value.storyIds.length) {
-    context.addIssue({ code: 'custom', message: 'duplicate story IDs' });
-  }
-  if (new Set(value.options.map((entry) => entry.id)).size !== value.options.length) {
-    context.addIssue({ code: 'custom', message: 'duplicate option IDs' });
-  }
-  if (value.defaultOptionId === undefined) return;
-  if (value.kind === 'action') {
-    context.addIssue({ code: 'custom', path: ['defaultOptionId'], message: 'defaultOptionId is refused on an action item' });
-  } else if (!value.options.some((entry) => entry.id === value.defaultOptionId)) {
-    context.addIssue({ code: 'custom', path: ['defaultOptionId'], message: "defaultOptionId must name one of the item's options" });
-  }
-});
 const base = {
   eventId: id,
   schemaVersion: z.literal(1),
@@ -88,8 +60,9 @@ const eventSchema = z.discriminatedUnion('type', [
     closeoutPending: z.boolean().optional(),
   }).strict().refine((value) => Object.keys(value).length > 0, 'progress update must change at least one field') }).strict(),
   z.object({ ...base, type: z.literal('run.finished'), payload: z.object({ state: z.enum(['completed', 'cancelled']), summary: z.string().trim().min(1).max(8000), closeoutPending: z.boolean() }).strict() }).strict(),
-  z.object({ ...base, type: z.literal('attention.opened'), payload: question.extend({ itemId: id, humanReview: humanReview.optional() }) }).strict(),
-  z.object({ ...base, type: z.literal('attention.updated'), payload: question.extend({ itemId: id, humanReview: humanReview.optional() }) }).strict(),
+  // The question fields are checked by validateMissionQuestion (ADR-0037), which names every defect.
+  z.object({ ...base, type: z.literal('attention.opened'), payload: z.object({ itemId: id, humanReview: humanReview.optional() }).loose() }).strict(),
+  z.object({ ...base, type: z.literal('attention.updated'), payload: z.object({ itemId: id, humanReview: humanReview.optional() }).loose() }).strict(),
   z.object({ ...base, type: z.literal('attention.resolved'), payload: z.object({ itemId: id, resolution: z.string().trim().min(1).max(8000) }).strict() }).strict(),
   z.object({ ...base, type: z.literal('attention.cancelled'), payload: z.object({ itemId: id, reason: z.string().trim().min(1).max(8000) }).strict() }).strict(),
   z.object({ ...base, type: z.literal('answer.acknowledged'), payload: z.object({ answerId: id }).strict() }).strict(),
@@ -101,6 +74,8 @@ const answerSchema = z.object({
   optionIds: z.array(id).max(20),
   text: z.string().trim().max(8000),
   actionCompleted: z.boolean(),
+  /** Where the owner answered (story 33): recorded, outside the content hash; absent from older clients. */
+  source: z.enum(['web', 'phone', 'notification']).optional(),
 }).strict().superRefine((value, context) => {
   if (new Set(value.optionIds).size !== value.optionIds.length) {
     context.addIssue({ code: 'custom', message: 'duplicate option selections' });
@@ -120,20 +95,83 @@ const parse = <T>(schema: z.ZodType<T>, input: unknown): T => {
 
 // `answer:auto:` is the event ID of the bookkeeping rule's answer (ADR-0031 §6): its submission ID is
 // predictable, so a producer must not take the event ID first.
-const RESERVED_EVENT_ID_PREFIXES = ['system:migration:', 'system:rebind:', 'answer:auto:'];
+// `system:needs-decision:` is the server's NEEDS-DECISION opener (ADR-0041): only it may take one.
+export const NEEDS_DECISION_EVENT_PREFIX = 'system:needs-decision:';
+/** The server's keep-or-strike item for an order the curator filed (story 23): only it may take one. */
+export const CURATOR_ORDER_EVENT_PREFIX = 'system:curator-so:';
+const RESERVED_EVENT_ID_PREFIXES = ['system:migration:', 'system:rebind:', 'answer:auto:', NEEDS_DECISION_EVENT_PREFIX, CURATOR_ORDER_EVENT_PREFIX];
+/**
+ * Item ids only a server producer opens or revises, by the producer's event prefix: a `strike` answer on a
+ * `curator-so-<n>` item strikes an order, so no tab or token may open one (story 23 review r1 F1).
+ */
+export const CURATOR_ORDER_ITEM_PREFIX = 'curator-so-';
+const RESERVED_ITEM_ID_PREFIXES: ReadonlyArray<{ itemPrefix: string; serverPrefix: string }> = [
+  { itemPrefix: CURATOR_ORDER_ITEM_PREFIX, serverPrefix: CURATOR_ORDER_EVENT_PREFIX },
+];
 const RESERVED_SUBMISSION_ID_PREFIX = 'auto:';
 
-export const parseMissionEvents = (input: unknown): TMissionProducerEvent[] => {
+export interface IMissionEventBatch {
+  events: TMissionProducerEvent[];
+  /** Format-2 findings of the accepted v1 questions (ADR-0037 §2); only events with findings. */
+  lint: IMissionEventLint[];
+}
+
+type TParsedEvent = z.infer<typeof eventSchema>;
+
+/**
+ * Each attention event's question through the one validator: the batch is refused with every
+ * defect of every event, or each payload is replaced by its normalized question.
+ */
+const checkQuestions = (events: TParsedEvent[], minVersion: 1 | 2): IMissionEventBatch => {
+  const defects: IMissionEventDefect[] = [];
+  const lint: IMissionEventLint[] = [];
+  const checked = events.map((event) => {
+    if (event.type !== 'attention.opened' && event.type !== 'attention.updated') return event;
+    const { itemId, humanReview: review, ...question } = event.payload;
+    // AC 3 refuses a NEW v1 question; an update of a v1 item stays v1 with lint (the store refuses a v2 -> v1 downgrade).
+    const verdict = validateMissionQuestion(question, event.type === 'attention.opened' ? minVersion : 1);
+    if (!verdict.ok) {
+      defects.push(...verdict.defects.map((entry) => ({ eventId: event.eventId, itemId, ...entry })));
+      return event;
+    }
+    if (verdict.lint.length) lint.push({ eventId: event.eventId, itemId, findings: verdict.lint });
+    return { ...event, payload: { itemId, ...verdict.question, ...(review ? { humanReview: review } : {}) } };
+  });
+  if (defects.length) {
+    const refused = new Set(defects.map((entry) => entry.eventId)).size;
+    throw new MissionControlError(400, 'question-invalid',
+      `${defects.length} question defect${defects.length === 1 ? '' : 's'} in ${refused} event${refused === 1 ? '' : 's'}: ${defects.map((entry) => entry.message).join('; ')}`,
+      undefined, { defects });
+  }
+  return { events: checked as TMissionProducerEvent[], lint };
+};
+
+/** `serverPrefix`: the one reserved namespace a server producer writes in; no request ever carries it. */
+export const parseMissionEventBatch = (
+  input: unknown,
+  options: { questionMinVersion?: 1 | 2; serverPrefix?: string } = {},
+): IMissionEventBatch => {
   const events = parse(z.array(eventSchema).min(1).max(25), input);
-  if (events.some((event) => RESERVED_EVENT_ID_PREFIXES.some((prefix) => event.eventId.startsWith(prefix)))) {
+  const reserved = RESERVED_EVENT_ID_PREFIXES.filter((prefix) => prefix !== options.serverPrefix);
+  if (events.some((event) => reserved.some((prefix) => event.eventId.startsWith(prefix)))) {
     throw new MissionControlError(400, 'invalid-request', 'event ID uses a reserved namespace');
+  }
+  for (const event of events) {
+    if (event.type !== 'attention.opened' && event.type !== 'attention.updated') continue;
+    const owner = RESERVED_ITEM_ID_PREFIXES.find((r) => event.payload.itemId.startsWith(r.itemPrefix));
+    if (owner && owner.serverPrefix !== options.serverPrefix) {
+      throw new MissionControlError(400, 'invalid-request', `item ID ${event.payload.itemId} uses a namespace only the server opens or revises`);
+    }
   }
   const eventIds = events.map((event) => event.eventId);
   if (new Set(eventIds).size !== eventIds.length) {
     throw new MissionControlError(400, 'invalid-request', 'duplicate event IDs in batch');
   }
-  return events as TMissionProducerEvent[];
+  return checkQuestions(events, options.questionMinVersion ?? 1);
 };
+
+export const parseMissionEvents = (input: unknown, options: { questionMinVersion?: 1 | 2 } = {}): TMissionProducerEvent[] =>
+  parseMissionEventBatch(input, options).events;
 
 export const parseMissionAnswer = (input: unknown): IMissionAnswerRequest => {
   const answer = parse(answerSchema, input);

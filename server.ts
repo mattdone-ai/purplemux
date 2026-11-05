@@ -22,7 +22,11 @@ import { startHostSignals, stopHostSignals } from './src/lib/host-signals';
 import { startWatches, stopWatches } from './src/lib/watch-manager';
 import { startPortfolioRuntime, stopPortfolioRuntime } from './src/lib/portfolio-runtime';
 import { startSpend, stopSpend } from './src/lib/spend/spend-service';
+import { startConstraintFinder, stopConstraintFinder } from './src/lib/constraint-tick';
 import { startFlagAlerts, stopFlagAlerts } from './src/lib/flag-alerts';
+import { startLedgerRetention, stopLedgerRetention } from './src/lib/ledger-retention';
+import { startPoolPoller, stopPoolPoller } from './src/lib/pool-read';
+import { startCurator, stopCurator } from './src/lib/curator-service';
 import { ensureHookSettings, removePortFile } from './src/lib/hook-settings';
 import { dispatchHook } from './src/lib/hook-dispatch';
 import { drainHookSpoolsWithRemotePull } from './src/lib/remote-spool';
@@ -119,8 +123,12 @@ const shutdownWs = async () => {
   await stopAutoAnswerTick();
   await stopInbox();
   await stopFlagAlerts();
+  await stopConstraintFinder();
   await getMissionControlRuntime().stop();
   await stopSpend();
+  stopLedgerRetention();
+  stopPoolPoller();
+  stopCurator();
   await stopWatches();
   await stopNotes();
   stopGrants();
@@ -413,10 +421,18 @@ export const start = async (opts?: IStartOptions): Promise<IStartResult> => {
   await getMissionControlRuntime().start();
   // The bookkeeping auto-answer rule: off until the admin sets its fleet-config key (ADR-0031).
   startAutoAnswerTick();
+  // The constraint finder's 60 s tick caches each workspace's board; its breached anomalies reach the flag tick (ADR-0034).
+  startConstraintFinder();
   // One raise-edge flag tick per process; its first tick, 60 s on, is the no-replay baseline (ADR-0032).
   startFlagAlerts();
   // The spend index starts its first pass 120 s after boot, one transcript at a time (ADR-0030).
   await startSpend();
+  // The work-item ledger's daily rollup and retention pass, first 10 min after boot (ADR-0033).
+  startLedgerRetention();
+  // The pool read model: one ssh read of each remote host now, then every 30 s (ADR-0039).
+  startPoolPoller();
+  // The local curator: the shadow clock, a health probe a minute, the kodit check every 6 h (ADR-0038).
+  await startCurator();
   // The inbox's first tick waits for the first boot drain of the hook spool (at most
   // 10 s): a tab's state from before the restart gap must not look ready (ADR-0020).
   // Note paste-time policy must be registered before the inbox can drain legacy notices.

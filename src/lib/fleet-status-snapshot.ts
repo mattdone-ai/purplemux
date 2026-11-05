@@ -104,14 +104,16 @@ const composerSince = (tab: ITab, status: IClientTabStatusEntry, reading: TCompo
 
 export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promise<IFleetView> => {
   const errors: IFleetView['errors'] = [];
-  const [workspaces, thresholds, watches, leases, openers, tabCap] = await Promise.all([
+  const [workspaces, thresholds, watches, leases, openers] = await Promise.all([
     deps.workspaces(),
     readThresholds(deps.config),
     settle(deps.watches),
     settle(deps.leases),
     settle(async () => deps.openers()),
-    settle(() => readTabCap(deps.config)),
   ]);
+  // Each workspace's cap: its own key wins over the fleet key (story 17 AC 8).
+  const tabCap = await settle(async () =>
+    new Map(await Promise.all(workspaces.map(async (w) => [w.id, (await readTabCap(deps.config, w.id)).cap] as const))));
   if (!tabCap.ok) errors.push({ scope: 'WIP cap', error: tabCap.error });
   if (!watches.ok) errors.push({ scope: 'watches', error: watches.error });
   if (!leases.ok) errors.push({ scope: 'leases', error: leases.error });
@@ -205,7 +207,8 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
   const wip: Record<string, IFleetWip> | undefined = tabCap.ok
     ? Object.fromEntries(workspaces.flatMap((w) => {
       const count = agentTabCounts.get(w.id);
-      return count === undefined ? [] : [[w.id, wipOf(count, tabCap.value.cap)] as const];
+      const cap = tabCap.value.get(w.id);
+      return count === undefined || cap === undefined ? [] : [[w.id, wipOf(count, cap)] as const];
     }))
     : undefined;
 

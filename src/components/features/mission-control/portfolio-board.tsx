@@ -4,8 +4,6 @@ import useSWR from 'swr';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import useWorkspaceStore from '@/hooks/use-workspace-store';
-import BurndownPanel from '@/components/features/mission-control/burndown-panel';
-import SpendTile, { spendTileScope } from '@/components/features/mission-control/spend-tile';
 import { createMissionSubmissionId } from '@/components/features/mission-control/mission-control-utils';
 import type { IGrantee } from '@/types/grant';
 import type { IPortfolioImpact, IPortfolioSnapshot } from '@/types/portfolio';
@@ -175,12 +173,6 @@ export const PortfolioBoardContent = ({ snapshot, priorityFilter, onPriorityFilt
   );
 };
 
-const PortfolioSpendTile = ({ selection, workspaces }: { selection: IPortfolioSnapshot['selection']; workspaces: Array<{ id: string; name: string }> }) => {
-  const scope = spendTileScope(selection, workspaces);
-  // Remount on a new selection so the tile opens on the newly selected workspace.
-  return <SpendTile key={scope.initialWorkspaceId} workspaces={scope.workspaces} initialWorkspaceId={scope.initialWorkspaceId} />;
-};
-
 const PortfolioBoard = () => {
   const workspaces = useWorkspaceStore((state) => state.workspaces);
   const { data: grantees, error: managersError, mutate: refreshManagers } = useSWR('/api/mission-control/portfolio-managers', readManagers);
@@ -303,9 +295,7 @@ const PortfolioBoard = () => {
     {loading ? <p className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">Loading portfolio coverage and blockers…</p>
       : !snapshot ? <p className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">Portfolio unavailable. Retry after the storage or connection error is fixed.</p>
         : snapshot.selection === null ? <p className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">Choose a manager and managed workspaces to begin. No portfolio is assumed.</p>
-          : <><BurndownPanel />
-            <PortfolioSpendTile selection={snapshot.selection} workspaces={workspaces} />
-            <PortfolioBoardContent snapshot={snapshot} priorityFilter={priorityFilter} onPriorityFilter={setPriorityFilter}
+          : <><PortfolioBoardContent snapshot={snapshot} priorityFilter={priorityFilter} onPriorityFilter={setPriorityFilter}
             showResolved={showResolved} onShowResolved={(value) => { setShowResolved(value); if (!value) changeResolvedPage(null); }}
             olderResolved={resolvedBefore !== null} onOlderResolved={() => changeResolvedPage(snapshot.resolvedNextCursor ?? null)}
             onLatestResolved={() => changeResolvedPage(null)}

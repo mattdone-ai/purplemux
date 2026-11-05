@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_KICKOFF_TEMPLATE,
@@ -13,12 +15,12 @@ describe('resolveKickoffTemplate', () => {
       workspaceId: 'ws-abc123',
       workspaceName: 'my-epic',
       task: 'Build the thing',
-      maxWorkers: 4,
     });
     expect(resolved).toContain('ws-abc123');
     expect(resolved).toContain('my-epic');
     expect(resolved).toContain('Build the thing');
-    expect(resolved).toContain('Max 4 concurrent workers');
+    expect(resolved).toContain('purplemux tab count -w ws-abc123');
+    expect(resolved).not.toMatch(/Max \d+ concurrent workers/);
     expect(resolved).not.toMatch(/\{\{[A-Z_]+\}\}/);
   });
 
@@ -30,12 +32,25 @@ describe('resolveKickoffTemplate', () => {
     expect(resolved).toBe('ws-x ws-x');
   });
 
-  it('defaults task and maxWorkers', () => {
+  it('defaults the task, and a stored {{MAX_WORKERS}} names the enforced WIP cap, never a number of its own (story 15, AC 3)', () => {
     const resolved = resolveKickoffTemplate('{{TASK}}|{{MAX_WORKERS}}', {
       workspaceId: 'ws-x',
       workspaceName: 'n',
     });
-    expect(resolved).toBe('(described in the next message)|3');
+    expect(resolved).toBe('(described in the next message)|the WIP cap (purplemux tab count -w ws-x)');
+  });
+});
+
+describe('the kickoff dialog\'s placeholder hint (story 15, review R6)', () => {
+  it('offers no MAX_WORKERS in any locale: the enforced WIP cap is the only cap, and a stored template still resolves it', () => {
+    const dir = path.resolve('messages');
+    const locales = fs.readdirSync(dir).filter((name) => fs.existsSync(path.join(dir, name, 'orchestration.json')));
+    expect(locales.length).toBeGreaterThanOrEqual(11);
+    for (const locale of locales) {
+      const hint = JSON.parse(fs.readFileSync(path.join(dir, locale, 'orchestration.json'), 'utf8')).templateHint as string;
+      expect(hint, locale).toContain('WORKSPACE_ID');
+      expect(hint, locale).not.toContain('MAX_WORKERS');
+    }
   });
 });
 

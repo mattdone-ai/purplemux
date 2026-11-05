@@ -13,6 +13,8 @@ import {
   unsetValue,
   valueOf,
 } from '@/lib/fleet-config-store';
+import { LEDGER_ALARM_KEYS, parseRouteTable, parseThresholdValue } from '@/lib/ledger-alarms';
+import { LEDGER_WAIT_REASONS } from '@/lib/ledger';
 import { leaseAuthority } from '@/lib/lease-http';
 import { createLogger } from '@/lib/logger';
 import type { IFleetConfigChange, IFleetConfigSetter, IFleetConfigState, IFleetConfigValue } from '@/types/fleet-config';
@@ -46,7 +48,36 @@ const setterOf = (caller: ICaller): IFleetConfigSetter => ({
  * are sent (ADR-0022), and fleet-wide keys any one workspace's orchestrator must
  * not set for every other workspace (ADR-0027 ruling R2).
  */
-export const ADMIN_ONLY_KEYS = /^(remote|tabs|attention|alerts)\./;
+export const ADMIN_ONLY_KEYS = /^(remote|tabs|attention|alerts|mission|pool|curator)\./;
+
+const POOL_SLOTS_KEY = /^pool\.slots\.[a-z0-9._-]+\.(gate|build|tab)$/;
+const POOL_ALIAS_KEY = /^pool\.(fallback|gate-host)\.[A-Za-z0-9._-]+$/;
+
+const TAB_CAP_KEYS = /^tabs\.cap-per-workspace(\.[A-Za-z0-9_-]+)?$/;
+
+/** The WIP cap and a workspace's own cap (ADR-0027, ADR-0039): an integer 1..200, as `parseTabCap` reads it. */
+const checkTabCapValue = (key: string, value: string): void => {
+  if (!key.startsWith('tabs.cap-per-workspace')) return;
+  if (!TAB_CAP_KEYS.test(key)) throw new FleetConfigError('config-invalid', `${key} is not a cap key: tabs.cap-per-workspace or tabs.cap-per-workspace.<workspaceId>`);
+  const text = value.trim();
+  if (!/^\d{1,3}$/.test(text) || Number(text) < 1 || Number(text) > 200) {
+    throw new FleetConfigError('config-invalid', `${key} must be an integer 1..200, got ${JSON.stringify(value)}`);
+  }
+};
+
+/** The pool's keys (ADR-0039): slot caps are whole numbers 0..64; a fallback or gate host is an ssh alias. */
+const checkPoolValue = (key: string, value: string): void => {
+  if (!key.startsWith('pool.')) return;
+  if (POOL_SLOTS_KEY.test(key)) {
+    if (!/^\d{1,2}$/.test(value) || Number(value) > 64) throw new FleetConfigError('config-invalid', `${key} must be a whole number 0..64, got ${JSON.stringify(value)}`);
+    return;
+  }
+  if (POOL_ALIAS_KEY.test(key)) {
+    if (!isValidRemoteHostName(value)) throw new FleetConfigError('config-invalid', `${key} must be an ssh alias, got ${JSON.stringify(value)}`);
+    return;
+  }
+  throw new FleetConfigError('config-invalid', `${key} is not a pool key: pool.slots.<host>.<gate|build|tab>, pool.fallback.<alias> or pool.gate-host.<host>`);
+};
 
 /** Values the remote keys must hold, checked at write time so a bad one never reaches a create. */
 const checkRemoteValue = (key: string, value: string, state: IFleetConfigState): void => {
@@ -61,12 +92,63 @@ const checkRemoteValue = (key: string, value: string, state: IFleetConfigState):
   if (key === REMOTE_HOSTS_KEY) {
     const bad = value.split(',').map((h) => h.trim()).filter((h) => h && !isValidRemoteHostName(h));
     if (bad.length) throw new FleetConfigError('config-invalid', `${REMOTE_HOSTS_KEY} names that are not ssh aliases: ${bad.join(', ')}`);
+    if (value.split(',').some((h) => h.trim() === 'auto')) throw new FleetConfigError('config-invalid', `${REMOTE_HOSTS_KEY} cannot name a host "auto": \`tab create --host auto\` asks the pool (ADR-0039)`);
+  }
+};
+
+/** The curator's keys (ADR-0038): routing opts in per workspace; a call gap in ms; an off switch. */
+const checkCuratorValue = (key: string, value: string): void => {
+  if (!key.startsWith('curator.')) return;
+  const text = value.trim();
+  if (key === 'curator.routing.workspaces') {
+    const bad = text.split(',').map((ws) => ws.trim()).filter((ws) => ws && !/^ws-[A-Za-z0-9_-]+$/.test(ws));
+    if (bad.length) throw new FleetConfigError('config-invalid', `${key} takes workspace ids (ws-...), comma-separated: ${bad.join(', ')}`);
+    return;
+  }
+  if (key === 'curator.min-interval-ms') {
+    if (!/^\d{1,6}$/.test(text) || Number(text) > 600_000) throw new FleetConfigError('config-invalid', `${key} must be whole milliseconds 0..600000, got ${JSON.stringify(value)}`);
+    return;
+  }
+  if (key === 'curator.enabled') {
+    if (text !== 'on' && text !== 'off') throw new FleetConfigError('config-invalid', `${key} must be on or off, got ${JSON.stringify(value)}`);
+    return;
+  }
+  if (key === 'curator.standing-order.candidates') {
+    if (text === 'none') return;
+    const bad = text.split(',').map((pair) => pair.trim()).filter((pair) => pair && !/^ws-[A-Za-z0-9_-]+=\S(?:.*\S)?$/.test(pair));
+    if (bad.length) {
+      throw new FleetConfigError('config-invalid', `${key} takes ws-...=<tab name> pairs, comma-separated, or none: ${bad.join(', ')}. `
+        + 'A value replaces the default ws-ldhziO=v2-scrum-master: keep that pair in it, or treasury-v2 files SO-n');
+    }
+    return;
+  }
+  throw new FleetConfigError('config-invalid',
+    `${key} is not a curator key: curator.routing.workspaces, curator.min-interval-ms, curator.enabled or curator.standing-order.candidates`);
+};
+
+/** The alarm keys (ADR-HFL-03 decision 1): a route table parses whole; a threshold names a producer reason and holds minutes or `off`. */
+const checkLedgerValue = (key: string, value: string): void => {
+  if (key.startsWith(LEDGER_ALARM_KEYS.routePrefix)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(key.slice(LEDGER_ALARM_KEYS.routePrefix.length))) {
+      throw new FleetConfigError('config-invalid', `${key} names no workspace: ledger.route.<workspaceId>`);
+    }
+    const { error } = parseRouteTable(value);
+    if (error) throw new FleetConfigError('config-invalid', `${key}: ${error}`);
+    return;
+  }
+  if (key.startsWith(LEDGER_ALARM_KEYS.thresholdPrefix)) {
+    const reason = key.slice(LEDGER_ALARM_KEYS.thresholdPrefix.length);
+    if (!(LEDGER_WAIT_REASONS as readonly string[]).includes(reason)) {
+      throw new FleetConfigError('config-invalid', `${key} names no wait reason: ledger.threshold.<${LEDGER_WAIT_REASONS.join('|')}>`);
+    }
+    const parsed = parseThresholdValue(value);
+    if ('error' in parsed) throw new FleetConfigError('config-invalid', `${key} ${parsed.error}`);
   }
 };
 
 const requireWriter = async (caller: ICaller, authority: IFleetConfigAuthority, key: string): Promise<void> => {
   if (caller.admin) return;
-  if (ADMIN_ONLY_KEYS.test(key)) throw new FleetConfigError('forbidden', `${key} is written by the admin token only (ADR-0022, ADR-0027)`);
+  if (ADMIN_ONLY_KEYS.test(key)) throw new FleetConfigError('forbidden', `${key} is written by the admin token only (ADR-0022, ADR-0027, ADR-0037)`);
   if (caller.workspaceId && caller.tabId && (await authority.isWorkspaceOrchestrator(caller.workspaceId, caller.tabId))) return;
   throw new FleetConfigError('forbidden', "fleet config is written by the admin token or the workspace's enabled orchestrator tab");
 };
@@ -94,6 +176,10 @@ export const putValue = async (
   await requireWriter(caller, authority, key);
   const { state, change } = await mutateFleetConfig((s) => {
     checkRemoteValue(key, value, s);
+    checkPoolValue(key, value);
+    checkTabCapValue(key, value);
+    checkLedgerValue(key, value);
+    checkCuratorValue(key, value);
     return setValue(s, { key, value, expectedVersion }, setterOf(caller), authority.now());
   });
   if (change) await audit(change, caller);

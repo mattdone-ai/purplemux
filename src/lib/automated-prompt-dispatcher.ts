@@ -16,12 +16,17 @@ export interface IAutomatedPromptRequest {
   workspaceId: string;
   targetTabId: string;
   message: string;
+  /**
+   * Checked inside the dispatch lock just before the paste: false types nothing (`not-ready`). A digest
+   * passes the tab's at-prompt check, so a turn started since the caller looked is never typed into.
+   */
+  whenReady?: () => boolean;
 }
 
 export type TAutomatedPromptResult =
   /** `resubmitted`: the text was still in the composer after the Enter, so Enter was pressed once more (L37). */
   | { delivered: true; resubmitted?: true; stillPending?: true }
-  | { delivered: false; reason: 'target-not-found' | 'session-not-found' | 'model-policy' | 'policy-error' | 'delivery-error'; error?: unknown; policy?: IPolicyResult };
+  | { delivered: false; reason: 'target-not-found' | 'session-not-found' | 'not-ready' | 'model-policy' | 'policy-error' | 'delivery-error'; error?: unknown; policy?: IPolicyResult };
 
 export interface IAutomatedPromptDispatcherDeps {
   findTarget: (workspaceId: string, tabId: string) => Promise<ITab | null>;
@@ -93,7 +98,7 @@ export class AutomatedPromptDispatcher {
           return { delivered: false, reason: 'delivery-error', error };
         }
         if (!current) return { delivered: false, reason: 'target-not-found' };
-        return this.submit(current, request.message, checkPolicy);
+        return this.submit(current, request, checkPolicy);
       });
     } catch (error) {
       return { delivered: false, reason: 'policy-error', error };
@@ -102,7 +107,7 @@ export class AutomatedPromptDispatcher {
 
   private async submit(
     target: ITab,
-    message: string,
+    { message, whenReady }: IAutomatedPromptRequest,
     checkPolicy: (options?: IAgentDispatchPolicyOptions) => Promise<IPolicyResult>,
   ): Promise<TAutomatedPromptResult> {
     try {
@@ -120,6 +125,7 @@ export class AutomatedPromptDispatcher {
       return { delivered: false, reason: 'policy-error', error };
     }
     if (!policy.ok) return { delivered: false, reason: 'model-policy', policy };
+    if (whenReady && !whenReady()) return { delivered: false, reason: 'not-ready' };
 
     try {
       await this.deps.paste(target.sessionName, message);

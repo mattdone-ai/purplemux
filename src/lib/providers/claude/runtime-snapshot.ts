@@ -25,6 +25,7 @@ interface IJsonlIdleCache {
   staleMs: number;
   lastAssistantSnippet: string | null;
   lastAssistantTail: string | null;
+  lastAssistantUuid: string | null;
   lastTurnError: ITurnError | null;
   currentAction: ICurrentAction | null;
   reset: boolean;
@@ -35,6 +36,7 @@ interface IJsonlIdleCache {
 interface IAssistantExtract {
   lastAssistantSnippet: string | null;
   lastAssistantTail: string | null;
+  lastAssistantUuid: string | null;
   lastTurnError: ITurnError | null;
   currentAction: ICurrentAction | null;
   reset: boolean;
@@ -59,6 +61,7 @@ const emptySnapshot = (): IAgentRuntimeSnapshot => ({
   stale: false,
   lastAssistantSnippet: null,
   lastAssistantTail: null,
+  lastAssistantUuid: null,
   lastTurnError: null,
   currentAction: null,
   reset: false,
@@ -112,7 +115,7 @@ const extractAssistantInfo = (lines: string[]): IAssistantExtract => {
 
       if (entry.type !== 'assistant' || !entry.message?.content) continue;
 
-      if (userMessageSeen) return { lastAssistantSnippet: null, lastAssistantTail: null, lastTurnError: null, currentAction: null, reset: true };
+      if (userMessageSeen) return { lastAssistantSnippet: null, lastAssistantTail: null, lastAssistantUuid: null, lastTurnError: null, currentAction: null, reset: true };
 
       const content = entry.message.content;
       if (!Array.isArray(content)) continue;
@@ -149,10 +152,13 @@ const extractAssistantInfo = (lines: string[]): IAssistantExtract => {
         }
       }
 
-      return { lastAssistantSnippet, lastAssistantTail, lastTurnError: turnErrorOf(entry), currentAction, reset: false };
+      return {
+        lastAssistantSnippet, lastAssistantTail, lastAssistantUuid: lastAssistantTail !== null && typeof entry.uuid === 'string' ? entry.uuid : null,
+        lastTurnError: turnErrorOf(entry), currentAction, reset: false,
+      };
     } catch { continue; }
   }
-  return { lastAssistantSnippet: null, lastAssistantTail: null, lastTurnError: null, currentAction: null, reset: false };
+  return { lastAssistantSnippet: null, lastAssistantTail: null, lastAssistantUuid: null, lastTurnError: null, currentAction: null, reset: false };
 };
 
 const scanLines = (lines: string[], elapsed: number): IScanResult => {
@@ -224,6 +230,7 @@ const fromCache = (cached: IJsonlIdleCache, idle: boolean, stale: boolean): IAge
   stale,
   lastAssistantSnippet: cached.lastAssistantSnippet,
   lastAssistantTail: cached.lastAssistantTail,
+  lastAssistantUuid: cached.lastAssistantUuid,
   lastTurnError: cached.lastTurnError,
   currentAction: cached.currentAction,
   reset: cached.reset,
@@ -282,6 +289,7 @@ const readTailSnapshot = async (
       staleMs: scan.staleMs,
       lastAssistantSnippet: extracted.lastAssistantSnippet,
       lastAssistantTail: extracted.lastAssistantTail,
+      lastAssistantUuid: extracted.lastAssistantUuid,
       lastTurnError: extracted.lastTurnError,
       currentAction: extracted.currentAction,
       reset: extracted.reset,

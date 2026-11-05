@@ -102,6 +102,19 @@ describe('routes a remote tab reaches (ADR-0022, review r1)', () => {
     expect(state.body).toMatchObject(UNREACHABLE);
   });
 
+  it('the web UI cannot switch an evaluator tab to another engine (409 naming the role, ADR-0040)', async () => {
+    const route = '@/pages/api/layout/pane/[paneId]/tabs/[tabId]';
+    fx.findTab.mockResolvedValue({ paneId: 'pane-p', tab: { ...LOCAL_TAB, panelType: 'claude-code', role: 'evaluator' } });
+    for (const panelType of ['codex-cli', 'grok-cli', 'terminal']) {
+      const refused = await call(route, 'PATCH', { paneId: 'pane-p', tabId: 'tab-l', workspace: 'ws-a' }, { panelType });
+      expect(refused.statusCode, panelType).toBe(409);
+      expect(refused.body).toMatchObject({ code: 'conflict', role: 'evaluator', panelType });
+    }
+    expect(fx.patchTab).not.toHaveBeenCalled();
+    const renamed = await call(route, 'PATCH', { paneId: 'pane-p', tabId: 'tab-l', workspace: 'ws-a' }, { name: 'eval', panelType: 'claude-code' });
+    expect(renamed.statusCode).toBe(200);
+  });
+
   it('the web UI cannot switch a remote tab to an agent (409 remote-type-unsupported); renaming it still works', async () => {
     const route = '@/pages/api/layout/pane/[paneId]/tabs/[tabId]';
     const refused = await call(route, 'PATCH', { paneId: 'pane-p', tabId: 'tab-r', workspace: 'ws-a' }, { panelType: 'claude-code' });

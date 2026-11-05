@@ -9,7 +9,7 @@ import { readGrokTurnTotals } from '@/lib/stats/grok-usage';
 import { listAllGrokSessions, readGrokSummary } from '@/lib/providers/grok/session-store';
 import { GROK_COST_TICKS_PER_USD } from '@/lib/session-parser-grok';
 import { listClaudeProjectsDirs } from '@/lib/workspace-home';
-import { GLOBAL_WORKSPACE_KEY, spendFloor, utcDay } from '@/lib/spend/spend-model';
+import { GLOBAL_WORKSPACE_KEY, SPEND_SLOT_MS, spendFloor, utcDay } from '@/lib/spend/spend-model';
 import type { ISpendIndexStatus, ISpendUsage } from '@/types/spend';
 
 const log = createLogger('spend-index');
@@ -34,6 +34,8 @@ const ASSISTANT_MARKER = Buffer.from('"type":"assistant"');
 
 interface IClaudeBucket {
   day: string;
+  /** UTC 5-minute slot start (ms); absent on buckets indexed before slots existed. */
+  slot?: number;
   model: string;
   sessionId: string;
   input: number;
@@ -58,6 +60,8 @@ interface IClaudeFileEntry {
   buckets: IClaudeBucket[];
   /** Set when the transcript left the disk; its buckets stay until their days pass the spend floor. */
   goneAt?: number;
+  /** Every bucket carries a slot. A live entry without it is read again from 0 once; a gone one keeps its day buckets. */
+  slotted?: true;
 }
 
 interface ISessionFileEntry {
@@ -290,7 +294,12 @@ const listSpendFiles = async (): Promise<ISpendFileRef[]> => {
   ];
 };
 
-const bucketKey = (day: string, model: string, sessionId: string): string => `${day}\u0000${model}\u0000${sessionId}`;
+const bucketKey = (day: string, model: string, sessionId: string, slot: number | undefined): string =>
+  `${day}\u0000${model}\u0000${sessionId}\u0000${slot ?? ''}`;
+
+const slotOf = (at: number | null): number | undefined => (at === null ? undefined : Math.floor(at / SPEND_SLOT_MS) * SPEND_SLOT_MS);
+
+const needsSlots = (entry: IClaudeFileEntry): boolean => entry.goneAt === undefined && entry.slotted !== true;
 
 /**
  * Read a Claude transcript from its last complete line. Only lines that carry
@@ -298,11 +307,11 @@ const bucketKey = (day: string, model: string, sessionId: string): string => `${
  * file (the last few hundred are kept) are not counted again.
  */
 const indexClaudeFile = async (ref: ISpendFileRef, previous: IClaudeFileEntry | null, stat: { size: number; mtimeMs: number; ino: number }): Promise<IClaudeFileEntry> => {
-  const restart = !previous || previous.ino !== stat.ino || stat.size < previous.size;
+  const restart = !previous || previous.ino !== stat.ino || stat.size < previous.size || needsSlots(previous);
   const entry: IClaudeFileEntry = restart
-    ? { kind: 'claude', workspaceId: ref.workspaceId ?? GLOBAL_WORKSPACE_KEY, sidechain: ref.sidechain, size: 0, mtimeMs: 0, ino: stat.ino, offset: 0, recentIds: [], buckets: [] }
+    ? { kind: 'claude', workspaceId: ref.workspaceId ?? GLOBAL_WORKSPACE_KEY, sidechain: ref.sidechain, size: 0, mtimeMs: 0, ino: stat.ino, offset: 0, recentIds: [], buckets: [], slotted: true }
     : { ...previous, recentIds: [...previous.recentIds], buckets: previous.buckets.map((b) => ({ ...b })) };
-  const buckets = new Map(entry.buckets.map((b) => [bucketKey(b.day, b.model, b.sessionId), b]));
+  const buckets = new Map(entry.buckets.map((b) => [bucketKey(b.day, b.model, b.sessionId, b.slot), b]));
   const counted = new Set(entry.recentIds);
   const order = [...entry.recentIds];
   let lines = 0;
@@ -323,10 +332,11 @@ const indexClaudeFile = async (ref: ISpendFileRef, previous: IClaudeFileEntry | 
       counted.add(usage.messageId);
       order.push(usage.messageId);
     }
-    const key = bucketKey(usage.day, usage.model, usage.sessionId);
+    const slot = slotOf(usage.at);
+    const key = bucketKey(usage.day, usage.model, usage.sessionId, slot);
     let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = { day: usage.day, model: usage.model, sessionId: usage.sessionId, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation5m: 0, cacheCreation1h: 0 };
+      bucket = { day: usage.day, ...(slot === undefined ? {} : { slot }), model: usage.model, sessionId: usage.sessionId, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation5m: 0, cacheCreation1h: 0 };
       buckets.set(key, bucket);
     }
     bucket.input += usage.input;
@@ -435,7 +445,8 @@ const indexFile = async (ref: ISpendFileRef, previous: TIndexEntry | undefined, 
 };
 
 const unchanged = (entry: TIndexEntry | undefined, stat: { size: number; mtimeMs: number; ino: number }): boolean =>
-  !!entry && entry.goneAt === undefined && entry.size === stat.size && entry.mtimeMs === stat.mtimeMs && entry.ino === stat.ino;
+  !!entry && entry.goneAt === undefined && entry.size === stat.size && entry.mtimeMs === stat.mtimeMs && entry.ino === stat.ino
+  && !(entry.kind === 'claude' && needsSlots(entry));
 
 type TStatOutcome =
   | { kind: 'file'; stat: { size: number; mtimeMs: number; ino: number } }
@@ -620,7 +631,8 @@ export const spendIndexUsage = (): ISpendUsage[] => {
   for (const entry of Object.values(index.files)) {
     if (entry.kind === 'claude') {
       for (const b of entry.buckets) {
-        usage.push({ providerId: 'claude', workspaceId: entry.workspaceId, sessionId: b.sessionId, day: b.day, model: b.model,
+        usage.push({ providerId: 'claude', workspaceId: entry.workspaceId, sessionId: b.sessionId, day: b.day,
+          ...(b.slot === undefined ? {} : { slot: b.slot }), model: b.model,
           sidechain: entry.sidechain, input: b.input, output: b.output, cacheRead: b.cacheRead, cacheCreation: b.cacheCreation,
           cacheCreation5m: b.cacheCreation5m, cacheCreation1h: b.cacheCreation1h });
       }

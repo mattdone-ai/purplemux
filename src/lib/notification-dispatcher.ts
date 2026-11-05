@@ -51,7 +51,7 @@ export class NotificationDispatcher {
         log.warn(`alert channel ${channel.name} failed: ${err instanceof Error ? err.message : err}`);
       }
     }
-    log.info({ kind: alert.kind, tabId: alert.tabId, seq: alert.seq }, 'alert dispatched');
+    log.info({ kind: alert.kind, tabId: alert.tabId, seq: alert.seq, ...(alert.itemId ? { itemId: alert.itemId } : {}) }, 'alert dispatched');
     return alert;
   }
 }
@@ -106,6 +106,7 @@ const buildPushPayload = (alert: IAlert, ctx: IAlertContext): string =>
     isOrchestrator: alert.isOrchestrator,
     alertId: alert.id,
     ...(alert.flag ? { flag: alert.flag } : {}),
+    ...(alert.itemId ? { itemId: alert.itemId } : {}),
   });
 
 export const createWebPushChannel = (overrides: Partial<IWebPushChannelDeps> = {}): INotificationChannel => {

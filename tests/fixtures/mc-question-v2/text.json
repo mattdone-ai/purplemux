@@ -1,0 +1,51 @@
+{
+  "id": "q-text",
+  "workspaceId": "ws-fixture",
+  "runId": "run-fixture",
+  "revision": 1,
+  "state": "open",
+  "storyIds": [],
+  "blockingScope": "story",
+  "canContinue": true,
+  "recommendation": null,
+  "context": "",
+  "evidence": {
+    "source": "agent",
+    "sourceId": "evt-q-text",
+    "observedAt": 1762128000000,
+    "confidence": "confirmed"
+  },
+  "answerId": null,
+  "resolution": null,
+  "humanReview": {
+    "humanNeed": "decision",
+    "humanReason": "Only the owner can choose this.",
+    "handling": "The orchestrator checked the epic documents; they leave this open.",
+    "reviewerTabId": "tab-orch",
+    "binding": {
+      "tabId": "tab-orch",
+      "providerId": "claude",
+      "sessionId": "session-1",
+      "generation": 1,
+      "runtimeGeneration": "launch-1"
+    },
+    "eventId": "evt-review",
+    "reviewedAt": 1762128000000
+  },
+  "candidateReason": null,
+  "class": null,
+  "defaultOptionId": null,
+  "autoAnswer": null,
+  "lint": [],
+  "changes": null,
+  "createdAt": 1762124400000,
+  "updatedAt": 1762128000000,
+  "formatVersion": 2,
+  "kind": "question",
+  "title": "Release note wording",
+  "decision": "How should the release note describe the WIP cap?",
+  "whyNow": "The release is cut at 17:00 AEDT.",
+  "answerType": "text",
+  "options": [],
+  "evidenceLinks": []
+}

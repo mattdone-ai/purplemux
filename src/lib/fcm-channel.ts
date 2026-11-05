@@ -17,6 +17,16 @@ const SEND_HOST = 'https://fcm.googleapis.com/v1/projects';
 const SERVICE_ACCOUNT_ENV = 'FCM_SERVICE_ACCOUNT_PATH';
 const REAPABLE_ERROR_CODES = new Set(['UNREGISTERED', 'INVALID_ARGUMENT']);
 
+/** FCM's data payload limit (4096 bytes); a map over it is never sent, so a size refusal can never reap a device. */
+export const FCM_DATA_LIMIT_BYTES = 4_096;
+/** The budget the optional question summary must fit under, with headroom for the envelope (story 33 R5). */
+export const FCM_DATA_BUDGET_BYTES = 3_584;
+/** A size refusal names the message, not the registration (FCM answers it as INVALID_ARGUMENT too). */
+const SIZE_REFUSAL = /too big|too large|exceeds?|size/i;
+
+/** The data map's size as sent: its JSON in UTF-8 bytes, which counts every escape and multi-byte character. */
+export const fcmDataBytes = (data: Record<string, string>): number => Buffer.byteLength(JSON.stringify(data), 'utf8');
+
 export interface IFcmMessage {
   message: {
     token: string;
@@ -57,14 +67,22 @@ export const buildFcmMessage = (alert: IAlert, ctx: IAlertContext, token: string
   };
   // The flag text is already the body; the structured field carries what routes the tap.
   if (alert.flag) data.flag = JSON.stringify({ source: alert.flag.source, rule: alert.flag.rule, subject: alert.flag.subject });
+  if (alert.itemId) data.itemId = alert.itemId;
   if (ctx.agentSessionId) data.agentSessionId = ctx.agentSessionId;
   if (ctx.workspaceDir) data.workspaceDir = ctx.workspaceDir;
+  // A v2 question is bounded by its schema; a v1 one is not, so only v2 rides the data map, and only
+  // while the whole map stays under the budget in UTF-8 bytes. Without it the phone opens the item.
+  if (alert.question?.formatVersion === 2) {
+    const question = JSON.stringify(alert.question);
+    if (fcmDataBytes({ ...data, question }) <= FCM_DATA_BUDGET_BYTES) data.question = question;
+    else log.info({ itemId: alert.itemId }, 'FCM: question summary left out, over the data budget');
+  }
 
   return {
     message: {
       token,
       data,
-      android: { priority: alert.kind === 'needs-input' ? 'high' : 'normal' },
+      android: { priority: alert.kind === 'needs-input' || alert.kind === 'attention-opened' ? 'high' : 'normal' },
     },
   };
 };
@@ -100,8 +118,9 @@ export const payloadViolationFields = (body: unknown): string[] | null => {
 
 export const isReapableFcmError = (body: unknown): boolean => {
   if (payloadViolationFields(body) !== null) return false;
-  const error = (body as { error?: { status?: unknown } } | null)?.error;
+  const error = (body as { error?: { status?: unknown; message?: unknown } } | null)?.error;
   if (!error) return false;
+  if (typeof error.message === 'string' && SIZE_REFUSAL.test(error.message)) return false;
   if (typeof error.status === 'string' && REAPABLE_ERROR_CODES.has(error.status)) return true;
   return errorDetails(body).some((detail) => {
     const code = (detail as { errorCode?: unknown })?.errorCode;
@@ -128,6 +147,12 @@ export const createFcmChannel = (deps: IFcmChannelDeps): INotificationChannel =>
       const accessToken = await deps.accessToken();
 
       for (const target of targets) {
+        const message = buildFcmMessage(alert, ctx, target.token);
+        if (fcmDataBytes(message.message.data) > FCM_DATA_LIMIT_BYTES) {
+          // Never sent: FCM would refuse it as INVALID_ARGUMENT, which must not cost the device its registration.
+          log.warn(`FCM: alert ${alert.id} data map over ${FCM_DATA_LIMIT_BYTES} bytes, not sent`);
+          continue;
+        }
         try {
           const res = await deps.fetchImpl(url, {
             method: 'POST',
@@ -135,7 +160,7 @@ export const createFcmChannel = (deps: IFcmChannelDeps): INotificationChannel =>
               authorization: `Bearer ${accessToken}`,
               'content-type': 'application/json',
             },
-            body: JSON.stringify(buildFcmMessage(alert, ctx, target.token)),
+            body: JSON.stringify(message),
           });
           if (res.ok) continue;
 

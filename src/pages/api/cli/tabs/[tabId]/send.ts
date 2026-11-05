@@ -12,6 +12,13 @@ import { deliverPrompt } from '@/lib/agent-prompt-delivery';
 import { withAgentDispatchLock } from '@/lib/agent-dispatch-policy';
 import { TAB_NOT_FOUND_BODY, remoteHostUnreachableBody, targetChangedBody } from '@/lib/cli-error';
 import { RemoteHostError } from '@/lib/remote-host';
+import { classifyWake, mayHoldTabSend } from '@/lib/wake-class';
+import { isAgentPanelType } from '@/lib/agent-panel-types';
+import { getLedgerStore } from '@/lib/ledger-store';
+import { appendDelivered } from '@/lib/tab-event-router';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('tab-send');
 
 /**
  * Deliver a prompt to a tab.
@@ -60,6 +67,24 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     return res
       .status(400)
       .json({ error: `waitMs must be an integer between 0 and ${MAX_SEND_READY_TIMEOUT_MS}` });
+  }
+
+  // A copy (this tab on the cc list, not a `->` recipient) or a "no reply needed" message waits for an agent
+  // tab's next digest (ADR-0035, architect ruling 09-C1); a shell or browser tab has no digest, so it gets the
+  // message at once as before.
+  const target = mayHoldTabSend(content) ? await findTab(workspaceId, tabId) : null;
+  if (target && isAgentPanelType(target.tab.panelType) && classifyWake('tab-send', { text: content, recipientName: target.tab.name }) === 'digest') {
+    // A dead session never reaches a digest: the sender hears it now, as for any send (review r2, F6).
+    if (!(await hasSessionOrUnreachable(target.tab.sessionName))) {
+      return res.status(409).json({ error: 'agent-not-ready', code: 'session-not-running', tabId, detail: 'session-not-running' });
+    }
+    const routed = await getStatusManager().routeTabEvent({ workspaceId, tabId, kind: 'tab-send', text: content, class: 'digest' });
+    return res.status(200).json({
+      status: routed.delivered ? 'sent' : routed.duplicate ? 'logged' : 'queued',
+      submitted: routed.delivered,
+      wakeClass: routed.class,
+      duplicate: routed.duplicate,
+    });
   }
 
   const readiness = await awaitSendReadiness(
@@ -117,6 +142,11 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     return true;
   });
   if (!delivered) return;
+  try {
+    appendDelivered(getLedgerStore().tabEvents, { workspaceId, tabId, kind: 'tab-send', text: content, class: 'urgent' }, Date.now());
+  } catch (err) {
+    log.warn(`tab send to ${tabId} not recorded: ${err instanceof Error ? err.message : err}`);
+  }
 
   // Report delivery, not just dispatch. A paste that lands while the agent is
   // mid-turn can have its Enter swallowed and sit in the composer until

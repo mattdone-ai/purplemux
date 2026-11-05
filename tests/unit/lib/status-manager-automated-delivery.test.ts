@@ -7,6 +7,7 @@ import { KICKOFF_FALLBACK_DELAY_MS, ORCH_IDLE_HEARTBEAT_MS } from '@/lib/orchest
 import type { TLivenessEvent } from '@/types/liveness';
 import type { ITabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
+import { memoryLedgerTables } from './tab-events-harness';
 
 const workspaceStore = vi.hoisted(() => ({
   getWorkspaceByIdCached: vi.fn(),
@@ -64,7 +65,7 @@ const entry = (id: string): ITabStatusEntry => ({
   agentProviderId: 'codex',
 });
 
-const completed = (pid: number): TLivenessEvent => ({
+const completed = (pid: number, notify?: 'self'): TLivenessEvent => ({
   kind: 'bg-completed',
   job: {
     workspaceId: 'ws-1',
@@ -72,6 +73,7 @@ const completed = (pid: number): TLivenessEvent => ({
     pid,
     label: `job-${pid}`,
     registeredAt: 0,
+    ...(notify ? { notify } : {}),
   },
   exitCode: 0,
   stderrTail: null,
@@ -104,7 +106,7 @@ describe('status manager automated prompt call paths', () => {
   it('keeps Codex session metadata unchanged until a verified launch is applied', async () => {
     vi.useFakeTimers();
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager();
+    const manager = new StatusManager(undefined, undefined, undefined, ...memoryLedgerTables());
     const current = {
       ...entry('worker'),
       agentSessionId: 'session-a',
@@ -144,6 +146,7 @@ describe('status manager automated prompt call paths', () => {
       undefined,
       codexRateLimits.cacheFromJsonl,
       layoutStore.updateTabAgentState,
+      ...memoryLedgerTables(),
     );
     manager.registerTab('worker', { ...entry('worker'), cliState: 'busy' });
 
@@ -192,15 +195,16 @@ describe('status manager automated prompt call paths', () => {
       paste,
     });
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(dispatcher);
+    const manager = new StatusManager(dispatcher, undefined, undefined, ...memoryLedgerTables());
     manager.registerTab('worker', entry('worker'));
     manager.registerTab('root', entry('root'));
     const handle = (manager as unknown as {
       handleLivenessEvent: (event: TLivenessEvent) => Promise<void>;
     }).handleLivenessEvent.bind(manager);
 
-    const first = handle(completed(1));
-    const second = handle(completed(2));
+    // Reported to the tab that waits on them, so both are urgent and typed in turn (ADR-0035).
+    const first = handle(completed(1, 'self'));
+    const second = handle(completed(2, 'self'));
     await vi.waitFor(() => expect(paste).toHaveBeenCalledTimes(1));
     releaseFirst.resolve();
     await Promise.all([first, second]);
@@ -225,7 +229,7 @@ describe('status manager automated prompt call paths', () => {
       paste,
     });
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(dispatcher);
+    const manager = new StatusManager(dispatcher, undefined, undefined, ...memoryLedgerTables());
     manager.registerTab('root', entry('root'));
     const nudge = (manager as unknown as {
       nudgeLiveness: (workspaceId: string, tabId: string, tabName: string, kind: 'model-drift', detail: string) => Promise<boolean>;
@@ -250,7 +254,7 @@ describe('status manager automated prompt call paths', () => {
       paste,
     });
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(dispatcher);
+    const manager = new StatusManager(dispatcher, undefined, undefined, ...memoryLedgerTables());
     manager.registerTab('root', entry('root'));
 
     manager.queueKickoffPrompt('root', 'start orchestration');
@@ -282,7 +286,7 @@ describe('status manager automated prompt call paths', () => {
       paste,
     });
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(dispatcher);
+    const manager = new StatusManager(dispatcher, undefined, undefined, ...memoryLedgerTables());
     manager.registerTab('root', entry('root'));
     if (jobTabId === 'worker-terminal') {
       manager.registerTab('worker-terminal', { ...entry('worker-terminal'), panelType: 'terminal' });
@@ -319,7 +323,7 @@ describe('status manager automated prompt call paths', () => {
       paste,
     });
     const { StatusManager } = await import('@/lib/status-manager');
-    const manager = new StatusManager(dispatcher);
+    const manager = new StatusManager(dispatcher, undefined, undefined, ...memoryLedgerTables());
     manager.registerTab('root', entry('root'));
     const runKeeper = (manager as unknown as {
       runOrchestratorKeeper: () => Promise<void>;
@@ -338,7 +342,7 @@ it('awaiting-human keeps ownership but suppresses idle keeper beats without resu
   const paste = vi.fn(async () => {});
   const manager = new StatusManager(new AutomatedPromptDispatcher({
     findTarget: vi.fn(async (_ws, id) => tab(id)), withPolicyLock: policyLock(vi.fn(async () => ({ ok: true as const }))), hasSession: vi.fn(async () => true), paste,
-  }));
+  }), undefined, undefined, ...memoryLedgerTables());
   manager.registerTab('root', entry('root'));
   workspaceStore.getWorkspacesCached.mockResolvedValue({ workspaces: [{ id: 'ws-1', name: 'workspace', directories: [], orchestration: { enabled: true, orchestratorTabId: 'root', revision: 4 } }] });
   const internals = manager as unknown as { standups: Map<string, unknown>; orchKeeper: Map<string, unknown>; runOrchestratorKeeper: () => Promise<void> };
@@ -350,7 +354,7 @@ it('awaiting-human keeps ownership but suppresses idle keeper beats without resu
 
 it('a replay from before a managed start cannot erase pending-launch uncertainty', async () => {
   const { StatusManager } = await import('@/lib/status-manager');
-  const manager = new StatusManager();
+  const manager = new StatusManager(undefined, undefined, undefined, ...memoryLedgerTables());
   manager.registerTab('pending-root', { ...entry('pending-root'), panelType: 'claude-code', agentProviderId: 'claude' });
   const started = Date.now();
   manager.markAgentLaunch('pending-root');

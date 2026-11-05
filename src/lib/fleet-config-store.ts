@@ -25,7 +25,8 @@ export class FleetConfigFileError extends Error {
   readonly code = 'config-store-unreadable';
 }
 
-export const FLEET_KEY = /^[a-z][a-z0-9.-]{1,63}$/;
+// A workspace id (`ws-` + nanoid) carries upper case and `_` and may close a key (`tabs.cap-per-workspace.<id>`).
+export const FLEET_KEY = /^[a-z][A-Za-z0-9._-]{1,63}$/;
 export const FLEET_VALUE_MAX = 256;
 export const FLEET_HISTORY_MAX = 200;
 

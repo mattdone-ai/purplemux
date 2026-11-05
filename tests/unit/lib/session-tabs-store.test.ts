@@ -84,6 +84,23 @@ describe('session-tabs store', () => {
     expect((await stored()).bindings['claude:s-1']).toMatchObject({ firstSeenAt: NOW, lastSeenAt: NOW + 2 * 3_600_000 });
   });
 
+  it('keeps the tab name of the last sighting, and writes a rename inside the touch interval', async () => {
+    const { readSessionTabs, recordSessionTab } = await import('@/lib/spend/session-tabs-store');
+    await recordSessionTab({ providerId: 'claude', sessionId: 's-1', workspaceId: 'ws-a', tabId: 'tab-1', tabName: 'hfl-04' }, NOW);
+    expect((await readSessionTabs())['claude:s-1']).toMatchObject({ tabName: 'hfl-04' });
+    await recordSessionTab({ providerId: 'claude', sessionId: 's-1', workspaceId: 'ws-a', tabId: 'tab-1', tabName: 'hfl-04b' }, NOW + 60_000);
+    expect((await readSessionTabs())['claude:s-1']).toMatchObject({ tabName: 'hfl-04b', lastSeenAt: NOW + 60_000 });
+    await recordSessionTab({ providerId: 'claude', sessionId: 's-1', workspaceId: 'ws-a', tabId: 'tab-1' }, NOW + 2 * 3_600_000);
+    expect((await readSessionTabs())['claude:s-1']).toMatchObject({ tabName: 'hfl-04b' });
+  });
+
+  it('refuses a binding whose tab name is not a string', async () => {
+    const { readSessionTabs } = await import('@/lib/spend/session-tabs-store');
+    await fs.mkdir(path.dirname(storeFile()), { recursive: true });
+    await fs.writeFile(storeFile(), JSON.stringify({ version: 1, bindings: { 'claude:s-1': { workspaceId: 'ws-a', tabId: 't', tabName: 7, firstSeenAt: 1, lastSeenAt: 1 } } }));
+    await expect(readSessionTabs()).rejects.toThrow('binding claude:s-1 is malformed');
+  });
+
   it('moves a session to another tab only on a newer sighting', async () => {
     const { readSessionTabs, recordSessionTab, seedSessionTabs } = await import('@/lib/spend/session-tabs-store');
     await recordSessionTab({ providerId: 'claude', sessionId: 's-1', workspaceId: 'ws-a', tabId: 'tab-1' }, NOW);
@@ -256,7 +273,7 @@ describe('updateTabAgentSessionId records the binding', () => {
   it('binds the session to the layout tab id, not the id in the session name', async () => {
     const store = await seedLayout();
     await store.updateTabAgentSessionId('pt-ws-a-pane-one-tab-orig', fakeProvider('codex'), 'c-9');
-    expect((await stored()).bindings['codex:c-9']).toMatchObject({ workspaceId: 'ws-a', tabId: 'tab-adopted' });
+    expect((await stored()).bindings['codex:c-9']).toMatchObject({ workspaceId: 'ws-a', tabId: 'tab-adopted', tabName: 'worker' });
   });
 
   it('records nothing for a cleared session or a tab no layout names', async () => {
@@ -303,7 +320,7 @@ describe('updateTabAgentState records the binding (the status manager hook, laun
   it('binds a saved session id to the layout tab id', async () => {
     const store = await seedLayout();
     await store.updateTabAgentState('pt-ws-a-pane-one-tab-orig', fakeProvider('codex'), { sessionId: 'c-hook', jsonlPath: null });
-    expect((await stored()).bindings['codex:c-hook']).toMatchObject({ workspaceId: 'ws-a', tabId: 'tab-adopted' });
+    expect((await stored()).bindings['codex:c-hook']).toMatchObject({ workspaceId: 'ws-a', tabId: 'tab-adopted', tabName: 'worker' });
   });
 
   it('records nothing for a reset session, a save without a session id, or a tab no layout names', async () => {

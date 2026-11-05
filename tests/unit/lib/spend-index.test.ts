@@ -21,12 +21,12 @@ const utc = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const D2 = utc(Date.now() - 2 * DAY);
 const D3 = utc(Date.now() - 3 * DAY);
 
-interface ILine { id?: string; uuid?: string; session?: string; day?: string; model?: string; input?: number; output?: number;
+interface ILine { id?: string; uuid?: string; session?: string; day?: string; time?: string; model?: string; input?: number; output?: number;
   cacheRead?: number; cc5m?: number; cc1h?: number; sidechain?: boolean }
 
-const assistant = ({ id, uuid, session = 's-main', day = D2, model = 'claude-opus-4-6', input = 10, output = 5, cacheRead = 100,
+const assistant = ({ id, uuid, session = 's-main', day = D2, time = '12:00:00.000', model = 'claude-opus-4-6', input = 10, output = 5, cacheRead = 100,
   cc5m = 20, cc1h = 0, sidechain = false }: ILine): string => JSON.stringify({
-  type: 'assistant', timestamp: `${day}T12:00:00.000Z`, sessionId: session, isSidechain: sidechain, ...(uuid ? { uuid } : {}),
+  type: 'assistant', timestamp: `${day}T${time}Z`, sessionId: session, isSidechain: sidechain, ...(uuid ? { uuid } : {}),
   message: { ...(id ? { id } : {}), model, content: [{ type: 'text', text: 'ok' }],
     usage: { input_tokens: input, output_tokens: output, cache_read_input_tokens: cacheRead,
       cache_creation_input_tokens: cc5m + cc1h, cache_creation: { ephemeral_5m_input_tokens: cc5m, ephemeral_1h_input_tokens: cc1h } } },
@@ -276,6 +276,54 @@ describe('spend index', () => {
       workspaceId: 'ws-g', sessionId: '01a008c1-bb96-71d1-9769-b63ff478fd9f', day: '2026-08-16', input: 19427, output: 39, cacheRead: 128,
     });
     expect(usage.find((u) => u.providerId === 'grok')?.costUsd).toBeCloseTo(66123200 / 1e10, 12);
+    expect((await index.runSpendIndexPass()).filesParsed).toBe(0);
+  });
+
+  it('buckets each message by its UTC 5-minute slot, inside its day (harness-flow-loop 04)', async () => {
+    await write(path.join(wsProjects('ws-a'), 's-main.jsonl'), [
+      assistant({ id: 'm1', time: '12:00:00.000' }), assistant({ id: 'm2', time: '12:04:59.999' }),
+      assistant({ id: 'm3', time: '12:05:00.000' }), assistant({ id: 'm4', time: '23:59:59.000' }),
+    ]);
+    const index = await load();
+    await index.runSpendIndexPass();
+    const slots = index.spendIndexUsage().map((u) => [u.slot === undefined ? null : new Date(u.slot).toISOString(), tokens([u])]);
+    expect(slots.sort()).toEqual([
+      [`${D2}T12:00:00.000Z`, 2 * LINE_TOKENS], [`${D2}T12:05:00.000Z`, LINE_TOKENS], [`${D2}T23:55:00.000Z`, LINE_TOKENS],
+    ]);
+  });
+
+  it('reads a live entry indexed without slots again from 0 once, with the same day totals', async () => {
+    const file = path.join(wsProjects('ws-a'), 's-main.jsonl');
+    await write(file, [assistant({ id: 'm1' }), assistant({ id: 'm2', time: '13:00:00.000' }), assistant({ id: 'm3', day: D3 })]);
+    await (await load()).runSpendIndexPass();
+    const saved = JSON.parse(await fs.readFile(indexFile(), 'utf-8'));
+    const entry = saved.files[file];
+    delete entry.slotted;
+    const byDay = new Map<string, Record<string, number>>();
+    for (const bucket of entry.buckets) {
+      const key = `${bucket.day}\u0000${bucket.model}\u0000${bucket.sessionId}`;
+      const merged = byDay.get(key) ?? { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cacheCreation5m: 0, cacheCreation1h: 0 };
+      for (const field of Object.keys(merged)) merged[field] += bucket[field];
+      byDay.set(key, merged);
+    }
+    entry.buckets = [...byDay].map(([key, sums]) => {
+      const [day, model, sessionId] = key.split('\u0000');
+      return { day, model, sessionId, ...sums };
+    });
+    await fs.writeFile(indexFile(), JSON.stringify(saved));
+    resetGlobals();
+    const index = await load();
+    await index.loadSpendIndex();
+    const dayTotals = () => {
+      const totals: Record<string, number> = {};
+      for (const u of index.spendIndexUsage()) totals[u.day] = (totals[u.day] ?? 0) + tokens([u]);
+      return totals;
+    };
+    const before = dayTotals();
+    expect(index.spendIndexUsage().every((u) => u.slot === undefined)).toBe(true);
+    expect((await index.runSpendIndexPass()).filesParsed).toBe(1);
+    expect(dayTotals()).toEqual(before);
+    expect(index.spendIndexUsage().every((u) => typeof u.slot === 'number')).toBe(true);
     expect((await index.runSpendIndexPass()).filesParsed).toBe(0);
   });
 

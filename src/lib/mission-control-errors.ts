@@ -1,7 +1,8 @@
-import type { IMissionAttentionItem, IMissionRun } from '@/types/mission-control';
+import type { IMissionAttentionItem, IMissionEventDefect, IMissionQuestionChanges, IMissionRun } from '@/types/mission-control';
 
 export type TMissionErrorCode =
   | 'invalid-request'
+  | 'question-invalid'
   | 'unauthorized'
   | 'forbidden'
   | 'not-found'
@@ -11,6 +12,7 @@ export type TMissionErrorCode =
 const MISSION_CONTROL_ERROR_BRAND = Symbol.for('purplemux.mission-control-error');
 const ERROR_STATUS: Record<TMissionErrorCode, number> = {
   'invalid-request': 400,
+  'question-invalid': 400,
   unauthorized: 401,
   forbidden: 403,
   'not-found': 404,
@@ -37,16 +39,24 @@ const isMissionCurrent = (value: unknown): value is IMissionAttentionItem | IMis
     && ['running', 'waiting', 'completed', 'cancelled'].includes(value.state);
 };
 
+/** What a refusal carries beyond its message: the defects of a question, or what changed under an answer. */
+export interface IMissionErrorDetail {
+  defects?: IMissionEventDefect[];
+  changes?: IMissionQuestionChanges;
+}
+
 export class MissionControlError extends Error {
   readonly status: number;
   readonly code: TMissionErrorCode;
   readonly current?: IMissionAttentionItem | IMissionRun;
+  readonly detail?: IMissionErrorDetail;
 
   constructor(
     status: number,
     code: TMissionErrorCode,
     message: string,
     current?: IMissionAttentionItem | IMissionRun,
+    detail?: IMissionErrorDetail,
   ) {
     super(message);
     Object.defineProperty(this, MISSION_CONTROL_ERROR_BRAND, { value: true });
@@ -54,6 +64,7 @@ export class MissionControlError extends Error {
     this.status = status;
     this.code = code;
     this.current = current;
+    this.detail = detail;
   }
 }
 
@@ -80,8 +91,9 @@ export const invalidMissionRequest = (message: string): never => {
 export const missionConflict = (
   message: string,
   current?: IMissionAttentionItem | IMissionRun,
+  detail?: IMissionErrorDetail,
 ): never => {
-  throw new MissionControlError(409, 'conflict', message, current);
+  throw new MissionControlError(409, 'conflict', message, current, detail);
 };
 
 export const missionNotFound = (message: string): never => {

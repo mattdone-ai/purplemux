@@ -9,11 +9,15 @@ const entry = (overrides: Record<string, unknown> = {}, message: Record<string, 
 });
 
 describe('readClaudeUsage', () => {
-  it('reads tokens, model, session and the UTC day of the line', () => {
+  it('reads tokens, model, session and the UTC day and time of the line', () => {
     expect(readClaudeUsage(entry())).toEqual({
-      messageId: 'msg-1', model: 'claude-opus-4-6', sessionId: 's-1', sidechain: false, day: '2026-10-25',
+      messageId: 'msg-1', model: 'claude-opus-4-6', sessionId: 's-1', sidechain: false, day: '2026-10-25', at: Date.parse('2026-10-25T23:59:59.000Z'),
       input: 3, output: 4, cacheRead: 5, cacheCreation: 9, cacheCreation5m: 9, cacheCreation1h: 0,
     });
+  });
+
+  it('reads no time from a timestamp that does not parse, and still counts the line on its day', () => {
+    expect(readClaudeUsage(entry({ timestamp: '2026-10-25 garbled' }))).toMatchObject({ day: '2026-10-25', at: null });
   });
 
   it('splits cache creation by its stated 5m and 1h parts, else 5m is the rest of the 1h part', () => {
