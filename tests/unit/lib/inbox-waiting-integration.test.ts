@@ -16,6 +16,11 @@ vi.mock('@/lib/workspace-store', () => ({
 }));
 vi.mock('@/lib/liveness-manager', () => ({ getLivenessManager: () => ({ statusForTab: vi.fn(async () => ({ probes: [], backgroundJobs: [] })), removeTab: vi.fn() }) }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await import('@/lib/status-manager');
+
 const EMPTY = 'out\n────────\n❯ \n────────\n';
 
 describe('inbox × StatusManager.isWaitingAtPrompt', () => {

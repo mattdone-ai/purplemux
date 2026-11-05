@@ -15,6 +15,15 @@ vi.mock('@/lib/orchestration-work-state', () => ({ readOrchestrationWorkState: f
 vi.mock('@/lib/tmux', () => ({ killSession: vi.fn(async () => null), hasSession: vi.fn(async () => false), createSession: vi.fn(async () => undefined), resolveExistingDir: vi.fn(async () => '/tmp'), sendKeys: vi.fn(), listSessions: vi.fn(async () => []), workspaceSessionName: vi.fn(), observeTabSessionsStrict: fixture.sessions }));
 vi.mock('@/lib/sync-server', () => ({ broadcastSync: vi.fn() }));
 vi.mock('@/lib/mission-control-runtime', () => ({ rebindMissionRunsToOrchestrator: fixture.rebind }));
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget. vi.resetModules() discards
+// this instance; each test's own import evaluates again from the transform cache in milliseconds.
+await Promise.all([
+  import('@/lib/orchestration-recovery'),
+  import('@/lib/workspace-store'),
+  import('@/lib/layout-store'),
+]);
+
 const file = () => path.join(fixture.home, '.purplemux/workspaces.json');
 const layoutFile = () => path.join(fixture.home, '.purplemux/workspaces/ws-a/layout.json');
 const tab = (id: string): ITab => ({ id, name: id, sessionName: `session-${id}`, panelType: 'claude-code', order: 0 });
