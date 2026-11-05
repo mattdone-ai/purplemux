@@ -22,6 +22,7 @@ const CLI_COMMANDS = new Set([
   'mission',
   'mc',
   'portfolio',
+  'owner',
   'lease',
   'pool',
   'curator',

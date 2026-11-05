@@ -82,7 +82,7 @@ const WebInputBar = ({
   // Codex and grok both drive a TUI: plain text in, no image-ref confirm flow.
   const isTuiAgent = provider !== 'claude';
   const { entries, isLoading, isError, fetchHistory, addHistory, deleteHistory } =
-    useMessageHistory({ wsId });
+    useMessageHistory({ wsId, tabId });
   const isMobileDevice = useIsMobileDevice();
   const inactiveMessage = provider === 'codex'
     ? t('codexInactiveMessage')

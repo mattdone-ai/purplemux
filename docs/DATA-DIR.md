@@ -461,6 +461,9 @@ See [TMUX.md](./TMUX.md) for how tabs map to tmux sessions and [STATUS.md](./STA
 ### `message-history.json` — `src/lib/message-history-store.ts`
 
 Per-workspace input history for Claude tabs. Capped at 500 entries. Locks are keyed by `wsId` so parallel workspace writes do not block each other.
+Each entry is `{ id, message, sentAt, tabId }`: `tabId` is the tab the input sent to (null, or absent before story 36,
+when the sender named none). A re-send of the same text keeps the entry's first id and takes the new `sentAt` and
+`tabId`, so a reference `<wsId>/<id>` holds. `purplemux owner messages -w WS [--since ISO]` lists it (ADR-0042 note).
 
 ### `claude-prompt.md` — `src/lib/claude-prompt.ts`
 

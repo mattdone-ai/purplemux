@@ -35,6 +35,14 @@ export const isNeedsDecisionLine = (line: string | undefined): line is string =>
 export const needsDecisionText = (line: string): string =>
   line.trim().slice(MARKER.length).trim().replace(TAG, '').replace(/\s+/g, ' ').trim();
 
+/**
+ * The owner push's detail (ADR-0041 §2 (ii)): `<tab name or id> · <workspace name or id>: <needsDecisionText>`. The push
+ * goes out only when no item opened, so it never names one. Exported for the phone's fixture generator (story 37).
+ */
+export const needsDecisionPushDetail = (source: {
+  tabId: string; tabName?: string; workspaceId: string; workspaceName?: string; line: string;
+}): string => `${source.tabName || source.tabId} · ${source.workspaceName || source.workspaceId}: ${needsDecisionText(source.line)}`;
+
 /** The marks must run a, b, c… (or 1, 2, 3…) from the first; anything else is prose, not options. */
 const splitOptions = (body: string): { question: string; options: Array<{ id: string; label: string }> } => {
   const marks = [...body.matchAll(OPTION_MARK)];

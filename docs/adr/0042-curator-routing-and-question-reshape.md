@@ -84,6 +84,14 @@ record, which the curator must not bypass.
 6. **The correction rule** (ADR-HFL-06, "what proves it wrong"). A strike from a keep-or-strike item is a correction of a
    routed label. If more than 2% of the week's filed orders are struck, `classify-owner-message` is demoted to shadow.
 
+**Note (story 36, 2026-11-04): owner messages have stable ids and a list.** The `<ws>/<id>` this ADR's actions cite is
+a `message-history.json` entry id. A re-send of the same text used to replace the entry under a new id, which orphaned
+an earlier citation. It now keeps the entry's first id and takes the new `sentAt`. The entry also records the tab the
+input sent to (`tabId`, null when the sender names none). `purplemux owner messages -w WS [--since ISO] [--json]`
+(`GET /api/cli/owner/messages`) lists the workspace's prompts oldest first with id, time, tab and text, so a tab can cite
+an owner message by its id; a credential-shaped message is withheld there, as `curator message` refuses it. A re-sent
+message is classified again under the same id; filing stays deduplicated by text (decision 2).
+
 ## Consequences
 - Nothing routes today: no task is promoted and no workspace opts in.
 - When a task is promoted, an admin opts one workspace in, and every action is reversible: a strike, a struck line in

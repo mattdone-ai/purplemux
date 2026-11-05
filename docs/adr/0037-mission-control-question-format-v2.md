@@ -3,6 +3,8 @@
 ## Status
 Accepted (2026-11-03, epic `harness-flow-loop`, story 31; architecture ADR-HFL-11 decisions 1-5). Amends
 `docs/mission-control-contract.md` and ADR-0031 §1 (its refusals are now `question-invalid`).
+Amended 2026-11-04 (defect D2, follow-up questions): see the amendment at the end. Its code is deferred to the
+follow-on harness epic.
 
 ## Context
 The owner (2026-11-03): "Can we improve the questions and make them formatted they are currently hard to read. And
@@ -89,3 +91,138 @@ Option 3.
 After 14 days at min-version 2, the owner still answers more than 10% of items with "Other" text that restates an
 option, or reopens items as unclear; or an answer lands on an option whose wording changed under it (a compatible
 revision that was not). Then treat a relabel as incompatible.
+
+## Amendment (2026-11-04, epic `harness-flow-loop`, defect D2: a follow-up question links to the answered item)
+
+**Status.** Accepted (2026-11-04). Owner decision: Mission Control answer `8638e767-af5f-4452-8ec1-6e89dee0ab45`
+(2026-11-04T02:15:17Z, option `followon`). The answer moved the D2 code to a follow-on epic and asked for this ADR
+now. Sources: the triage `_output/harness-flow-loop/briefs/D1-D8-triage.md`, row D2, and the Portfolio SM's defect note
+`n-sqL9hVZwJY`, D2. Architecture ADR-HFL-11 decisions 1 and 4 do not change.
+
+**Deferred to the follow-on harness epic:** all the code and all the tests below (triage estimate: about 180 agent
+minutes). Until that epic lands, §4 applies unchanged: an agent quotes the earlier item in the context of a new item.
+
+**Context.** The owner answered `fx-owner-1104` with text alone ("Other", answer `a9ebf5ee`). The text answer set the
+item to `answered` (`recordAnswer`, `src/lib/mission-control-store.ts:1516`). treasury-v2 then sent an
+`attention.updated` with the facts of the reply. The store refused it, because only open or candidate items can be
+updated (`:1169`, pinned by `tests/unit/lib/mission-question-revisions.test.ts:166-172`). v2 opened `fx-owner-1104b`.
+The owner saw two items for one question, with no link between them.
+
+**Options considered.**
+1. **A text answer that selects no option keeps the item open for a compatible revision.** Rejected, for three reasons:
+   - Answer delivery keys on `state='answered'`. The transfer to a new binding (`:1259`), both claims (`:1552`,
+     `:1570`) and the delivery check (`:1604`) send an answer only for an answered item. The answer of an open item
+     would never reach the agent, unless each of the four guards learns a second state.
+   - Text answers are often complete. Both `nd-` answers of 2026-11-04 were text, for example "ok done" on
+     `nd-5941c597…` at 01:28:58Z. The item would stay open after a full answer, and the owner would close it by hand.
+   - An answer applies to the revision that it answered (`appliedRevision`, §4). A revision after the answer would
+     change the question under the owner's answer.
+2. **No change: the agent opens a new item and quotes the earlier item in its context.** Rejected: that is the defect.
+   The owner sees two items for one question, and nothing ties them.
+3. **`mc ask --follows-up <itemId>`: the new item links to the answered item and resolves it in the same
+   transaction.** Chosen.
+
+**Decision.** Option 3. The last rule of §4 stays: text alone ("Other") is always an answer, and it sets `answered`
+(`mission-question-revisions.test.ts:202`).
+
+1. **The event field.** `attention.opened` takes an optional `followsUp: <itemId>`, beside `itemId` and `humanReview`.
+   The field is not part of the question: `validateMissionQuestion`, the content hash, the `changes` record and the
+   lint do not see it. `attention.updated` refuses the field with 400 `invalid-request` ("followsUp is set when an
+   item opens; a link never changes").
+2. **The CLI.** `purplemux mc ask -w WS --json @DRAFT --follows-up <itemId> [--fix]` puts the field on the event. The
+   question check (`POST /api/cli/mission-control/questions/check`) takes the field too. It reports a refusal from the
+   edge cases below as a defect of field `followsUp`, and it writes nothing. `--fix` keeps the field on the reshaped
+   event. (Today `reshapeAsk` in `bin/cli.js` builds the payload from `itemId` and `humanReview` only.)
+3. **One transaction.** The store does these steps in the transaction of the `attention.opened`. If one step fails,
+   the store writes nothing and refuses the batch (the atomic-batch rule).
+   1. It checks the earlier item (the target) against the edge cases below.
+   2. It opens the new item, which must be human-visible. The event must carry a `humanReview` with a `humanNeed`
+      other than `none`. Otherwise the store refuses it with 400 `invalid-request`: a candidate is not yet a question
+      to the owner.
+   3. It writes the link in the unversioned side table
+      `mission_item_links(item_id PRIMARY KEY, follows_up_item_id UNIQUE NOT NULL, workspace_id, at)`, created with
+      `CREATE TABLE IF NOT EXISTS`, as `mission_item_changes` (§4). `SCHEMA_VERSION` stays 4. The primary key gives an
+      item at most one predecessor. The unique column gives an item at most one follower.
+   4. If the target is `answered`, the store sets the target's delivery to `acknowledged`, as `answer.acknowledged`
+      does. Then it resolves the target with the resolution `Followed up by <new item id>.` The store writes this
+      change as an `attention.resolved` event with the event id `system:follow-up:<new item id>`. The prefix
+      `system:follow-up:` joins the reserved event-id prefixes, so no request may use it.
+4. **The asker reads the answer in the reply.** The follow-up acknowledges the target's answer. If the delivery of
+   that answer still waits, the server never pastes it (the four guards above). So the 200 body carries
+   `followedUp: {itemId, answerId, optionIds, optionLabels, text, resolved}`. The CLI prints it on one line:
+   `follows up <id>: the owner answered <option labels, or "text only">: "<text>" (answer <id>); <id> is resolved`.
+5. **The served item.** Every item gains
+   `followsUp: {itemId, title, answer: {optionIds, optionLabels, text, at}} | null` and
+   `followedBy: {itemId, title, state} | null`. Each field names one step of a chain. Both fields are additive
+   (ADR-0004).
+6. **Both clients show the link.** The web card and the phone (purplemux-mobile) show the same things:
+   - The new card shows "Follows up: <title of the earlier item>" above the decision. Under it, the card shows the
+     owner's earlier answer (option labels and text) and a link to the earlier card.
+   - The earlier card reads as resolved: it shows the state Resolved and "Followed up by: <title of the new item>",
+     with a link. It leaves the "Needs you" list, as every resolved item does.
+   - New fixtures `tests/fixtures/mc-question-v2/follow-up-*.json` drive the web tests and the phone's widget tests.
+
+**Edge cases.** A refusal writes nothing. A 409 body adds `followsUp: {reason, followedBy?, tip?}`. The refusals use
+codes that the ADR-0016 table already maps (`invalid-request` exit 2, `forbidden` and `conflict` exit 3, `not-found`
+exit 7), so this amendment adds no new code.
+- **The target is not answered.** A target in state `open` or `candidate` gets 409, reason `not-answered`. The message
+  tells the agent to revise the open item with `attention.updated`: a compatible revision keeps the owner's draft (§4).
+  A `cancelled` target also gets 409 `not-answered`, because a cancelled item has no owner answer.
+- **The target is in another workspace.** 403 `forbidden`, with the ADR-0021 denial: agent mutations are confined to
+  the caller workspace. The resolve changes the target's workspace, and the caller's token is scoped to its own
+  workspace. The refusal names neither the other workspace nor the target's state. A target on another run of the
+  same workspace gets 409, reason `other-run`. An item, its answer and its delivery belong to one run binding, as
+  every attention event on an item already requires ("attention item is outside this run").
+- **A chain of follow-ups.** A chain A ← B ← C is permitted: B follows up A after the owner answers A, and C follows
+  up B after the owner answers B. A second follow-up of A gets 409, reason `already-followed`. The body names B
+  (`followedBy`) and the last item of the chain (`tip`, here C). The agent follows up the tip after the owner answers
+  it, or revises the tip while it is open. Each card shows one step back and one step forward, and the owner moves
+  along the chain by the links.
+- **The target is already resolved.** If the target has no follower, the store writes the link only. The target's
+  state, resolution and delivery do not change, and `followedUp.resolved` is `false`. If the target has a follower,
+  the store refuses it with `already-followed`, as for a chain.
+- **A cycle.** A cycle cannot form. The store writes a link only when an item opens, and the link names an item that
+  already exists and is answered or resolved. So each link points from a newer item to an older item. No event sets or
+  changes a link after the open. A `followsUp` equal to the event's own `itemId` gets 400, because that item does not
+  exist yet. Each item has at most one predecessor and one follower, so the links form chains only.
+- **Other cases.**
+  - A target that does not exist gets 404 `not-found`.
+  - Two follow-ups of one target in one batch: the store refuses the second, so it refuses the whole batch.
+  - A replay of the same event id and content returns the stored result and writes no second link.
+  - A target that the ADR-0031 rule answered is followed up as every answered item is.
+  - A `NEEDS-DECISION:` line (ADR-0041 §2) sets no `followsUp`. An orchestrator that wants the link asks with
+    `mc ask --follows-up`.
+
+**Tests the follow-on epic writes.**
+1. Store tests (`tests/unit/lib/mission-question-revisions.test.ts`, or a new
+   `tests/unit/lib/mission-follow-up.test.ts`):
+   - An answered target: the new item opens `open`, and the link is written. The target is `resolved` with
+     `Followed up by <id>.`, its delivery is `acknowledged`, and one `system:follow-up:` event names the target. A fault
+     injected after the link write leaves nothing written.
+   - A text-only answer still sets `answered` and is delivered. The tests at lines 166 and 202 stay green unchanged.
+   - Each edge case above, with its status, its reason, and nothing written.
+   - Cycles: the store refuses a self-link and an `attention.updated` with `followsUp`. A property test over random
+     event sequences finds chains only.
+   - A follow-up with no human review gets 400.
+   - A replay writes one link. A batch with two follow-ups of one target is refused whole.
+   - A queued delivery of a target that a follow-up resolved is never claimed (`claimDelivery` returns null), and the
+     200 body carries the answer.
+   - The snapshot serves `followsUp` and `followedBy`, and null on an item with no link.
+2. Route and CLI tests (`tests/unit/bin/`): `mc ask --follows-up` posts the field and prints the answer line. It exits
+   0, 2, 3 and 7 by case. The check route reports a `followsUp` defect. `--fix` keeps the field.
+3. Web tests: the two cards, from the `follow-up-*` fixtures.
+4. Phone widget tests (purplemux-mobile), from the same fixtures.
+5. A rollback test: a release from before the follow-on epic opens a database with `mission_item_links` and serves the
+   target as `resolved`.
+
+**Consequences.**
+- One question shows as one thread. The owner sees the earlier answer on the new card, and the earlier card is closed.
+- A release without this code refuses an event with `followsUp`: the v1 and v2 checks refuse an unknown field
+  (`question-invalid`). So a follow-up never applies in part. That release ignores `mission_item_links`, and a
+  resolved target stays resolved.
+- Until the phone story lands, the phone shows the target as resolved and the new item without its link. No state is
+  wrong; only the link is absent.
+
+**What proves it wrong.** In the 14 days after the deploy, more than 1 follow-up in 10 gets an owner answer that
+restates the earlier answer, or agents still open an unlinked item for an answered question more than twice a week.
+Then measure why the asker does not use the link. Do that before you add mechanism.

@@ -381,6 +381,46 @@ describe('scripts/deploy-live.sh', { timeout: 60_000 }, () => {
     }
   });
 
+  it('a WAITING-only fleet is quiet, and the listing names each WAITING tab as quiet', () => {
+    h.setTabs([
+      { tabId: 'tab-A', workspaceId: 'ws-a', name: 'orchestrator', panelType: 'claude-code', cliState: 'busy', lastEvent: { name: 'prompt-submit' } },
+      { tabId: 'tab-sm', workspaceId: 'ws-z', name: 'portfolio-sm', panelType: 'claude-code', cliState: 'busy', lastEvent: { name: 'stop', at: Date.now() - 65_000 }, busySince: Date.now() - 18_700_000 },
+    ]);
+    const { status, out } = h.run([h.sha()]);
+    expect(status, out).toBe(0);
+    expect(field(out, 'QUIET')).toBe('quiet (1 WAITING)');
+    expect(out).toMatch(/^WAITING ws-z tab-sm portfolio-sm waiting-for=6\ds \(quiet: background job\)$/m);
+    expect(out).not.toContain('MID-TURN');
+    expect(field(out, 'VERDICT')).toBe('deployed');
+  });
+
+  it('a mix blocks with the mid-turn count; a tab with no lastEvent key counts as mid-turn', () => {
+    const tabs = [
+      { tabId: 'tab-sm', workspaceId: 'ws-z', name: 'portfolio-sm', panelType: 'claude-code', cliState: 'busy', lastEvent: { name: 'stop' } },
+      { tabId: 'tab-C', workspaceId: 'ws-c', name: 'busy-worker', panelType: 'claude-code', cliState: 'busy', lastEvent: { name: 'prompt-submit' } },
+      { tabId: 'tab-old', workspaceId: 'ws-c', name: 'no-event', panelType: 'claude-code', cliState: 'busy' },
+    ];
+    h.setTabs(tabs);
+    const dry = h.run([h.sha(), '--dry-run']);
+    expect(dry.status, dry.out).toBe(0);
+    expect(field(dry.out, 'QUIET')).toBe('not quiet (2 mid-turn, 1 WAITING)');
+    expect(dry.out).toContain('WAITING ws-z tab-sm portfolio-sm waiting-for=unknown (quiet: background job)');
+
+    const other = makeHarness();
+    try {
+      other.setTabs(tabs);
+      const { status, out } = other.run([other.sha(), '--quiet-timeout', '1']);
+      expect(status, out).toBe(3);
+      expect(field(out, 'QUIET')).toBe('timeout after 1s (2 mid-turn, 1 WAITING)');
+      expect(out).toContain('MID-TURN ws-c tab-C busy-worker');
+      expect(out).toContain('MID-TURN ws-c tab-old no-event');
+      expect(out).not.toContain('MID-TURN ws-z tab-sm');
+      expect(restarts(other)).toBe(0);
+    } finally {
+      fs.rmSync(other.root, { recursive: true, force: true });
+    }
+  });
+
   it('--force-after-timeout deploys despite a mid-turn tab', () => {
     h.setTabs([{ tabId: 'tab-C', workspaceId: 'ws-c', name: 'busy-worker', panelType: 'claude-code', cliState: 'busy', lastEvent: null }]);
     const { status, out } = h.run([h.sha(), '--quiet-timeout', '1', '--force-after-timeout']);

@@ -6,7 +6,7 @@ import type {
   TMissionProducerEvent,
 } from '@/types/mission-control';
 import { MissionControlError } from '@/lib/mission-control-errors';
-import { validateMissionQuestion } from '@/lib/mission-question-format';
+import { reviewLint, validateMissionQuestion } from '@/lib/mission-question-format';
 
 const id = z.string().trim().min(1).max(128);
 const timestamp = z.number().int().safe().nonnegative();
@@ -134,7 +134,8 @@ const checkQuestions = (events: TParsedEvent[], minVersion: 1 | 2): IMissionEven
       defects.push(...verdict.defects.map((entry) => ({ eventId: event.eventId, itemId, ...entry })));
       return event;
     }
-    if (verdict.lint.length) lint.push({ eventId: event.eventId, itemId, findings: verdict.lint });
+    const findings = [...verdict.lint, ...reviewLint(verdict.question, review)];
+    if (findings.length) lint.push({ eventId: event.eventId, itemId, findings });
     return { ...event, payload: { itemId, ...verdict.question, ...(review ? { humanReview: review } : {}) } };
   });
   if (defects.length) {

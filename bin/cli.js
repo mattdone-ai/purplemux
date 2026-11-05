@@ -972,9 +972,10 @@ const reshapeAsk = async (event, question, query) => {
 
 // The question check, then the event: what `mc ask` does with a draft, and what `curator spot-check open` posts.
 const postAsk = async (event, wsId, fix) => {
-  const { itemId: _itemId, humanReview: _humanReview, ...question } = event.payload;
+  const { itemId: _itemId, humanReview, ...question } = event.payload;
   const query = `workspaceId=${encodeURIComponent(wsId)}`;
-  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, { question });
+  // The review rides beside the question so the check names a missing class (story 36, D6); it is not a question field.
+  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, { question, ...(humanReview ? { humanReview } : {}) });
   if (!check.ok) {
     process.stderr.write(`question defects (${check.defects.length}, min-version ${check.minVersion}):\n${defectLines(check.defects)}\n`);
     if (fix) {
@@ -986,6 +987,28 @@ const postAsk = async (event, wsId, fix) => {
   if (check.lint.length) process.stderr.write(`question lint (accepted at min-version ${check.minVersion}):\n${defectLines(check.lint)}\n`);
   const { body } = await api('POST', `/api/cli/mission-control/events?${query}`, { events: [event] });
   return body;
+};
+
+// `owner messages` (story 36, D8): the owner's prompts of a workspace, oldest first, so a tab can cite one by its id.
+const cmdOwner = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  if (sub !== 'messages') die('usage: owner messages -w WS [--since ISO] [--json]');
+  const wsId = missionWorkspace(rest);
+  const since = flagValue(rest, '--since');
+  if (since !== null && since !== undefined && Number.isNaN(Date.parse(since))) die(`--since must be an ISO time such as 2026-11-04T01:30:00Z, got "${since}"`);
+  requireEnv();
+  const query = `workspaceId=${encodeURIComponent(wsId)}${since ? `&since=${encodeURIComponent(since)}` : ''}`;
+  const { body } = await api('GET', `/api/cli/owner/messages?${query}`);
+  if (rest.includes('--json')) return out(body);
+  if (!body.messages.length) {
+    process.stdout.write(`no owner messages in ${body.workspaceId}${body.since ? ` since ${body.since}` : ''}\n`);
+    return;
+  }
+  for (const m of body.messages) {
+    const text = m.withheld ? "(withheld: it looks like it holds a credential; read it in the owner's own history)" : m.message;
+    process.stdout.write(`${m.id}  ${m.sentAt}  ${m.tabId || '—'}\n${text.split('\n').map((line) => `  ${line}`).join('\n')}\n`);
+  }
 };
 
 const cmdPortfolio = async (args) => {
@@ -3352,6 +3375,9 @@ Commands:
                                            The reshape gate's judge (story 23): print the last evaluation's
                                            original and reshaped drafts with their sha256 to stdout (admin);
                                            import the verdicts, bound to that run and each sha256 (admin)
+  owner messages -w WS [--since ISO] [--json]
+                                           The owner's prompts of WS, oldest first: id, time (UTC), tab and
+                                           text; a re-send keeps its first id; a tab reads its own workspace's
   curator message -w WS ID [--json]        One owner message by its history id (a standing-order candidate
                                            names the id, never the text); a tab reads its own workspace's
   pool show [--json]                       The compute pool (ADR-0039): per host threads, load, free memory, disk,
@@ -3508,6 +3534,8 @@ const main = async () => {
       return cmdMission(args.slice(1));
     case 'portfolio':
       return cmdPortfolio(args.slice(1));
+    case 'owner':
+      return cmdOwner(args.slice(1));
     case 'inbox':
       return cmdInbox(args.slice(1));
     case 'note':

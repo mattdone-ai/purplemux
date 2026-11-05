@@ -89,12 +89,14 @@ import type { IOrchestratorPresenceFacts } from '@/types/coordination';
 import fs from 'fs/promises';
 import { watch, type FSWatcher } from 'fs';
 import { syncRemoteTranscript } from '@/lib/remote-transcript';
-import { needsDecisionText } from '@/lib/needs-decision';
+import { needsDecisionPushDetail } from '@/lib/needs-decision';
 import {
   needsDecisionDeps,
-  needsDecisionItemId,
   needsDecisionLineKey,
+  needsDecisionAskerNotice,
   openNeedsDecisionItem,
+  stableNeedsDecisionItemId,
+  type TNeedsDecisionAskerNotice,
   type TNeedsDecisionOutcome,
 } from '@/lib/needs-decision-opener';
 
@@ -210,15 +212,48 @@ export interface IHookHistoryItem {
   stale: boolean;
 }
 
-const g = globalThis as unknown as { __ptStatusManager?: StatusManager; __ptNeedsDecisionPushes?: Map<string, number> };
+const g = globalThis as unknown as {
+  __ptStatusManager?: StatusManager;
+  __ptNeedsDecisionPushes?: Map<string, number>;
+  __ptNeedsDecisionAskerNotices?: Map<string, number>;
+};
 
-/** One owner push per NEEDS-DECISION line a day (ADR-0041 §2); in memory, so a restart may send one more. */
+/**
+ * One owner push, and one notice to the asking tab, per NEEDS-DECISION line a day (ADR-0041 §2, story 36); in memory,
+ * so a restart may send one more of each.
+ */
 export const NEEDS_DECISION_PUSH_WINDOW_MS = 24 * 60 * 60_000;
 export const NEEDS_DECISION_PUSH_MEMORY = 2_000;
 const needsDecisionPushes = (): Map<string, number> => {
   if (!g.__ptNeedsDecisionPushes) g.__ptNeedsDecisionPushes = new Map();
   return g.__ptNeedsDecisionPushes;
 };
+const needsDecisionAskerNotices = (): Map<string, number> => {
+  if (!g.__ptNeedsDecisionAskerNotices) g.__ptNeedsDecisionAskerNotices = new Map();
+  return g.__ptNeedsDecisionAskerNotices;
+};
+
+/** The earlier send time when the key was sent inside the window; otherwise records `now` and returns null. */
+const onceADay = (sent: Map<string, number>, key: string, now: number): number | null => {
+  const at = sent.get(key);
+  if (at !== undefined && now - at < NEEDS_DECISION_PUSH_WINDOW_MS) return at;
+  sent.delete(key);
+  sent.set(key, now);
+  while (sent.size > NEEDS_DECISION_PUSH_MEMORY) sent.delete(sent.keys().next().value!);
+  return null;
+};
+
+interface INeedsDecisionResult {
+  /** Appended to the end line in the escalation target's nudge. */
+  note: string;
+  /** The nudge goes out whatever the tab's reportOn. */
+  mustReach: boolean;
+  /**
+   * What the asking tab itself is told, once per line, notice and id a day. `ifUnheard`: only when the nudge carrying
+   * the note does not go out (no escalation target, or its reportOn holds the marker back).
+   */
+  asker: { lineKey: string; notice: TNeedsDecisionAskerNotice; ifUnheard: boolean } | null;
+}
 
 export class StatusManager {
   private tabs = new Map<string, ITabStatusEntry>();
@@ -2761,7 +2796,7 @@ export class StatusManager {
     }
     // Whatever its reportOn, a NEEDS-DECISION turn reaches the owner as a Mission Control item (ADR-0041). The item
     // opens before the nudge, so the nudge names it and the orchestrator never copies the question (review r1, R1).
-    let decision = { note: '', mustReach: false };
+    let decision: INeedsDecisionResult = { note: '', mustReach: false, asker: null };
     const endLine = turnEnd.kind === 'turn-marker' ? turnEnd.lines.at(-1) : undefined;
     if (stopSeq !== undefined && endLine?.startsWith('NEEDS-DECISION:')) {
       decision = await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at, previous?.at ?? entry.busySince ?? at);
@@ -2796,6 +2831,10 @@ export class StatusManager {
     const nudge = forwarded && turnEnd.kind === 'turn-marker'
       ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}` }
       : null;
+    // The note reached a tab only if this nudge goes out to a target (review r1, finding 4).
+    const askerHeard = decision.asker?.ifUnheard && nudge !== null
+      && await this.hasEscalationTarget(tabId, entry);
+    if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
     if (entry.cliState !== 'ready-for-review') {
       this.applyCliState(tabId, entry, 'ready-for-review', { nudge });
       this.persistToLayout(entry);
@@ -2807,6 +2846,27 @@ export class StatusManager {
     }
     this.persistTurnEnd(entry);
     this.broadcastUpdate(tabId, entry);
+    // After the stop is recorded: the notice starts a turn, whose prompt-submit must not race this stop (story 36).
+    if (decision.asker && !askerHeard) this.tellAsker(tabId, entry, decision.asker.lineKey, decision.asker.notice);
+  }
+
+  private async hasEscalationTarget(tabId: string, entry: ITabStatusEntry): Promise<boolean> {
+    const ws = await getWorkspaceByIdCached(entry.workspaceId);
+    return !!ws && this.escalationTarget(tabId, entry, ws) !== null;
+  }
+
+  /**
+   * The asking tab hears of its own NEEDS-DECISION line as an urgent Mission Control event (story 36, D1): the item
+   * that opened when no nudge carries the note, or why none opened. Once per line, notice and id a day, so the line the
+   * tab repeats while it waits (SO-6) never wakes it in a loop, while the open that follows a not-opened is still told.
+   */
+  private tellAsker(tabId: string, entry: ITabStatusEntry, lineKey: string, notice: TNeedsDecisionAskerNotice): void {
+    if (this.isRetired(tabId)) return;
+    const key = `${lineKey}:${notice.kind === 'item' ? 'item' : 'not-opened'}:${notice.itemId}`;
+    if (onceADay(needsDecisionAskerNotices(), key, Date.now()) !== null) return;
+    void this.tabEvents.route({
+      workspaceId: entry.workspaceId, tabId, kind: 'mission', text: needsDecisionAskerNotice(notice), class: classifyWake('mission'),
+    }).catch((err) => log.warn(`NEEDS-DECISION notice to ${tabId} failed: ${err instanceof Error ? err.message : err}`));
   }
 
   /**
@@ -2817,7 +2877,7 @@ export class StatusManager {
   private async openNeedsDecision(
     tabId: string, entry: ITabStatusEntry, tail: string | null | undefined, markerLine: string, stopSeq: number, stopAt: number,
     turnStartedAt: number,
-  ): Promise<{ note: string; mustReach: boolean }> {
+  ): Promise<INeedsDecisionResult> {
     const full = lastTurnLine(tail);
     const { line, complete } = full?.line.startsWith('NEEDS-DECISION:') ? full : { line: markerLine, complete: false };
     const stop = { workspaceId: entry.workspaceId, tabId, tabName: entry.tabName, line, lineComplete: complete, stopSeq, stopAt, turnStartedAt };
@@ -2827,27 +2887,48 @@ export class StatusManager {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       log.error(`NEEDS-DECISION opener unavailable for ${tabId}: ${detail}`);
-      outcome = { opened: false, reason: 'error', itemId: needsDecisionItemId(stop).itemId, detail };
+      outcome = { opened: false, reason: 'error', itemId: stableNeedsDecisionItemId(stop, Date.now(), () => false).itemId, detail };
     }
-    if (outcome.opened) return { note: ` [MC item ${outcome.itemId} opened for the owner by the server: do not open another]`, mustReach: false };
+    if (!outcome.opened && outcome.reason === 'not-needs-decision') return { note: '', mustReach: false, asker: null };
+    const lineKey = needsDecisionLineKey(entry.workspaceId, tabId, line);
+    const ws = await getWorkspaceByIdCached(entry.workspaceId);
+    // The note rides the nudge to the escalation target; when that nudge does not go out, the asker hears it itself.
+    const itemNotice = (state: 'opened' | 'already-open', itemId: string): INeedsDecisionResult['asker'] =>
+      ({ lineKey, notice: { kind: 'item', state, itemId }, ifUnheard: true });
+    if (outcome.opened) {
+      return {
+        note: ` [MC item ${outcome.itemId} opened for the owner by the server: do not open another]`,
+        mustReach: false,
+        asker: itemNotice('opened', outcome.itemId),
+      };
+    }
     switch (outcome.reason) {
-      case 'not-needs-decision': return { note: '', mustReach: false };
-      case 'already-open': return { note: ` [MC item ${outcome.itemId} already open for the owner: do not open another]`, mustReach: false };
-      case 'asked-this-turn': return { note: ` [MC item ${outcome.itemId} opened by the tab this turn: handle it as any worker item]`, mustReach: false };
+      case 'already-open':
+        return { note: ` [MC item ${outcome.itemId} already open for the owner: do not open another]`, mustReach: false, asker: itemNotice('already-open', outcome.itemId) };
+      case 'asked-this-turn': return { note: ` [MC item ${outcome.itemId} opened by the tab this turn: handle it as any worker item]`, mustReach: false, asker: null };
     }
     log.warn({ tabId, ...outcome }, 'NEEDS-DECISION opened no Mission Control item');
-    const ws = await getWorkspaceByIdCached(entry.workspaceId);
     const orchestratorTabId = ws?.orchestration?.orchestratorTabId ?? null;
+    const notOpened = (fate: string): INeedsDecisionResult['asker'] => ({
+      lineKey,
+      ifUnheard: false,
+      notice: {
+        kind: 'not-opened', reason: outcome.reason, itemId: outcome.itemId, detail: outcome.detail, fate,
+        askerIsOrchestrator: orchestratorTabId === tabId,
+      },
+    });
     // (i) A live orchestrator that gets this tab's escalations can open the item: it is told to, the owner is not.
     if (ws && outcome.reason !== 'no-orchestrator' && orchestratorTabId && orchestratorTabId !== tabId
       && this.escalationTarget(tabId, entry, ws) === orchestratorTabId && this.isLiveAgentTab(orchestratorTabId)) {
       return {
         note: ` [no MC item (${outcome.reason}): open it yourself: resume or start your Mission Control run, then open item ${outcome.itemId} from this line with your human review. The owner has not been told.]`,
         mustReach: true,
+        asker: notOpened(`your orchestrator ${orchestratorTabId} was told to open it and holds the line now: do not repeat the line`),
       };
     }
     // (ii) No tab can act: one push per line a day, never awaited.
-    return { note: this.pushNeedsDecision(tabId, entry, ws, line, outcome.reason), mustReach: false };
+    const fate = this.pushNeedsDecision(tabId, entry, ws, line, outcome.reason);
+    return { note: ` [no MC item (${outcome.reason}): ${fate}]`, mustReach: false, asker: notOpened(fate) };
   }
 
   private isLiveAgentTab(tabId: string): boolean {
@@ -2855,18 +2936,10 @@ export class StatusManager {
     return !!target && isAgentPanelType(target.panelType) && !this.isRetired(tabId) && target.cliState !== 'inactive';
   }
 
-  /** The (ii) push and its note. The note says what the server did: delivery is not observable here. */
+  /** The (ii) push; returns what the server did with it. Delivery is not observable here. */
   private pushNeedsDecision(tabId: string, entry: ITabStatusEntry, ws: IWorkspace | undefined, line: string, reason: string): string {
-    const now = Date.now();
-    const key = needsDecisionLineKey(entry.workspaceId, tabId, line);
-    const pushed = needsDecisionPushes();
-    const sentAt = pushed.get(key);
-    if (sentAt !== undefined && now - sentAt < NEEDS_DECISION_PUSH_WINDOW_MS) {
-      return ` [no MC item (${reason}): owner push for this line already dispatched at ${new Date(sentAt).toISOString()}]`;
-    }
-    pushed.delete(key);
-    pushed.set(key, now);
-    while (pushed.size > NEEDS_DECISION_PUSH_MEMORY) pushed.delete(pushed.keys().next().value!);
+    const sentAt = onceADay(needsDecisionPushes(), needsDecisionLineKey(entry.workspaceId, tabId, line), Date.now());
+    if (sentAt !== null) return `owner push for this line already dispatched at ${new Date(sentAt).toISOString()}`;
     void this.dispatchAlert({
       kind: 'needs-decision',
       tabId,
@@ -2875,9 +2948,9 @@ export class StatusManager {
       tabName: entry.tabName,
       providerId: toAlertProvider(entry.agentProviderId),
       agentSessionId: entry.agentSessionId,
-      detail: `${entry.tabName || tabId} · ${ws?.name || entry.workspaceId}: ${needsDecisionText(line)}`,
+      detail: needsDecisionPushDetail({ tabId, tabName: entry.tabName, workspaceId: entry.workspaceId, workspaceName: ws?.name, line }),
     }).catch((err) => log.warn(`NEEDS-DECISION push (${reason}) failed for ${tabId}: ${err instanceof Error ? err.message : err}`));
-    return ` [no MC item (${reason}): owner push dispatched, delivery not confirmed]`;
+    return 'owner push dispatched, delivery not confirmed';
   }
 
   /**

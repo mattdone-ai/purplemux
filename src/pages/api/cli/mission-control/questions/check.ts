@@ -3,7 +3,7 @@ import { resolveCaller } from '@/lib/caller';
 import { MissionControlError } from '@/lib/mission-control-errors';
 import { sendMissionError, setMissionHeaders } from '@/lib/mission-control-http';
 import { readQuestionMinVersion } from '@/lib/mission-question-config';
-import { validateMissionQuestion } from '@/lib/mission-question-format';
+import { reviewLint, validateMissionQuestion } from '@/lib/mission-question-format';
 
 export const config = {
   api: { bodyParser: { sizeLimit: '64kb' } },
@@ -21,7 +21,8 @@ const reshapeSeam = async (workspaceId: string): Promise<{ enabled: boolean; rea
 
 /**
  * The events route's question check without the write (ADR-0037 §2-§3): `purplemux mc ask` runs it
- * before it posts, so the agent fixes every defect in the same turn.
+ * before it posts, so the agent fixes every defect in the same turn. `humanReview`, when sent, adds the
+ * events route's review lint (story 36, D6).
  */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   setMissionHeaders(res);
@@ -31,7 +32,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
   try {
     if (!(await resolveCaller(req, res))) throw new MissionControlError(401, 'unauthorized', 'CLI token required');
-    const body = req.body as { question?: unknown } | null;
+    const body = req.body as { question?: unknown; humanReview?: unknown } | null;
     if (!body || typeof body !== 'object' || !('question' in body)) {
       throw new MissionControlError(400, 'invalid-request', 'body must be { "question": { ... } }');
     }
@@ -39,7 +40,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     const verdict = validateMissionQuestion(body.question, minVersion);
     const reshape = await reshapeSeam(typeof req.query.workspaceId === 'string' ? req.query.workspaceId : '');
     return res.status(200).json(verdict.ok
-      ? { ok: true, formatVersion: verdict.formatVersion, minVersion, defects: [], lint: verdict.lint, question: verdict.question, reshape }
+      ? { ok: true, formatVersion: verdict.formatVersion, minVersion, defects: [], lint: [...verdict.lint, ...reviewLint(verdict.question, body.humanReview)], question: verdict.question, reshape }
       : { ok: false, formatVersion: verdict.formatVersion, minVersion, defects: verdict.defects, lint: [], question: null, reshape });
   } catch (error) {
     sendMissionError(res, error);

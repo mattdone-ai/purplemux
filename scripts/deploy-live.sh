@@ -14,7 +14,8 @@
 # leases → with --announce N, tell every enabled orchestrator and tab-bound lease
 # holder through the inbox and wait until each notice is delivered or held (at
 # most N minutes; story 13) → wait until no agent tab is mid-turn (the tab in PMUX_TAB_ID and every
-# --ignore-tab are excluded) → back up ~/.purplemux state → pre-install the release's hook scripts
+# --ignore-tab are excluded; mid-turn is busy with a last event other than stop, so a WAITING tab
+# is quiet and listed as such, and a list without lastEvent counts every busy tab) → back up ~/.purplemux state → pre-install the release's hook scripts
 # (they spool the events that fire while no server answers; ADR-0020) → point `current` at
 # the release, `previous` at the old one → restart → health gate → rollback on
 # failure. The script never types into a tab.
@@ -582,7 +583,15 @@ poll_midturn() {
       esac
     done < <(helper agent-tabs "$WORK/tabs.json")
   fi
-  helper midturn "$WORK/tabs.json" "$WORK/status" "$OWN_TAB" "${IGNORE_TABS[@]}" >"$WORK/midturn.tsv"
+  helper midturn "$WORK/tabs.json" "$WORK/status" "$OWN_TAB" "${IGNORE_TABS[@]}" >"$WORK/midturn.tsv" &&
+    helper waiting "$WORK/tabs.json" "$WORK/status" "$OWN_TAB" "${IGNORE_TABS[@]}" >"$WORK/waiting.tsv"
+}
+
+print_waiting() {
+  local ws tab name waiting
+  while IFS=$'\t' read -r ws tab name waiting; do
+    echo "WAITING $ws $tab $name waiting-for=$waiting (quiet: background job)"
+  done <"$WORK/waiting.tsv"
 }
 
 print_midturn() {
@@ -590,16 +599,27 @@ print_midturn() {
   while IFS=$'\t' read -r ws tab name busy reason; do
     echo "MID-TURN $ws $tab $name busy-for=$busy ($reason)"
   done <"$WORK/midturn.tsv"
+  print_waiting
+}
+
+# ", N WAITING" for the QUIET summary, or nothing.
+waiting_note() {
+  local n
+  n="$(wc -l <"$WORK/waiting.tsv")"
+  if ((n > 0)); then printf ', %d WAITING' "$n"; fi
 }
 
 LIST_ERROR=""
+: >"$WORK/waiting.tsv"
 if ((DRY_RUN)); then
   if poll_midturn; then
     if [[ -s "$WORK/midturn.tsv" ]]; then
       print_midturn
-      S_QUIET="not quiet ($(wc -l <"$WORK/midturn.tsv") mid-turn)"
+      S_QUIET="not quiet ($(wc -l <"$WORK/midturn.tsv") mid-turn$(waiting_note))"
     else
-      S_QUIET="quiet"
+      print_waiting
+      note="$(waiting_note)"
+      S_QUIET="quiet${note:+ (${note#, })}"
     fi
   else
     S_QUIET="unknown ($LIST_ERROR)"
@@ -629,7 +649,9 @@ else
       quiet_polls=0
     fi
     if ((quiet_polls >= 2)); then
-      S_QUIET="quiet"
+      print_waiting
+      note="$(waiting_note)"
+      S_QUIET="quiet${note:+ (${note#, })}"
       break
     fi
     # A quiet poll at the deadline earns the confirming poll; the wait is
@@ -639,10 +661,10 @@ else
       print_midturn
       blockers="$(wc -l <"$WORK/midturn.tsv")"
       if ((FORCE_AFTER_TIMEOUT)); then
-        S_QUIET="forced after timeout ($blockers mid-turn${LIST_ERROR:+; $LIST_ERROR})"
+        S_QUIET="forced after timeout ($blockers mid-turn$(waiting_note)${LIST_ERROR:+; $LIST_ERROR})"
         break
       fi
-      S_QUIET="timeout after ${QUIET_TIMEOUT}s ($blockers mid-turn${LIST_ERROR:+; $LIST_ERROR})"
+      S_QUIET="timeout after ${QUIET_TIMEOUT}s ($blockers mid-turn$(waiting_note)${LIST_ERROR:+; $LIST_ERROR})"
       finish 3 "quiet-timeout"
     fi
     sleep "$POLL_S"

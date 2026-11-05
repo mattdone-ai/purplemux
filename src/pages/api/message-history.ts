@@ -15,12 +15,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   if (req.method === 'POST') {
-    const { wsId, message } = req.body as { wsId?: string; message?: string };
+    const { wsId, message, tabId } = req.body as { wsId?: string; message?: string; tabId?: unknown };
     if (!wsId) return res.status(400).json({ error: 'wsId is required' });
     if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
 
     try {
-      const entry = await addMessageHistory(wsId, message);
+      const entry = await addMessageHistory(wsId, message, typeof tabId === 'string' && tabId ? tabId : null);
       curatorOnOwnerMessage(wsId, entry.id, message, Date.parse(entry.sentAt) || Date.now());
       return res.status(201).json({ entry });
     } catch (e) {

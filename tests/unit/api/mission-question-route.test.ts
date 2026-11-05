@@ -150,6 +150,46 @@ describe('POST /api/cli/mission-control/questions/check', () => {
   });
 });
 
+// Story 36 (D6): an item a human must see sorts as Unclassified without a class; a warning, never a refusal (ADR-0031).
+describe('class: absent lint on a human-reviewed item (story 36, D6)', () => {
+  const review = { humanNeed: 'decision', humanReason: 'Only the owner picks.', handling: 'Orchestrator relays.', reviewerTabId: 'tab-o' };
+  const CLASS_ABSENT = {
+    field: 'class', measured: 'absent', limit: 'one of money, irreversible, scope, bookkeeping; without it the item sorts as Unclassified (ADR-0031)',
+    message: 'class: absent, one of money, irreversible, scope, bookkeeping; without it the item sorts as Unclassified (ADR-0031)',
+  };
+
+  it('the events route accepts the item and returns the warning in its 200 body', async () => {
+    const r = await post([event('e-hr', { ...v2, humanReview: review })]);
+    expect(r.status).toBe(200);
+    expect(r.body.lint).toEqual([{ eventId: 'e-hr', itemId: 'item-e-hr', findings: [CLASS_ABSENT] }]);
+    expect(store.applyEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives no warning with a class, with a none review, or with no review', async () => {
+    const r = await post([
+      event('e-cls', { ...v2, class: 'scope', humanReview: review }),
+      event('e-none', { ...v2, humanReview: { humanNeed: 'none', handling: 'Handled in the workspace.', reviewerTabId: 'tab-o' } }),
+      event('e-bare', v2),
+    ]);
+    expect(r.status).toBe(200);
+    expect(r.body.lint).toEqual([]);
+  });
+
+  it('adds the warning to a v1 item\'s format findings', async () => {
+    const r = await post([event('e-v1hr', { ...v1, humanReview: review })]);
+    const [entry] = r.body.lint as Array<{ findings: Array<{ field: string }> }>;
+    expect(entry.findings.map((finding) => finding.field)).toEqual(['formatVersion', 'options', 'options[0].label', 'class']);
+  });
+
+  it('the check route answers the same warning when mc ask sends the review beside the question', async () => {
+    const withReview = await call('@/pages/api/cli/mission-control/questions/check', { question: v2, humanReview: review });
+    expect(withReview.body).toMatchObject({ ok: true, defects: [], lint: [CLASS_ABSENT] });
+    expect((await check(v2)).body).toMatchObject({ ok: true, lint: [] });
+    expect((await call('@/pages/api/cli/mission-control/questions/check', { question: { ...v2, class: 'money' }, humanReview: review })).body)
+      .toMatchObject({ ok: true, lint: [] });
+  });
+});
+
 describe('fleet config mission.question-format.min-version is admin-only', () => {
   it('refuses an enabled orchestrator and accepts the admin', async () => {
     const { putValue } = await import('@/lib/fleet-config-http');

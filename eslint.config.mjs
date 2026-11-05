@@ -20,6 +20,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Build artifacts
     "bin/**",
+    // A stand-in for bin/ (CJS, require-based) that the remote-kit test ships and runs.
+    "tests/fixtures/remote-kit-cli/**",
     "build-resources/**",
     "dist/**",
     "dist-electron/**",

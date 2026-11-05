@@ -4,6 +4,13 @@ import path from 'path';
 import { promisify } from 'util';
 import { afterEach, describe, expect, it } from 'vitest';
 
+// A remote tab exports PMUX_URL and PMUX_TAB_TOKEN, which outrank PMUX_PORT and PMUX_TOKEN: the CLI under test
+// would reach the tab's live server instead of this stub (story 36 gate r1).
+const callerFreeEnv = (): NodeJS.ProcessEnv => ({
+  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PMUX_'))),
+  NODE_ENV: process.env.NODE_ENV,
+});
+
 const run = promisify(execFile);
 const cli = path.resolve('bin/cli.js');
 const servers: ReturnType<typeof createServer>[] = [];
@@ -33,7 +40,7 @@ const runMission = async (
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server did not bind a port');
   const result = await run(process.execPath, [cli, 'mission', ...args, '-w', 'ws-one'], {
-    env: { ...process.env, PMUX_PORT: String(address.port), PMUX_TOKEN: 'test-token' },
+    env: { ...callerFreeEnv(), PMUX_PORT: String(address.port), PMUX_TOKEN: 'test-token' },
   });
   return JSON.parse(result.stdout) as Record<string, unknown>;
 };

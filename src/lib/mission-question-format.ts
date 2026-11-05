@@ -170,6 +170,15 @@ export const questionLint = (question: TMissionStoredQuestion): IMissionQuestion
   return findings;
 };
 
+/**
+ * A human-reviewed item with no class sorts as Unclassified on the owner's board (ADR-0031): a warning, never a refusal,
+ * since a producer that cannot name the class omits it (story 36, D6). A `none` review is never owner-visible.
+ */
+export const reviewLint = (question: { class?: unknown }, humanReview: unknown): IMissionQuestionDefect[] => {
+  if (!isRecord(humanReview) || humanReview.humanNeed === 'none' || question.class != null) return [];
+  return [defect('class', 'absent', `one of ${ATTENTION_CLASSES.join(', ')}; without it the item sorts as Unclassified (ADR-0031)`)];
+};
+
 interface IV2Check {
   input: Record<string, unknown>;
   defects: IMissionQuestionDefect[];

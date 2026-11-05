@@ -11,23 +11,28 @@ interface ITab {
   name: string;
   panelType?: string;
   cliState?: string | null;
-  lastEvent?: { name: string } | null;
+  lastEvent?: { name: string; at?: number } | null;
   busySince?: number | null;
 }
 
 interface IMidTurn { workspaceId: string; tabId: string; name: string; busyForS: number | null; reason: string }
 
+interface IWaiting { workspaceId: string; tabId: string; name: string; waitingForS: number | null }
+
+interface IQuietInput {
+  tabs: ITab[];
+  statuses: Record<string, Record<string, unknown>>;
+  ownTabId: string | null;
+  ignore: string[];
+  now: number;
+}
+
 interface IHelpers {
   announceProgress: (status: unknown) => { delivered: number; settled: number; total: number };
   listShape: (tabs: ITab[]) => 'new' | 'old';
   agentTabs: (tabs: ITab[]) => ITab[];
-  midTurnTabs: (input: {
-    tabs: ITab[];
-    statuses: Record<string, Record<string, unknown>>;
-    ownTabId: string | null;
-    ignore: string[];
-    now: number;
-  }) => IMidTurn[];
+  midTurnTabs: (input: IQuietInput) => IMidTurn[];
+  waitingTabs: (input: IQuietInput) => IWaiting[];
   pickWorkspaceToken: (tabs: ITab[], tokens: Record<string, string>) => { workspaceId: string; token: string } | null;
   backupSqlite: (src: string, dst: string, modulePath: string) => Promise<void>;
 }
@@ -77,6 +82,11 @@ describe('deploy-live helpers: mid-turn classification', () => {
     ]);
   });
 
+  it('times a busy tab from its current prompt, not from a busySince that spans earlier WAITING turns', () => {
+    const tabs = [agent('tab-1', { cliState: 'busy', lastEvent: { name: 'prompt-submit', at: 90_000 }, busySince: 10_000 })];
+    expect(helpers.midTurnTabs({ ...base, tabs }).map((t) => t.busyForS)).toEqual([10]);
+  });
+
   it('counts a busy tab with no last event (a restart lost it)', () => {
     const tabs = [agent('tab-1', { cliState: 'busy', lastEvent: null })];
     expect(helpers.midTurnTabs({ ...base, tabs }).map((t) => t.tabId)).toEqual(['tab-1']);
@@ -85,6 +95,52 @@ describe('deploy-live helpers: mid-turn classification', () => {
   it('does not count a busy tab whose last event is stop (open background task)', () => {
     const tabs = [agent('tab-1', { cliState: 'busy', lastEvent: { name: 'stop' } })];
     expect(helpers.midTurnTabs({ ...base, tabs })).toEqual([]);
+  });
+
+  it('counts a busy tab from a list that carries no lastEvent key (an older server): fail safe', () => {
+    const tabs = [agent('tab-1', { cliState: 'busy', busySince: 40_000 })];
+    expect(helpers.midTurnTabs({ ...base, tabs })).toEqual([
+      { workspaceId: 'ws-a', tabId: 'tab-1', name: 'tab-1', busyForS: 60, reason: 'busy' },
+    ]);
+    expect(helpers.waitingTabs({ ...base, tabs })).toEqual([]);
+  });
+
+  it('a WAITING-only fleet is quiet, and each WAITING tab is listed with the time since its stop', () => {
+    const tabs = [
+      agent('tab-sm', { cliState: 'busy', lastEvent: { name: 'stop', at: 70_000 }, busySince: 1 }),
+      agent('tab-soak', { cliState: 'busy', lastEvent: { name: 'stop' }, workspaceId: 'ws-b' }),
+    ];
+    expect(helpers.midTurnTabs({ ...base, tabs })).toEqual([]);
+    expect(helpers.waitingTabs({ ...base, tabs })).toEqual([
+      { workspaceId: 'ws-a', tabId: 'tab-sm', name: 'tab-sm', waitingForS: 30 },
+      { workspaceId: 'ws-b', tabId: 'tab-soak', name: 'tab-soak', waitingForS: null },
+    ]);
+  });
+
+  it('a mix of WAITING and mid-turn tabs blocks on the mid-turn ones only', () => {
+    const tabs = [
+      agent('tab-w1', { cliState: 'busy', lastEvent: { name: 'stop' } }),
+      agent('tab-m1', { cliState: 'busy', lastEvent: { name: 'prompt-submit' } }),
+      agent('tab-w2', { cliState: 'busy', lastEvent: { name: 'stop' } }),
+      agent('tab-m2', { cliState: 'busy', lastEvent: { name: 'session-start' } }),
+      agent('tab-i', { cliState: 'idle', lastEvent: { name: 'stop' } }),
+    ];
+    expect(helpers.midTurnTabs({ ...base, tabs }).map((t) => t.tabId)).toEqual(['tab-m1', 'tab-m2']);
+    expect(helpers.waitingTabs({ ...base, tabs }).map((t) => t.tabId)).toEqual(['tab-w1', 'tab-w2']);
+  });
+
+  it('the own tab and every --ignore-tab are left out of the WAITING listing too', () => {
+    const waiting = { cliState: 'busy', lastEvent: { name: 'stop' } };
+    const tabs = [agent('tab-own', waiting), agent('tab-x', waiting), agent('tab-y', { ...waiting, workspaceId: 'ws-b' })];
+    const result = helpers.waitingTabs({ ...base, tabs, ownTabId: 'tab-own', ignore: ['ws-b/tab-y'] });
+    expect(result.map((t) => t.tabId)).toEqual(['tab-x']);
+  });
+
+  it('old shape lists no WAITING tab: the per-tab status alone cannot prove one', () => {
+    const tabs = [agent('tab-1')];
+    const statuses = { 'tab-1': { cliState: 'busy', lastEvent: { name: 'stop' } } };
+    expect(helpers.waitingTabs({ ...base, tabs, statuses })).toEqual([]);
+    expect(helpers.midTurnTabs({ ...base, tabs, statuses }).map((t) => t.tabId)).toEqual(['tab-1']);
   });
 
   it('does not count idle, terminal or ready tabs', () => {

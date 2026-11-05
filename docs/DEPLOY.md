@@ -36,7 +36,7 @@ Options:
 | `--rollback` | swap `current` and `previous`, restart, health-check |
 | `--announce MINUTES` | before the quiet wait, `deploy announce` (1-60 min) to every enabled orchestrator and tab-bound lease holder, then wait until each notice is delivered or held, at most MINUTES (story 13) |
 
-The tab in `PMUX_TAB_ID` is always excluded from the quiet wait. A tab created before story 01 has no `PMUX_TAB_ID`; the script then refuses with `REFUSED OWN-TAB-UNKNOWN` until you name your own tab with `--ignore-tab <ws>/<tab>` (or pass `--outside-tab` from a plain shell).
+A tab is mid-turn for the quiet wait when it is busy and its last event is not `stop` (story 38's working predicate). A WAITING tab (busy only on its own background work after a stop, ADR-0018) is quiet: it prints `WAITING <ws> <tab> <name> waiting-for=… (quiet: background job)` and is counted in `QUIET=` (`quiet (1 WAITING)`). A tab list without `lastEvent` counts every busy tab as mid-turn. `busy-for=` counts from the current prompt, not from a `busySince` that spans earlier WAITING turns. The tab in `PMUX_TAB_ID` is always excluded from the quiet wait. A tab created before story 01 has no `PMUX_TAB_ID`; the script then refuses with `REFUSED OWN-TAB-UNKNOWN` until you name your own tab with `--ignore-tab <ws>/<tab>` (or pass `--outside-tab` from a plain shell).
 
 ### Announce
 

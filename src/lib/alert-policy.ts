@@ -7,6 +7,11 @@ import type { IAlert, IAlertFlag, IAlertQuestion, IWorkspaceStandup, TAlertKind,
 export const ALERTS_ORCHESTRATOR_ONLY_DEFAULT = true;
 
 const MAX_BODY = 100;
+/**
+ * A NEEDS-DECISION push carries the question and its options (story 36): 400 code points, at most 1,600 UTF-8 bytes,
+ * leaves the FCM data map well inside its 3,584-byte budget (`fcm-channel.ts`).
+ */
+export const NEEDS_DECISION_MAX_BODY = 400;
 
 export interface IAlertPolicyTab {
   id: string;
@@ -107,6 +112,15 @@ const cutBody = (text: string): string => {
   return points.length <= MAX_BODY ? text : points.slice(0, MAX_BODY).join('');
 };
 
+/** Cut by code points at the last space past half the cap, with a trailing … so the owner sees the cut. */
+const cutAtWord = (text: string, max: number): string => {
+  const points = Array.from(text);
+  if (points.length <= max) return text;
+  const cut = points.slice(0, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).join('').trimEnd()}…`;
+};
+
 const STALL_BODY = 'Idle with no worker activity — the orchestrator stopped driving the epic.';
 
 const titleFor = (kind: TAlertKind): string => {
@@ -146,7 +160,7 @@ const bodyFor = (source: IAlertSource): string => {
     case 'attention-opened':
       return cutBody(source.itemTitle?.trim() || source.workspaceName || source.tabName || source.tabId);
     case 'needs-decision':
-      return cutBody(source.detail || source.tabName || source.tabId);
+      return cutAtWord(source.detail || source.tabName || source.tabId, NEEDS_DECISION_MAX_BODY);
   }
 };
 

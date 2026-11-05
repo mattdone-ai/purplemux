@@ -36,7 +36,7 @@ import {
   shQuote,
   runSsh,
 } from '@/lib/remote-host';
-import { buildRemoteCreateScript, remoteKitFiles, remoteKitPath, remoteTabEnvFile, remoteTabEnvRelative } from '@/lib/remote-kit';
+import { buildRemoteCreateScript, readRemoteCliModules, remoteKitFiles, remoteKitPath, remoteTabEnvFile, remoteTabEnvRelative } from '@/lib/remote-kit';
 import { knownRemoteHosts, remoteHostsInUse, sessionHostOf } from '@/lib/session-host';
 
 const log = createLogger('terminal');
@@ -45,7 +45,7 @@ const execFile = promisify(execFileCb);
 
 const TMUX_SOCKET = 'purple';
 const TMUX_CONFIG_PATH = path.join(process.env.__PMUX_APP_DIR_UNPACKED || process.env.__PMUX_APP_DIR || process.cwd(), 'src', 'config', 'tmux.conf');
-const CLI_JS_PATH = path.join(process.env.__PMUX_APP_DIR_UNPACKED || process.env.__PMUX_APP_DIR || process.cwd(), 'bin', 'cli.js');
+const CLI_BIN_DIR = path.join(process.env.__PMUX_APP_DIR_UNPACKED || process.env.__PMUX_APP_DIR || process.cwd(), 'bin');
 const CMD_TIMEOUT = 5000;
 /** A remote close waits out the reap script's 3 s grace and settle on top of the ssh round trip. */
 const REMOTE_REAP_TIMEOUT = 20_000;
@@ -164,16 +164,16 @@ const createRemoteSession = async (
     await writeClaudePromptFile({ id: identity.workspaceId }).catch((err) => log.error(
       `claude prompt for ${identity.workspaceId} not rewritten before remote create; the kit gets the last file written: ${err instanceof Error ? err.message : err}`));
   }
-  const [tmuxConf, cliJs, prompt] = await Promise.all([
+  const [tmuxConf, cli, prompt] = await Promise.all([
     fs.readFile(TMUX_CONFIG_PATH, 'utf-8'),
-    fs.readFile(CLI_JS_PATH, 'utf-8').catch(() => null),
+    readRemoteCliModules((name) => fs.readFile(path.join(CLI_BIN_DIR, name), 'utf-8')),
     identity ? fs.readFile(getClaudePromptPath(identity.workspaceId), 'utf-8').catch(() => null) : Promise.resolve(null),
   ]);
   const launch = buildRemoteShellLaunchCommand(env, tabEnv ? remoteKitPath(remoteTabEnvRelative(tabEnv.tabId)) : undefined);
   const nonce = nanoid(16);
   const script = buildRemoteCreateScript({
     nonce,
-    files: remoteKitFiles({ tmuxConf, cliJs, workspaceId: identity?.workspaceId, prompt, tabEnv }),
+    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv }),
     session: name,
     cols,
     rows,

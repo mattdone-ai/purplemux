@@ -65,18 +65,20 @@ export const readMessageHistory = async (wsId: string): Promise<IHistoryEntry[]>
   return readFile(resolveHistoryPath(wsId));
 };
 
-export const addMessageHistory = async (wsId: string, message: string): Promise<IHistoryEntry> => {
+/** A re-send of the same text keeps its first id, so a reference to it holds; it takes the new time and tab (story 36). */
+export const addMessageHistory = async (wsId: string, message: string, tabId: string | null = null): Promise<IHistoryEntry> => {
   return withLock(wsId, async () => {
     const filePath = resolveHistoryPath(wsId);
     const entries = await readFile(filePath);
 
     const dupeIndex = entries.findIndex((e) => e.message === message);
-    if (dupeIndex !== -1) entries.splice(dupeIndex, 1);
+    const [dupe] = dupeIndex === -1 ? [] : entries.splice(dupeIndex, 1);
 
     const entry: IHistoryEntry = {
-      id: nanoid(),
+      id: dupe?.id ?? nanoid(),
       message,
       sentAt: new Date().toISOString(),
+      tabId,
     };
     entries.unshift(entry);
 

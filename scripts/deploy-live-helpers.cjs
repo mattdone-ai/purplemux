@@ -19,11 +19,22 @@ const agentTabs = (tabs) => tabs.filter((tab) => AGENT_PANEL_TYPES.has(tab.panel
 const isExcluded = (tab, ownTabId, ignore) =>
   tab.tabId === ownTabId || ignore.includes(`${tab.workspaceId}/${tab.tabId}`);
 
+const secondsSince = (at, now) => (typeof at === 'number' ? Math.max(0, Math.round((now - at) / 1000)) : null);
+
+// The working predicate of ADR-0018 and story 38's is_working: busy after a stop is WAITING on
+// background work, not mid-turn. A list without lastEvent (an older server) proves no stop.
+const isWaiting = (tab) => tab.cliState === 'busy' && tab.lastEvent?.name === 'stop';
+
+// busySince spans a whole chain of WAITING turns; a later prompt starts the current one (as fleet-status).
+const turnStart = (tab) => {
+  const prompt = tab.lastEvent?.name === 'prompt-submit' && typeof tab.lastEvent.at === 'number' ? tab.lastEvent.at : null;
+  const stamps = [tab.busySince, prompt].filter((at) => typeof at === 'number');
+  return stamps.length ? Math.max(...stamps) : null;
+};
+
 /**
- * Agent tabs that are mid-turn. New shape: `busy` with a last event other than
- * `stop` (a tab kept busy only by open background work after a stop is not
- * mid-turn). Old shape: the per-tab status is the only state there is, so every
- * `busy` counts, and a status that could not be read counts too.
+ * Agent tabs that are mid-turn. New shape: `busy` and not WAITING. Old shape: the per-tab status
+ * is the only state there is, so every `busy` counts, and a status that could not be read counts too.
  */
 const midTurnTabs = ({ tabs, statuses, ownTabId, ignore, now }) => {
   const shape = listShape(tabs);
@@ -32,9 +43,8 @@ const midTurnTabs = ({ tabs, statuses, ownTabId, ignore, now }) => {
     if (isExcluded(tab, ownTabId, ignore)) continue;
     const entry = { workspaceId: tab.workspaceId, tabId: tab.tabId, name: tab.name, busyForS: null };
     if (shape === 'new') {
-      if (tab.cliState !== 'busy' || tab.lastEvent?.name === 'stop') continue;
-      if (typeof tab.busySince === 'number') entry.busyForS = Math.max(0, Math.round((now - tab.busySince) / 1000));
-      result.push({ ...entry, reason: 'busy' });
+      if (tab.cliState !== 'busy' || isWaiting(tab)) continue;
+      result.push({ ...entry, busyForS: secondsSince(turnStart(tab), now), reason: 'busy' });
       continue;
     }
     const status = statuses[tab.tabId];
@@ -47,6 +57,16 @@ const midTurnTabs = ({ tabs, statuses, ownTabId, ignore, now }) => {
   }
   return result;
 };
+
+/** New-shape agent tabs the quiet wait treats as quiet only because they are WAITING, for the listing. */
+const waitingTabs = ({ tabs, ownTabId, ignore, now }) => {
+  if (listShape(tabs) !== 'new') return [];
+  return agentTabs(tabs)
+    .filter((tab) => !isExcluded(tab, ownTabId, ignore) && isWaiting(tab))
+    .map((tab) => ({ workspaceId: tab.workspaceId, tabId: tab.tabId, name: tab.name, waitingForS: secondsSince(tab.lastEvent.at, now) }));
+};
+
+const formatSeconds = (s) => (s === null ? 'unknown' : `${s}s`);
 
 const pickWorkspaceToken = (tabs, tokens) => {
   const withTabs = [...new Set(tabs.map((tab) => tab.workspaceId))].find((id) => tokens[id]);
@@ -77,6 +97,14 @@ const readStatuses = (dir) => {
   return statuses;
 };
 
+const readQuietInput = ([file, statusDir, ownTabId, ...ignore]) => ({
+  tabs: readJson(file).tabs ?? [],
+  statuses: readStatuses(statusDir),
+  ownTabId: ownTabId || null,
+  ignore,
+  now: Date.now(),
+});
+
 /**
  * Delivery progress of a `deploy status --json` body: a notice is settled once it is delivered,
  * held (it waits for a person), dropped (its tab closed) or pruned; only queued ones are pending.
@@ -96,17 +124,15 @@ const commands = {
     for (const tab of agentTabs(readJson(file).tabs ?? [])) console.log(`${tab.workspaceId}\t${tab.tabId}`);
   },
   // midturn TABS_JSON STATUS_DIR OWN_TAB [WS/TAB...] -> "ws<TAB>tab<TAB>name<TAB>busy-for<TAB>reason"
-  midturn: ([file, statusDir, ownTabId, ...ignore]) => {
-    const rows = midTurnTabs({
-      tabs: readJson(file).tabs ?? [],
-      statuses: readStatuses(statusDir),
-      ownTabId: ownTabId || null,
-      ignore,
-      now: Date.now(),
-    });
-    for (const row of rows) {
-      const busyFor = row.busyForS === null ? 'unknown' : `${row.busyForS}s`;
-      console.log([row.workspaceId, row.tabId, row.name, busyFor, row.reason].join('\t'));
+  midturn: (args) => {
+    for (const row of midTurnTabs(readQuietInput(args))) {
+      console.log([row.workspaceId, row.tabId, row.name, formatSeconds(row.busyForS), row.reason].join('\t'));
+    }
+  },
+  // waiting TABS_JSON STATUS_DIR OWN_TAB [WS/TAB...] -> "ws<TAB>tab<TAB>name<TAB>waiting-for"
+  waiting: (args) => {
+    for (const row of waitingTabs(readQuietInput(args))) {
+      console.log([row.workspaceId, row.tabId, row.name, formatSeconds(row.waitingForS)].join('\t'));
     }
   },
   // ws-token TABS_JSON TOKENS_JSON -> "ws<TAB>token" or nothing
@@ -163,4 +189,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { listShape, agentTabs, midTurnTabs, pickWorkspaceToken, backupSqlite, announceProgress };
+module.exports = { listShape, agentTabs, midTurnTabs, waitingTabs, pickWorkspaceToken, backupSqlite, announceProgress };

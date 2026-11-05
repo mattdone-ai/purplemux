@@ -5,6 +5,8 @@ import type { IHistoryEntry } from '@/types/message-history';
 
 interface IUseMessageHistoryOptions {
   wsId: string | undefined;
+  /** The tab the input sends to: the history records it beside each message (story 36). */
+  tabId?: string;
 }
 
 interface IUseMessageHistoryReturn {
@@ -16,7 +18,7 @@ interface IUseMessageHistoryReturn {
   deleteHistory: (id: string) => Promise<void>;
 }
 
-const useMessageHistory = ({ wsId }: IUseMessageHistoryOptions): IUseMessageHistoryReturn => {
+const useMessageHistory = ({ wsId, tabId }: IUseMessageHistoryOptions): IUseMessageHistoryReturn => {
   const { entries, isLoading, isError } = useMessageHistoryStore(
     useShallow((s) => (wsId ? (s.byWsId[wsId] ?? emptyState) : emptyState)),
   );
@@ -31,9 +33,9 @@ const useMessageHistory = ({ wsId }: IUseMessageHistoryOptions): IUseMessageHist
 
   const addHistory = useCallback(
     async (message: string) => {
-      if (wsId) await storeAdd(wsId, message);
+      if (wsId) await storeAdd(wsId, message, tabId);
     },
-    [wsId, storeAdd],
+    [wsId, tabId, storeAdd],
   );
 
   const deleteHistory = useCallback(

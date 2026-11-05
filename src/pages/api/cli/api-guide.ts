@@ -1476,6 +1476,10 @@ POST /api/cli/curator/judge-import  { runId, verdicts: [{ id, sha, verdict: "sam
 GET  /api/cli/curator/message?workspaceId=WS&entryId=ID   (purplemux curator message -w WS ID)
   A tab of WS, or admin. One owner message by its history id: { workspaceId, entryId, sentAt, message };
   a credential-shaped message is refused (409 curator-refused), never shown.
+GET  /api/cli/owner/messages?workspaceId=WS[&since=ISO]   (purplemux owner messages -w WS [--since ISO])
+  A tab of WS, or admin. The owner's prompts, oldest first: { workspaceId, since, messages: [{ id, sentAt, tabId,
+  message, withheld }] }. tabId is null when the sender named no tab; a re-send keeps its first id and takes the new
+  sentAt; a credential-shaped message has message null and withheld true. The history keeps the last 500.
 
 ## Board goal (ADR-0034 §10)
 
@@ -1681,7 +1685,9 @@ POST /api/cli/mission-control/events?workspaceId=WS
   refuses the whole batch with 400, and the error names the field. A producer that cannot name
   the class omits it; money, irreversible and scope are never auto-answered. Only the producer
   sets the class: the server never guesses one, and an item without a class reads "class": null
-  (shown as Unclassified). The snapshot item carries "class" and "defaultOptionId" (null when
+  (shown as Unclassified). An item with a human review (humanNeed not "none") and no class is
+  accepted with the lint finding "class: absent" in the events route's 200 body and on mc ask's
+  stderr; it is never refused. The snapshot item carries "class" and "defaultOptionId" (null when
   absent); attention.updated replaces both under the item revision rule, and a change of either
   on an open item needs renewed review like any other question change. The snapshot also carries
   "answersByClass": [{ "day": "YYYY-MM-DD", "class": "money"|...|"unclassified",

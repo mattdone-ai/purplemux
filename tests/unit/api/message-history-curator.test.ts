@@ -16,6 +16,16 @@ describe('POST /api/message-history', () => {
     const res = await callRoute(handler as never, { method: 'POST', body: { wsId: 'ws-a', message: 'from now on use AEDT' } });
     expect(res.status).toBe(201);
     expect(hooks.onOwnerMessage).toHaveBeenCalledWith('ws-a', 'm1', 'from now on use AEDT', Date.parse('2026-11-03T04:05:06.000Z'));
+    expect(hooks.add).toHaveBeenCalledWith('ws-a', 'from now on use AEDT', null);
+  });
+
+  it('records the tab the prompt was sent to (story 36, D8); a tab id that is not a string is not recorded', async () => {
+    hooks.add.mockResolvedValue({ id: 'm2', message: 'ship', sentAt: '2026-11-03T04:05:06.000Z', tabId: 'tab-1' });
+    const { default: handler } = await import('@/pages/api/message-history');
+    await callRoute(handler as never, { method: 'POST', body: { wsId: 'ws-a', message: 'ship', tabId: 'tab-1' } });
+    expect(hooks.add).toHaveBeenLastCalledWith('ws-a', 'ship', 'tab-1');
+    await callRoute(handler as never, { method: 'POST', body: { wsId: 'ws-a', message: 'ship', tabId: 42 } });
+    expect(hooks.add).toHaveBeenLastCalledWith('ws-a', 'ship', null);
   });
 
   it('a failed save hands nothing to the curator', async () => {

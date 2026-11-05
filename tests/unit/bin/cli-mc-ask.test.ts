@@ -81,7 +81,7 @@ describe('purplemux mc ask (ADR-0037)', { timeout: 30_000 }, () => {
   const refused = { ok: false, formatVersion: 2, minVersion: 1, defects, lint: [], question: null,
     reshape: { enabled: false, reason: 'the curator reshape is not enabled on this server (harness-flow-loop story 23)' } };
 
-  it('checks the question (without itemId or humanReview), then posts the event unchanged', async () => {
+  it('checks the question with its human review beside it (story 36), then posts the event unchanged', async () => {
     checkAnswer = { ok: true, formatVersion: 2, minVersion: 1, defects: [], lint: [], question: {}, reshape: refused.reshape };
     const result = await cli(['mc', 'ask', '-w', 'ws-a', '--json', `@${await draftFile(event)}`]);
     expect(result.code).toBe(0);
@@ -89,9 +89,22 @@ describe('purplemux mc ask (ADR-0037)', { timeout: 30_000 }, () => {
       '/api/cli/mission-control/questions/check?workspaceId=ws-a',
       '/api/cli/mission-control/events?workspaceId=ws-a',
     ]);
-    const { itemId: _itemId, humanReview: _review, ...question } = event.payload;
-    expect(requests[0].body).toEqual({ question });
+    const { itemId: _itemId, humanReview, ...question } = event.payload;
+    expect(requests[0].body).toEqual({ question, humanReview });
     expect(requests[1].body).toEqual({ events: [event] });
+  });
+
+  it('prints a class: absent warning on stderr and still posts (story 36, D6)', async () => {
+    const classAbsent = { field: 'class', measured: 'absent', limit: 'one of money, irreversible, scope, bookkeeping; without it the item sorts as Unclassified (ADR-0031)',
+      message: 'class: absent, one of money, irreversible, scope, bookkeeping; without it the item sorts as Unclassified (ADR-0031)' };
+    checkAnswer = { ok: true, formatVersion: 2, minVersion: 1, defects: [], lint: [classAbsent], question: {}, reshape: refused.reshape };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--json', `@${await draftFile(event)}`]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain(`question lint (accepted at min-version 1):\n  ${classAbsent.message}`);
+    expect(requests.map((request) => request.url)).toEqual([
+      '/api/cli/mission-control/questions/check?workspaceId=ws-a',
+      '/api/cli/mission-control/events?workspaceId=ws-a',
+    ]);
   });
 
   it('prints every defect and exits 2 with nothing posted', async () => {
@@ -133,7 +146,7 @@ describe('purplemux mc ask (ADR-0037)', { timeout: 30_000 }, () => {
       '/api/cli/mission-control/questions/check?workspaceId=ws-a',
       '/api/cli/mission-control/events?workspaceId=ws-a',
     ]);
-    expect(requests[2].body).toEqual({ question: reshaped });
+    expect(requests[2].body).toEqual({ question: reshaped, humanReview: event.payload.humanReview });
     expect(requests[3].body).toEqual({ events: [{ ...event, payload: { itemId: 'q-1', humanReview: event.payload.humanReview, ...reshaped } }] });
   });
 

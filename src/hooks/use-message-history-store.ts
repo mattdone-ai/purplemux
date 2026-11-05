@@ -14,7 +14,7 @@ interface IMessageHistoryState {
   byWsId: Record<string, IWsHistoryState>;
 
   fetchHistory: (wsId: string) => Promise<void>;
-  addHistory: (wsId: string, message: string) => Promise<void>;
+  addHistory: (wsId: string, message: string, tabId?: string) => Promise<void>;
   deleteHistory: (wsId: string, id: string) => Promise<void>;
 }
 
@@ -44,7 +44,7 @@ const useMessageHistoryStore = create<IMessageHistoryState>((set, get) => ({
     }
   },
 
-  addHistory: async (wsId, message) => {
+  addHistory: async (wsId, message, tabId) => {
     const trimmed = message.trim();
     if (!trimmed || trimmed.startsWith('/')) return;
 
@@ -71,7 +71,7 @@ const useMessageHistoryStore = create<IMessageHistoryState>((set, get) => ({
       const res = await fetch('/api/message-history', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wsId, message: trimmed }),
+        body: JSON.stringify({ wsId, message: trimmed, ...(tabId ? { tabId } : {}) }),
       });
       if (res.ok) {
         const data = await res.json();

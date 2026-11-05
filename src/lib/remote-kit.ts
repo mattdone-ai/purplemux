@@ -66,9 +66,39 @@ export interface IRemoteKitFile {
 
 const SAFE_RELATIVE = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
+// `require('./x.js')`, `require("./x")` or require(`./x`), anywhere in the source: a lazy require in a function counts.
+const LOCAL_REQUIRE = /require\(\s*(['"`])\.\/([A-Za-z0-9._-]+)\1\s*\)/g;
+const HAS_EXTENSION = /\.(?:c?js|json)$/;
+
+/** The sibling modules a CLI source loads, by file name; an extensionless one resolves as Node does first, to `.js`. */
+export const cliLocalRequires = (source: string): string[] =>
+  [...new Set([...source.matchAll(LOCAL_REQUIRE)].map((m) => (HAS_EXTENSION.test(m[2]) ? m[2] : `${m[2]}.js`)))];
+
+/**
+ * `bin/cli.js` and every sibling module it requires, transitively, by file name (story 36): the kit's CLI runs from
+ * `bin/` on the remote host, so a module left out fails every command at load. Null when any of them cannot be read:
+ * a CLI that cannot load is not shipped.
+ */
+export const readRemoteCliModules = async (read: (name: string) => Promise<string>): Promise<Record<string, string> | null> => {
+  const modules: Record<string, string> = {};
+  const queue = ['cli.js'];
+  try {
+    while (queue.length) {
+      const name = queue.shift()!;
+      if (Object.prototype.hasOwnProperty.call(modules, name)) continue;
+      modules[name] = await read(name);
+      queue.push(...cliLocalRequires(modules[name]));
+    }
+  } catch {
+    return null;
+  }
+  return modules;
+};
+
 export const remoteKitFiles = (opts: {
   tmuxConf: string;
-  cliJs: string | null;
+  /** File name to content, from `readRemoteCliModules`; null ships no CLI. */
+  cli: Record<string, string> | null;
   workspaceId?: string;
   prompt: string | null;
   tabEnv?: { tabId: string; content: string };
@@ -76,9 +106,9 @@ export const remoteKitFiles = (opts: {
   { path: 'tmux.conf', content: opts.tmuxConf, mode: 0o600 },
   { path: 'status-hook.sh', content: REMOTE_HOOK_SCRIPT_CONTENT, mode: 0o700 },
   { path: 'hooks.json', content: remoteHooksJson(), mode: 0o600 },
-  ...(opts.cliJs !== null
+  ...(opts.cli !== null
     ? [
-        { path: 'bin/cli.js', content: opts.cliJs, mode: 0o600 as const },
+        ...Object.entries(opts.cli).map(([name, content]) => ({ path: `bin/${name}`, content, mode: 0o600 as const })),
         { path: 'bin/purplemux', content: REMOTE_CLI_WRAPPER, mode: 0o700 as const },
       ]
     : []),

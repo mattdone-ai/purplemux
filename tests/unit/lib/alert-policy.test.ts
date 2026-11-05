@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { alertFor, isStallEpisodeEnd, shouldAlert, standupAlertTabId } from '@/lib/alert-policy';
+import { buildFcmMessage, FCM_DATA_BUDGET_BYTES, fcmDataBytes } from '@/lib/fcm-channel';
 import type { IWorkspace } from '@/types/terminal';
 import type { IWorkspaceStandup } from '@/types/status';
 
@@ -125,13 +126,32 @@ describe('alertFor', () => {
     expect(unknown.body).toBe('pid 4242 exited with unknown status');
   });
 
-  it('a needs-decision alert has its fixed title and a body cut at 100 code points (ADR-0041)', () => {
-    const detail = `w1 · ws-a: ${'€'.repeat(150)}`;
-    const alert = alertFor({ ...base, kind: 'needs-decision', detail });
-    expect(alert.title).toBe('Decision needed: no Mission Control item');
-    expect(Array.from(alert.body)).toHaveLength(100);
-    expect(alert.body).toBe(Array.from(detail).slice(0, 100).join(''));
+  // Story 36: at 100 code points a line lost its options mid-word ("(b) follo") with no sign of the cut.
+  it('a needs-decision alert keeps the question and its options: up to 400 code points, cut at a word with a trailing …', () => {
+    const line = `w1 · ws-a: Which budget do we take for the epic, now that D2 and D7 do not fit? (a) raise the budget to 40 (b) follow on`;
+    expect(alertFor({ ...base, kind: 'needs-decision', detail: line })).toMatchObject({ title: 'Decision needed: no Mission Control item', body: line });
+    const long = `w1 · ws-a: ${'which rule do we ship '.repeat(30)}(a) base currency (b) transaction currency`;
+    const body = alertFor({ ...base, kind: 'needs-decision', detail: long }).body;
+    const points = Array.from(body);
+    expect(points.length).toBeLessThanOrEqual(400);
+    expect(points.length).toBeGreaterThan(380);
+    expect(body.endsWith('…')).toBe(true);
+    const kept = body.slice(0, -1);
+    expect(long.startsWith(kept)).toBe(true);
+    expect(long[kept.length]).toBe(' ');
     expect(alertFor({ ...base, kind: 'needs-decision', detail: 'w1 · ws-a: Ship it?' }).body).toBe('w1 · ws-a: Ship it?');
+  });
+
+  it('a needs-decision body with no space to cut at is cut at 399 code points plus …, never inside a surrogate pair', () => {
+    const body = alertFor({ ...base, kind: 'needs-decision', detail: '😀'.repeat(500) }).body;
+    expect(Array.from(body)).toHaveLength(400);
+    expect(body).toBe(`${'😀'.repeat(399)}…`);
+  });
+
+  it('the longest needs-decision body, at 4 UTF-8 bytes a code point, keeps the FCM data map under its budget', () => {
+    const alert = { ...alertFor({ ...base, kind: 'needs-decision', detail: '😀'.repeat(500), tabName: 't'.repeat(60), workspaceName: 'w'.repeat(60) }), id: 'a-1', seq: 1 };
+    const message = buildFcmMessage(alert, { agentSessionId: 's'.repeat(36), workspaceDir: `/home/${'d'.repeat(100)}` } as never, 'token');
+    expect(fcmDataBytes(message.message.data)).toBeLessThanOrEqual(FCM_DATA_BUDGET_BYTES);
   });
 
   it('clamps liveness alert bodies and falls back to the tab name', () => {
