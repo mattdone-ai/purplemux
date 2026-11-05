@@ -14,6 +14,7 @@ export type TFleetState =
   | 'idle'
   | 'unsubmitted'
   | 'inactive'
+  | 'startup-prompt'
   | 'unknown';
 
 export type TFleetFlag = 'stall' | 'unanswered' | 'waiting-long';
@@ -114,7 +115,7 @@ export interface IFleetTabFacts {
   providerId: string | null;
   epic: string | null;
   status: Pick<IClientTabStatusEntry,
-    'cliState' | 'lastEvent' | 'busySince' | 'readyForReviewAt' | 'turnEnd' | 'permissionRequest'> | null;
+    'cliState' | 'lastEvent' | 'busySince' | 'readyForReviewAt' | 'turnEnd' | 'permissionRequest' | 'startupPrompt'> | null;
   /** mtime of the main transcript; null when unknown. */
   transcriptAt: number | null;
   /** When the watchdog sent its `stuck` nudge for the current busy stretch; null when it did not. */

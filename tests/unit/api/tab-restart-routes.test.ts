@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ADR-0028 §10: the CLI route (own workspace only) and the cookie route (a human
 // session and this server's Origin) call one restart service.
@@ -49,6 +49,14 @@ const request = (opts: { method?: string; cookie?: string; origin?: string | nul
 
 const cliRoute = async () => (await import('@/pages/api/cli/tabs/[tabId]/restart')).default;
 const cookieRoute = async () => (await import('@/pages/api/tabs/[tabId]/restart')).default;
+
+// The routes' first import loads tab-restart, tmux and the status manager: about 1.4 s alone, and past the
+// 5 s test budget under a loaded whole-suite gate (05-r2 and 05-r3, load 38-60 on 64 cores). The import is
+// setup, so it gets its own budget and no test pays it.
+beforeAll(async () => {
+  await cliRoute();
+  await cookieRoute();
+}, 60_000);
 
 describe('POST /api/cli/tabs/{tabId}/restart', () => {
   beforeEach(() => {

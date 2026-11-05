@@ -8,7 +8,8 @@ import { buildRemoteShellLaunchCommand, buildShellLaunchCommand } from '@/lib/sh
 import { ensureWorkspaceGrokHome } from '@/lib/grok-home';
 import { writeGrokHookFile } from '@/lib/providers/grok/hook-config';
 import { GROK_HOOK_SCRIPT_PATH } from '@/lib/providers/grok/paths';
-import { ensureWorkspaceClaudeHome, workspaceIdFromSessionName } from '@/lib/workspace-home';
+import { ensureWorkspaceClaudeHome, workspaceDirectories, workspaceIdFromSessionName } from '@/lib/workspace-home';
+import { nearestWorkspaceDirectory } from '@/lib/workspace-trust';
 import { getWorkspaceToken } from '@/lib/workspace-token';
 import { ensureTabToken, type ITabIdentity } from '@/lib/tab-token';
 import { createLogger } from '@/lib/logger';
@@ -90,12 +91,12 @@ export const listSessions = async (): Promise<string[]> => {
  * after the server started has no home yet, and a pane that launched without
  * hooks would report no work state at all.
  */
-const workspaceEnv = async (sessionName: string, identity?: ITabIdentity): Promise<Record<string, string>> => {
+const workspaceEnv = async (sessionName: string, identity?: ITabIdentity, cwd?: string): Promise<Record<string, string>> => {
   const wsId = workspaceIdFromSessionName(sessionName);
   if (!wsId) return {};
   try {
     const [claudeHome, grokHome] = await Promise.all([
-      ensureWorkspaceClaudeHome(wsId),
+      ensureWorkspaceClaudeHome(wsId, cwd),
       ensureWorkspaceGrokHome(wsId),
     ]);
     await writeGrokHookFile(grokHome, GROK_HOOK_SCRIPT_PATH).catch((err) => {
@@ -136,6 +137,28 @@ const tabEnv = async (sessionName: string, identity?: ITabIdentity): Promise<Rec
 };
 
 /**
+ * The workspace directory a remote tab's cwd sits in, for the kit's pre-trust (D14, ruling R-05), or null.
+ * Compared as plain paths: the cwd is a path on the remote host, so the remote script resolves symlinks
+ * and checks the containment again. A failed read of the workspace costs the seed, never the launch.
+ */
+const remoteTrustTarget = async (
+  name: string,
+  identity: ITabIdentity | undefined,
+  cwd: string | undefined,
+): Promise<{ cwd: string; workspaceDirectory: string } | null> => {
+  const wsId = identity?.workspaceId ?? workspaceIdFromSessionName(name);
+  if (!cwd || !wsId || !path.posix.isAbsolute(cwd)) return null;
+  try {
+    const directories = (await workspaceDirectories(wsId)).filter((dir) => path.posix.isAbsolute(dir)).map((dir) => path.posix.resolve(dir));
+    const workspaceDirectory = nearestWorkspaceDirectory(path.posix.resolve(cwd), directories);
+    return workspaceDirectory ? { cwd: path.posix.resolve(cwd), workspaceDirectory } : null;
+  } catch (err) {
+    log.warn(`remote pre-trust for ${name} skipped: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+};
+
+/**
  * A remote tab's session (ADR-0022 §8; slice b). One `ssh … sh -s` run writes
  * the kit (tmux.conf, the Claude hook and hooks.json, this server's CLI, the
  * workspace prompt) and the tab's one-shot env file, then starts the session.
@@ -170,15 +193,17 @@ const createRemoteSession = async (
     identity ? fs.readFile(getClaudePromptPath(identity.workspaceId), 'utf-8').catch(() => null) : Promise.resolve(null),
   ]);
   const launch = buildRemoteShellLaunchCommand(env, tabEnv ? remoteKitPath(remoteTabEnvRelative(tabEnv.tabId)) : undefined);
+  const trust = await remoteTrustTarget(name, identity, cwd);
   const nonce = nanoid(16);
   const script = buildRemoteCreateScript({
     nonce,
-    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv }),
+    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv, trustSeed: !!trust }),
     session: name,
     cols,
     rows,
     cwd,
     launch,
+    ...(trust ? { trust } : {}),
   });
   try {
     await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: script });
@@ -212,7 +237,7 @@ export const createSession = async (
   if (host) return createRemoteSession(host, name, cols, rows, cwd, identity);
   // tmux 서버 global env cache를 우회하기 위해 `env -i $SHELL -l`을 명령으로 직접 넘긴다.
   // execFile의 env 옵션은 tmux 서버가 이미 떠있는 경우 무시되므로 의존하지 않는다.
-  const shellCmd = buildShellLaunchCommand(await workspaceEnv(name, identity));
+  const shellCmd = buildShellLaunchCommand(await workspaceEnv(name, identity, cwd));
   await execFile(
     'tmux',
     [

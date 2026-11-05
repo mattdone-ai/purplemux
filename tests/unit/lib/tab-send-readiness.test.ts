@@ -20,6 +20,7 @@ interface IStep {
   panelType?: TPanelType;
   alive?: boolean;
   waitingAtPrompt?: boolean;
+  startupPrompt?: ITabSendTarget['startupPrompt'];
 }
 
 /**
@@ -42,7 +43,10 @@ const runReadiness = async (
         current = steps[Math.min(polls, steps.length - 1)];
         polls += 1;
         if (!current) return null;
-        return { sessionName: SESSION, cliState: current.cliState, panelType: current.panelType, waitingAtPrompt: current.waitingAtPrompt };
+        return {
+          sessionName: SESSION, cliState: current.cliState, panelType: current.panelType, waitingAtPrompt: current.waitingAtPrompt,
+          ...(current.startupPrompt !== undefined ? { startupPrompt: current.startupPrompt } : {}),
+        };
       },
       hasSession: async () => current !== null && current.alive !== false,
       now: () => clock,
@@ -159,7 +163,7 @@ describe('awaitSendReadiness on the composer-ready gate', () => {
 });
 
 describe('awaitSendReadiness on the live-session gate', () => {
-  it.each<TCliState>(['idle', 'busy', 'inactive', 'unknown', 'cancelled', 'ready-for-review', 'needs-input'])(
+  it.each<TCliState>(['idle', 'busy', 'inactive', 'startup-prompt', 'unknown', 'cancelled', 'ready-for-review', 'needs-input'])(
     'delivers to an agent in %s without waiting',
     async (state) => {
       const { result, sleeps, polls } = await runReadiness([agent(state)], 60_000, 'live-session');
@@ -257,5 +261,41 @@ describe('composer-ready gate and a WAITING worker (ADR-0018, ruling A′)', () 
   it('never lets the flag excuse a dead session', async () => {
     const { result } = await runReadiness([{ cliState: 'busy', panelType: 'claude-code', waitingAtPrompt: true, alive: false }], 1000);
     expect(result).toMatchObject({ ok: false, reason: 'session-not-running' });
+  });
+});
+
+// D14 (story 05): a tab at a Claude Code startup dialog never reaches a composer on its own, and a paste
+// would answer the dialog. The unattended gate refuses at once, with nothing typed and the dialog named.
+describe('composer-ready gate and a startup prompt (story 05, D14)', () => {
+  it.each(['folder-trust', 'external-imports'] as const)('refuses %s on the first look, with no wait', async (kind) => {
+    const { result, sleeps, polls } = await runReadiness([{ ...agent('startup-prompt'), startupPrompt: kind }], DEFAULT_SEND_READY_TIMEOUT_MS);
+
+    expect(result).toEqual({ ok: false, reason: 'startup-prompt', cliState: 'startup-prompt', startupPrompt: kind });
+    expect(sleeps).toEqual([]);
+    expect(polls).toBe(1);
+  });
+
+  it('refuses the moment a booting tab reaches the dialog, not at the deadline', async () => {
+    const { result, sleeps } = await runReadiness(
+      [agent('inactive'), agent('inactive'), { ...agent('startup-prompt'), startupPrompt: 'folder-trust' }],
+      DEFAULT_SEND_READY_TIMEOUT_MS,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'startup-prompt', startupPrompt: 'folder-trust' });
+    expect(sleeps).toEqual([SEND_READY_POLL_INTERVAL_MS, SEND_READY_POLL_INTERVAL_MS]);
+  });
+
+  it('names no dialog when the status carries none', async () => {
+    const { result } = await runReadiness([agent('startup-prompt')], 0);
+    expect(result).toEqual({ ok: false, reason: 'startup-prompt', cliState: 'startup-prompt', startupPrompt: null });
+  });
+
+  it('still reports a dead session first', async () => {
+    const { result } = await runReadiness([{ ...agent('startup-prompt', false), startupPrompt: 'folder-trust' }], 5_000);
+    expect(result).toMatchObject({ ok: false, reason: 'session-not-running' });
+  });
+
+  it('is not a composer-ready state', () => {
+    expect(isComposerReadyCliState('startup-prompt')).toBe(false);
   });
 });

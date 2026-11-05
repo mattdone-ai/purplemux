@@ -19,6 +19,7 @@ const STATE_LABEL: Record<string, string> = {
   idle: 'idle',
   unsubmitted: 'text not submitted',
   inactive: 'agent not running',
+  'startup-prompt': 'at a startup prompt',
   unknown: 'unknown',
 };
 const FLAG_LABEL: Record<string, string> = { stall: 'STALL?', unanswered: 'UNANSWERED', 'waiting-long': 'WAITING-LONG' };

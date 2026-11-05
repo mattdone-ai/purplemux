@@ -81,7 +81,9 @@ to an exit code through one table:
                                                  orchestration-recovery-required
      4  target gone (permanent)                  tab-not-found, session-not-running,        NEVER
                                                  target-changed
-     5  not ready yet                            readiness-timeout                          yes, bounded
+     5  not ready yet                            readiness-timeout;                         yes, bounded
+                                                 startup-prompt (an agent at a Claude       (startup-prompt:
+                                                 Code startup dialog; nothing typed)        after it is answered)
      6  server unreachable                       server-unreachable: connection refused,    yes, bounded
                                                  no port configured, a read interrupted;    (routes-absent:
                                                  routes-absent (404 without JSON: no such   no, until the
@@ -443,13 +445,22 @@ POST /api/cli/tabs/<tabId>/send?workspaceId=WS
   404 { "error": "Tab not found", "code": "tab-not-found" }
   409 { "error": "agent-not-ready", "code", "tabId", "cliState", "detail": "readiness-timeout" | "session-not-running", "waitedMs"? }
     — nothing was pasted, so a later Enter cannot submit a half-forgotten prompt.
+  409 { "error": "agent-not-ready", "code": "startup-prompt", "tabId", "cliState", "startupPrompt":
+      "folder-trust" | "external-imports" | null, "startupPromptLabel", "detail" } — at once, with no
+      wait: the agent waits at a Claude Code startup dialog, and a paste would answer it. Answer the
+      dialog in the tab, or create the tab with --cwd under a workspace directory (pre-trusted).
   409 { "error": "agent-target-changed", "code": "target-changed", "tabId" } — the tab was replaced.
   tab-not-found, session-not-running and target-changed are permanent (CLI exit 4): never
-  retry them. readiness-timeout is retryable (CLI exit 5), a bounded number of times.
+  retry them. readiness-timeout is retryable (CLI exit 5), a bounded number of times;
+  startup-prompt (also exit 5) only after someone answers the dialog.
 
 GET /api/cli/tabs/<tabId>/status?workspaceId=WS
   Response: { "tabId", "workspaceId", "alive", "command", "cliState", "agentProviderId", "agentSessionId", "claudeSessionId",
               "probes": [...], "backgroundJobs": [...], "turnEnd": {...} | null, "identity" }
+  cliState "startup-prompt": the agent waits at a Claude Code startup dialog that no hook reports
+  (folder trust, external CLAUDE.md imports); the row then also carries "startupPrompt"
+  ("folder-trust" | "external-imports" | null), "startupPromptLabel" (words for a person) and
+  "startupPromptSince" (ms). tab list rows carry the same three fields in that state.
   probes/backgroundJobs are the tab's registered liveness watch (see "Liveness watch"),
   so an idle tab that is HOLDING dead background work is distinguishable from an idle
   tab that is done.

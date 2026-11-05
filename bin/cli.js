@@ -168,6 +168,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'session-not-running': EXIT.GONE,
   'target-changed': EXIT.GONE,
   'readiness-timeout': EXIT.NOT_READY,
+  'startup-prompt': EXIT.NOT_READY,
   'server-unreachable': EXIT.UNREACHABLE,
   'routes-absent': EXIT.UNREACHABLE,
   'remote-host-unreachable': EXIT.UNREACHABLE,
@@ -232,6 +233,11 @@ const hintFor = (code, detail) => {
   if (code === 'readiness-timeout' && Number.isFinite(detail?.waitedMs)) {
     const state = detail.cliState ? `, cliState ${detail.cliState}` : '';
     return `not ready after ${detail.waitedMs} ms${state} — retry, bounded`;
+  }
+  // The server names the dialog and the fix (D14); a retry cannot help until someone answers it.
+  if (code === 'startup-prompt') {
+    const served = typeof detail?.detail === 'string' && detail.detail ? detail.detail : 'the agent waits at a Claude Code startup prompt';
+    return `${served} — nothing was typed; a retry cannot help until the prompt is answered`;
   }
   if (code && Object.hasOwn(CODE_HINT, code)) return CODE_HINT[code];
   return EXIT_HINT[exitFor(code)];
@@ -3183,7 +3189,9 @@ Commands:
   tab send -w WS TAB_ID CONTENT...         Send input to a tab and press Enter. Waits up to 60s
                                            for an agent tab to be able to accept a turn; --wait-ms N (max
                                            240000) changes the budget, --no-wait answers immediately. On timeout nothing is
-                                           pasted and the call exits 5 (readiness-timeout).
+                                           pasted and the call exits 5 (readiness-timeout). An agent at a
+                                           Claude Code startup prompt (folder trust, external imports) is
+                                           refused at once with exit 5 (startup-prompt): answer the prompt.
                                            Exit 4 (tab-not-found, session-not-running, target-changed) means
                                            the tab is gone: never retry it, and never loop on it.
            [-f FILE | -f -]                Send file contents (or stdin with '-') — use for multi-line briefs

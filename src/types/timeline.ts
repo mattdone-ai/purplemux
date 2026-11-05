@@ -1,6 +1,13 @@
 export type TSessionDetectionStatus = 'unknown' | 'starting' | 'running' | 'not-running' | 'not-initialized' | 'not-installed';
 
-export type TCliState = 'idle' | 'busy' | 'inactive' | 'ready-for-review' | 'needs-input' | 'cancelled' | 'unknown';
+/**
+ * `startup-prompt`: the agent runs but waits at a Claude Code startup dialog (folder trust, external
+ * CLAUDE.md imports) that no hook reports (D14). Runtime only: the layout stores it as `inactive`.
+ */
+export type TCliState = 'idle' | 'busy' | 'inactive' | 'startup-prompt' | 'ready-for-review' | 'needs-input' | 'cancelled' | 'unknown';
+
+/** The Claude Code startup dialog a `startup-prompt` tab waits at. */
+export type TStartupPrompt = 'folder-trust' | 'external-imports';
 
 export type TTimelineConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 

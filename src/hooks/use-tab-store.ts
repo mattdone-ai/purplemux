@@ -375,6 +375,10 @@ const useTabStore = create<ITabStore>((set) => ({
 
 // --- helpers ---
 
+/** A tab a person should look at: a finished turn, a question, or a startup dialog (D14). */
+const needsAttention = (cliState: TCliState): boolean =>
+  cliState === 'ready-for-review' || cliState === 'needs-input' || cliState === 'startup-prompt';
+
 export const isCliIdle = (cliState: TCliState): boolean =>
   cliState === 'idle' || cliState === 'ready-for-review';
 
@@ -406,7 +410,8 @@ export const selectTabDisplayStatus = (tabs: Record<string, ITabState>, tabId: s
   if (!tab || tab.cliState === 'inactive') return 'idle';
   if (tab.cliState === 'busy') return 'busy';
   if (tab.cliState === 'ready-for-review') return 'ready-for-review';
-  if (tab.cliState === 'needs-input') return 'needs-input';
+  // A startup dialog waits for a person exactly as a permission prompt does (D14).
+  if (tab.cliState === 'needs-input' || tab.cliState === 'startup-prompt') return 'needs-input';
   if (tab.cliState === 'unknown') return 'unknown';
   return 'idle';
 };
@@ -420,7 +425,7 @@ export const selectWorkspaceStatus = (
   for (const entry of Object.values(tabs)) {
     if (entry.workspaceId !== wsId) continue;
     if (entry.cliState === 'busy') busyCount++;
-    else if (entry.cliState === 'ready-for-review' || entry.cliState === 'needs-input') attentionCount++;
+    else if (needsAttention(entry.cliState)) attentionCount++;
   }
   return { busyCount, attentionCount };
 };
@@ -447,7 +452,7 @@ export const selectGlobalStatus = (
   let attentionCount = 0;
   for (const entry of Object.values(tabs)) {
     if (entry.cliState === 'busy') busyCount++;
-    else if (entry.cliState === 'ready-for-review' || entry.cliState === 'needs-input') attentionCount++;
+    else if (needsAttention(entry.cliState)) attentionCount++;
   }
   return { busyCount, attentionCount };
 };

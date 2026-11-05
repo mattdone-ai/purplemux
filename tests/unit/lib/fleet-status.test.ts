@@ -125,6 +125,21 @@ describe('fleet status: state', () => {
   });
 });
 
+// D14 (story 05): a tab at a Claude Code startup dialog has its own row state and is flagged at once.
+describe('fleet status: startup prompt (story 05, D14)', () => {
+  it('reads startup-prompt with the dialog\'s stamp, flagged at once in words, never the token', () => {
+    const row = deriveFleetRow(facts({}, { cliState: 'startup-prompt', startupPrompt: { kind: 'folder-trust', since: NOW - 3 * MIN } }), NOW);
+    expect(row).toMatchObject({ state: 'startup-prompt', rawCliState: 'startup-prompt', since: NOW - 3 * MIN });
+    expect(row.flags).toEqual([{ flag: 'stall', reason: 'waiting at the folder-trust prompt for 3 min; answer it in the tab' }]);
+  });
+
+  it('names an unknown dialog neutrally and still flags it', () => {
+    const row = deriveFleetRow(facts({}, { cliState: 'startup-prompt', startupPrompt: null }), NOW);
+    expect(row).toMatchObject({ state: 'startup-prompt', since: null });
+    expect(row.flags).toEqual([{ flag: 'stall', reason: 'waiting at a Claude Code startup prompt; answer it in the tab' }]);
+  });
+});
+
 describe('fleet status: flags', () => {
   it('STALL? on a working tab: quiet for N min flags, one minute less does not', () => {
     const at = (quietMin: number) => facts({ transcriptAt: NOW - quietMin * MIN }, { lastEvent: { name: 'prompt-submit', at: NOW - 90 * MIN, seq: 1 } });

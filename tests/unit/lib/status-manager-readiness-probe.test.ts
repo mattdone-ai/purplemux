@@ -227,16 +227,14 @@ describe('readiness pane-probe fallback (story 17)', () => {
     expect(state.captures).toBe(0);
   });
 
-  it.each([
-    ['a trust prompt', 'claude-trust-prompt.ansi'],
-    ['the first-run theme picker', 'claude-onboarding-theme.ansi'],
-  ])('does not mark %s ready', async (_label, name) => {
-    state.pane = fixture(name);
+  it('does not mark the first-run theme picker ready', async () => {
+    state.pane = fixture('claude-onboarding-theme.ansi');
     const { entry, pollAt } = await setup();
     await pollAt(0);
     await pollAt(9_000);
     await pollAt(20_000);
     expect(entry.cliState).toBe('inactive');
+    expect(entry.startupPrompt ?? null).toBeNull();
     expect(state.captures).toBe(2);
   });
 
@@ -270,6 +268,114 @@ describe('readiness pane-probe fallback (story 17)', () => {
     expect(entry.cliState).toBe('inactive');
     await pollAt(17_500);
     expect(entry.cliState).toBe('idle');
+  });
+});
+
+// D14 (story 05): a Claude tab that waits at a startup dialog reads `startup-prompt`, never `inactive`,
+// and leaves it when the dialog goes. Runtime only: the layout keeps `inactive`.
+describe('startup-prompt state (story 05, D14)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    state.running = true;
+    state.pane = fixture('claude-trust-prompt.ansi');
+    state.jsonlPath = null;
+    state.captures = 0;
+    state.captureOpts = [];
+    state.duringCapture = null;
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const nudgeSpy = (manager: unknown) => vi.spyOn(manager as { nudgeOrchestrator: (...args: unknown[]) => Promise<void> }, 'nudgeOrchestrator')
+    .mockResolvedValue(undefined);
+
+  it.each([
+    ['the folder-trust dialog', 'claude-trust-prompt.ansi', 'folder-trust'],
+    ['the folder-trust dialog (2.1.318)', 'claude-trust-prompt-120x40.ansi', 'folder-trust'],
+    ['the external-imports dialog', 'claude-external-imports-prompt.ansi', 'external-imports'],
+  ])('reads %s as startup-prompt, silently, and keeps inactive in the layout', async (_label, name, kind) => {
+    state.pane = fixture(name);
+    const { manager, entry, pollAt } = await setup();
+    const nudge = nudgeSpy(manager);
+    const { updateTabCliStatus } = await import('@/lib/layout-store');
+    await pollAt(0);
+    await pollAt(9_000);
+    expect(entry.cliState).toBe('startup-prompt');
+    expect(entry.startupPrompt).toEqual({ kind, since: T0 + 9_000 });
+    expect(manager.getAllForClient()['tab-a'].startupPrompt).toEqual({ kind, since: T0 + 9_000 });
+    expect(updateTabCliStatus).toHaveBeenLastCalledWith('tmux-tab-a', 'inactive', undefined);
+    expect(nudge).not.toHaveBeenCalled();
+    // Still there: no new transition, the first stamp holds.
+    await pollAt(15_000);
+    expect(entry.startupPrompt).toEqual({ kind, since: T0 + 9_000 });
+  });
+
+  it('follows the trust dialog to the imports dialog, then to the composer', async () => {
+    const { entry, pollAt } = await setup();
+    await pollAt(0);
+    await pollAt(9_000);
+    expect(entry.startupPrompt?.kind).toBe('folder-trust');
+    state.pane = fixture('claude-external-imports-prompt.ansi');
+    await pollAt(10_000);
+    expect(entry.cliState).toBe('startup-prompt');
+    expect(entry.startupPrompt).toEqual({ kind: 'external-imports', since: T0 + 10_000 });
+    state.pane = fixture('claude-external-imports-accepted.ansi');
+    await pollAt(11_000);
+    expect(entry.cliState).toBe('idle');
+    expect(entry.startupPrompt).toBeNull();
+    const { isComposerReadyCliState } = await import('@/lib/tab-send');
+    expect(isComposerReadyCliState(entry.cliState)).toBe(true);
+  });
+
+  it('leaves startup-prompt on the SessionStart hook once the dialog is answered', async () => {
+    const { manager, entry, pollAt } = await setup();
+    await pollAt(0);
+    await pollAt(9_000);
+    expect(entry.cliState).toBe('startup-prompt');
+    manager.updateTabFromHook('tmux-tab-a', 'session-start');
+    expect(entry.cliState).toBe('idle');
+    expect(entry.startupPrompt).toBeNull();
+  });
+
+  it('goes back to inactive with no nudge when another screen replaces the dialog', async () => {
+    const { manager, entry, pollAt } = await setup();
+    const nudge = nudgeSpy(manager);
+    await pollAt(0);
+    await pollAt(9_000);
+    state.pane = fixture('claude-onboarding-theme.ansi');
+    await pollAt(10_000);
+    expect(entry.cliState).toBe('inactive');
+    expect(entry.startupPrompt).toBeNull();
+    expect(nudge).not.toHaveBeenCalled();
+  });
+
+  it('reads an agent that exited at the dialog (No, exit) as inactive', async () => {
+    const { entry, pollAt } = await setup();
+    await pollAt(0);
+    await pollAt(9_000);
+    expect(entry.cliState).toBe('startup-prompt');
+    state.running = false;
+    await pollAt(20_000);
+    expect(entry.cliState).toBe('inactive');
+    expect(entry.startupPrompt).toBeNull();
+  });
+
+  it('a prompt-submit during the probe wins over the dialog reading', async () => {
+    const { manager, entry, pollAt } = await setup();
+    await pollAt(0);
+    state.duringCapture = () => { manager.updateTabFromHook('tmux-tab-a', 'prompt-submit'); };
+    await pollAt(9_000);
+    expect(entry.cliState).toBe('busy');
+    expect(entry.startupPrompt ?? null).toBeNull();
+  });
+
+  it('restores a persisted startup-prompt as inactive (a layout written before this rule, or by hand)', async () => {
+    const { manager } = await setup();
+    state.tab = { ...state.tab!, cliState: 'startup-prompt' };
+    await (manager as unknown as { scanAllTabs: () => Promise<void> }).scanAllTabs();
+    const restored = (manager as unknown as { tabs: Map<string, ITabStatusEntry> }).tabs.get('tab-a');
+    expect(restored?.cliState).toBe('inactive');
   });
 });
 

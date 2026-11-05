@@ -57,6 +57,11 @@ vi.mock('@/lib/fleet-config-store', () => ({
     return null;
   },
 }));
+const workspaceDirs = vi.hoisted(() => ({ map: new Map<string, string[]>() }));
+vi.mock('@/lib/workspace-home', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/workspace-home')>()),
+  workspaceDirectories: async (wsId: string) => workspaceDirs.map.get(wsId) ?? [],
+}));
 const audit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('@/lib/coordination-audit', () => ({ appendCoordinationAudit: audit }));
 
@@ -79,6 +84,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     replies.fn = () => ({ stdout: '' });
     audit.mockClear();
     fleet.hosts = 'ai-server';
+    workspaceDirs.map = new Map();
     scanBackoff()?.clear();
   });
 
@@ -342,4 +348,30 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(shippedPrompt(calls.list[0].input ?? '')).toContain(`- **${order.id}** (ws-r; check: prose) Ship the remote prompt with every create.`);
   });
 
+  // D14 (story 05 AC 2): the kit pre-trusts the cwd before the session starts, only inside a workspace directory.
+  it('pre-trusts a cwd under a workspace directory: the seed script ships, and runs after the kit lands and before the session starts', async () => {
+    workspaceDirs.map.set('ws-r', ['/home/mdone/code/nomupay', '/home/mdone/code/purplemux']);
+    const { createSession } = await import('@/lib/tmux');
+    const { REMOTE_TRUST_SEED_SCRIPT } = await import('@/lib/remote-kit');
+    await createSession(REMOTE, 120, 40, '/home/mdone/code/purplemux/.worktrees/hfl2-05', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    const script = calls.list[0].input ?? '';
+    const lines = script.trim().split('\n');
+    const seedLine = lines.findIndex((l) => l.includes('trust-seed.py') && l.startsWith('if command -v python3'));
+    expect(lines[seedLine]).toBe(`if command -v python3 >/dev/null 2>&1; then python3 "$d/trust-seed.py" '/home/mdone/code/purplemux/.worktrees/hfl2-05' '/home/mdone/code/purplemux' >/dev/null 2>&1 || :; fi`);
+    const lastPut = lines.map((l, i) => (l.startsWith('put ') ? i : -1)).filter((i) => i >= 0).at(-1)!;
+    const newSession = lines.findIndex((l) => l.includes('new-session'));
+    expect(seedLine).toBeGreaterThan(lastPut);
+    expect(seedLine).toBeLessThan(newSession);
+    const shipped = script.match(/^put 'trust-seed\.py' '([A-Za-z0-9+/=]*)' 600$/m);
+    expect(shipped && Buffer.from(shipped[1], 'base64').toString('utf-8')).toBe(REMOTE_TRUST_SEED_SCRIPT);
+  });
+
+  it('pre-trusts nothing for a cwd outside every workspace directory, or with no cwd', async () => {
+    workspaceDirs.map.set('ws-r', ['/home/mdone/code/nomupay']);
+    const { createSession } = await import('@/lib/tmux');
+    await createSession(REMOTE, 120, 40, '/home/mdone/portfolio', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await createSession(REMOTE, 120, 40, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    await createSession(REMOTE, 120, 40, '/home/mdone/code/nomupay-other', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+    for (const call of calls.list) expect(call.input ?? '').not.toContain('trust-seed.py');
+  });
 });

@@ -45,3 +45,16 @@ Grok error (named gaps, ADR-0018 story-26 amendment).
 text copied). `tests/unit/lib/owner-found-defects.test.ts` turns it into the ledger events the v2 feed sends after the
 kit fix of consult Q2 (`open` at the file's mtime, `attrs.raisedAt` = 00:00 `Australia/Sydney` of the `raised` date) and
 pins that the finder counts by the raised time, not by when the feed first saw the row.
+
+## `panes/` (startup dialogs, story 05)
+
+Real `tmux capture-pane -p -e` captures of Claude Code **2.1.318** on 2026-11-05, 120x40, each run with a
+scratch `CLAUDE_CONFIG_DIR` (onboarding marked done, no credentials) in a scratch directory:
+
+| Fixture | Covers |
+|---|---|
+| `claude-trust-prompt-120x40.ansi` | the folder-trust dialog ("Accessing workspace:", `❯ No, exit` selected) above 23 blank rows |
+| `claude-external-imports-prompt.ansi` | the external CLAUDE.md imports dialog (`❯ No, disable external imports` selected: the hfl-38 shape) |
+| `claude-external-imports-accepted.ansi` | the same pane after Down Enter: the composer above 26 blank rows |
+
+The three 2026-11-04 incidents (ws-zOfVyu D14, hfl-37, hfl-38) kept no capture; these were made to stand for them.
