@@ -1,4 +1,10 @@
-import type { IMissionAttentionItem, IMissionEventDefect, IMissionQuestionChanges, IMissionRun } from '@/types/mission-control';
+import type {
+  IMissionAttentionItem,
+  IMissionEventDefect,
+  IMissionFollowUpRefusal,
+  IMissionQuestionChanges,
+  IMissionRun,
+} from '@/types/mission-control';
 
 export type TMissionErrorCode =
   | 'invalid-request'
@@ -43,6 +49,8 @@ const isMissionCurrent = (value: unknown): value is IMissionAttentionItem | IMis
 export interface IMissionErrorDetail {
   defects?: IMissionEventDefect[];
   changes?: IMissionQuestionChanges;
+  /** Why a follow-up was refused (ADR-0037 amendment D2): the 409 body's `followsUp`. */
+  followsUp?: IMissionFollowUpRefusal;
 }
 
 export class MissionControlError extends Error {

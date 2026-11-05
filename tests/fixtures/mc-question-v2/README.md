@@ -16,3 +16,5 @@ Flutter widget tests (purplemux-mobile story 32 copies this directory unchanged)
 | `v1-item.json` | a v1 item (no `formatVersion`) with its `lint[]` |
 | `revision-compatible.json` | `{ before, after }`: an option added and one relabelled; `after.changes.compatible` true |
 | `revision-incompatible.json` | `{ before, after }`: the decision changed and an option was removed |
+| `follow-up-new.json` | ADR-0037 amendment D2: an open item whose `followsUp` names the earlier item, with the owner's earlier answer (option and text) |
+| `follow-up-earlier.json` | ADR-0037 amendment D2: the earlier item, `resolved` by the follow-up, whose `followedBy` names the new item |

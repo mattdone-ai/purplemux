@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import MissionControlAnswerCard from '@/components/features/mission-control/mission-control-answer-card';
+import MissionControlAnswerCard, { FollowedByNote } from '@/components/features/mission-control/mission-control-answer-card';
+import MissionControlNeedsYou from '@/components/features/mission-control/mission-control-needs-you';
 import {
   createMissionDraft,
   editMissionDraft,
@@ -410,5 +411,63 @@ describe('a suggested answer from an owner message (story 23 AC 2)', () => {
 
   it('an item without suggestions shows none', () => {
     expect(render(draftOf(item('single.json')))).not.toContain('data-suggested-answers');
+  });
+});
+
+describe('follow-up cards (ADR-0037 amendment D2, rule 6), from the follow-up-* fixtures', () => {
+  const later = () => item('follow-up-new.json');
+  const earlier = () => item('follow-up-earlier.json');
+  const page = (focusItemId: string | null) => renderToStaticMarkup(
+    <MissionControlNeedsYou
+      snapshot={{ schemaVersion: 1, cursor: 1, generatedAt: Date.now(), workspaces: [], runs: [], items: [earlier(), later()], answers: [], deliveries: [], recentEvents: [], bootstrap: null } as unknown as IMissionSnapshot}
+      loading={false} unsupported={false} error={null} refreshing={false}
+      drafts={{ [later().id]: createMissionDraft(later(), 'submission-1') }}
+      focusItemId={focusItemId}
+      onRetry={() => undefined} onDraftChange={() => undefined} onAdoptCurrent={() => undefined} onSubmit={() => undefined}
+    />,
+  );
+
+  it('the new card shows "Follows up: <earlier title>" above the decision, the owner\'s earlier answer and a link to the earlier card', () => {
+    const html = render(draftOf(later()));
+    expect(html).toContain('data-follows-up');
+    expect(html).toContain('Follows up: </span><a href="/mission-control?view=answers&amp;item=q-follow-earlier"');
+    expect(html).toContain('>Gate re-run policy</a>');
+    expect(html).toContain('You answered: </span>Trial it for 7 days');
+    expect(html).toContain('<q class="select-text">Trial it, but tell me which lanes first.</q>');
+    expect(ascending(order(html, 'data-follows-up', 'data-follows-up-answer', `id="${later().id}-decision"`))).toBe(true);
+    expect(html).not.toContain('data-followed-by');
+  });
+
+  it('a text-only earlier answer reads "no option" with its text; an absent answer says so', () => {
+    const textOnly = { ...later(), followsUp: { ...later().followsUp!, answer: { ...later().followsUp!.answer!, optionIds: [], optionLabels: [] } } };
+    expect(render(draftOf(textOnly))).toContain('You answered: </span>no option');
+    const absent = { ...later(), followsUp: { ...later().followsUp!, answer: null } };
+    expect(render(draftOf(absent))).toContain('Your earlier answer is not available.');
+  });
+
+  it('the earlier card reads as resolved, "Followed up by: <new title>", with a link, and leaves the Needs you list', () => {
+    const html = page('q-follow-earlier');
+    expect(html).toContain('data-focus-missing="q-follow-earlier"');
+    expect(html).toContain('no longer needs an answer here (resolved).');
+    expect(html).toContain('data-followed-by');
+    expect(html).toContain('>Resolved</span>');
+    expect(html).toContain('Followed up by: </span><a href="/mission-control?view=answers&amp;item=q-follow-new"');
+    expect(html).toContain('>Gate re-run policy: trial scope</a>');
+    expect(html).not.toContain('data-question-card="q-follow-earlier"');
+    expect(html).toContain('data-question-card="q-follow-new"');
+  });
+
+  it('a state token this client does not know reads as a word, never the token', () => {
+    const html = renderToStaticMarkup(<FollowedByNote item={{ ...earlier(), state: 'archived' as never,
+      followedBy: { ...earlier().followedBy!, state: 'parked' as never } }} />);
+    expect(html).toContain('Unknown state');
+    expect(html).toContain('(unknown state)');
+    expect(html).not.toMatch(/>[^<]*(archived|parked)[^<]*</);
+  });
+
+  it('an item with no links shows neither note', () => {
+    const html = render(draftOf(item('single.json')));
+    expect(html).not.toContain('data-follows-up');
+    expect(html).not.toContain('data-followed-by');
   });
 });

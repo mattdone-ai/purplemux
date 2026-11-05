@@ -66,6 +66,7 @@ export const sendMissionError = (res: NextApiResponse, error: unknown): void => 
       ...(error.current ? { current: error.current } : {}),
       ...(error.detail?.defects ? { defects: error.detail.defects } : {}),
       ...(error.detail?.changes ? { changes: error.detail.changes } : {}),
+      ...(error.detail?.followsUp ? { followsUp: error.detail.followsUp } : {}),
     });
     return;
   }

@@ -177,3 +177,149 @@ describe('purplemux mc ask (ADR-0037)', { timeout: 30_000 }, () => {
     expect(requests).toHaveLength(0);
   });
 });
+
+// ADR-0037 amendment D2: `mc ask --follows-up ID` puts the field on the event, the check reports a refused follow-up as a
+// defect of field followsUp and the CLI exits by its code (0/2/3/7, no new code), and the answer prints on one line.
+describe('purplemux mc ask --follows-up (ADR-0037 amendment D2)', { timeout: 30_000 }, () => {
+  let server: http.Server;
+  let port = 0;
+  let home = '';
+  let requests: IRequest[] = [];
+  let replies: Record<string, Array<{ status: number; body: unknown }>> = {};
+
+  const route = (url: string): string => url.split('?')[0].replace('/api/cli/mission-control/', '');
+
+  beforeEach(async () => {
+    requests = [];
+    replies = {};
+    home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-cli-mc-follow-'));
+    server = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (d) => { raw += d; });
+      req.on('end', () => {
+        requests.push({ url: req.url ?? '', body: raw ? JSON.parse(raw) : null });
+        const queue = replies[route(req.url ?? '')] ?? [];
+        const reply = queue.length > 1 ? queue.shift() : queue[0];
+        res.writeHead(reply?.status ?? 404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(reply?.body ?? { error: 'no reply', code: 'routes-absent' }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    port = (server.address() as { port: number }).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  const cli = async (args: string[]) => {
+    try {
+      const { stdout, stderr } = await run(process.execPath, [ENTRY, ...args], {
+        env: { NODE_ENV: 'test', PATH: process.env.PATH ?? '', HOME: home, NO_UPDATE_NOTIFIER: '1', PMUX_PORT: String(port), PMUX_TOKEN: 'ws-token' },
+      });
+      return { code: 0, stdout, stderr };
+    } catch (err) {
+      const f = err as { code?: number; stdout?: string; stderr?: string };
+      return { code: f.code ?? -1, stdout: f.stdout ?? '', stderr: f.stderr ?? '' };
+    }
+  };
+
+  const event = {
+    eventId: 'evt-follow-1', schemaVersion: 1, workspaceId: 'ws-a', runId: 'run-1', expectedRevision: 0, producerAt: 1, bindingGeneration: 1,
+    type: 'attention.opened',
+    payload: { itemId: 'q-2', formatVersion: 2, kind: 'question', title: 'T', decision: 'D?', whyNow: 'W', answerType: 'single',
+      options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], storyIds: [], blockingScope: 'story', canContinue: true,
+      humanReview: { humanNeed: 'decision', humanReason: 'r', handling: 'h', reviewerTabId: 'tab-o' } },
+  };
+  const draft = async (content: unknown = event): Promise<string> => {
+    const file = path.join(home, 'draft.json');
+    await fs.writeFile(file, JSON.stringify(content));
+    return `@${file}`;
+  };
+  const passed = { ok: true, formatVersion: 2, minVersion: 1, defects: [], lint: [], question: {}, reshape: { enabled: false, reason: 'off' } };
+  const followUpDefect = (code: string, status: number, message: string) => ({
+    ok: false, formatVersion: 2, minVersion: 1, lint: [], question: {}, reshape: { enabled: false, reason: 'off' },
+    defects: [{ field: 'followsUp', measured: message, limit: 'an answered item', message: `followsUp: ${message}`, code, status }],
+  });
+  const followedUp = { itemId: 'q-1', answerId: 'ans-1', optionIds: ['keep'], optionLabels: ['Keep re-gating'], text: 'Keep it.', resolved: true };
+  const urls = () => requests.map((request) => route(request.url));
+
+  it('puts followsUp on the event, sends it to the check with the ids, and prints the answer on one line', async () => {
+    replies = { 'questions/check': [{ status: 200, body: passed }], events: [{ status: 200, body: { events: [], cursor: 2, replayed: false, lint: [], followedUp } }] };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--json', await draft(), '--follows-up', 'q-1']);
+    expect(result.code).toBe(0);
+    expect(urls()).toEqual(['questions/check', 'events']);
+    expect(requests[0].body).toMatchObject({ followsUp: 'q-1', itemId: 'q-2', runId: 'run-1', humanReview: event.payload.humanReview });
+    expect((requests[0].body as { question: Record<string, unknown> }).question).not.toHaveProperty('followsUp');
+    expect(requests[1].body).toEqual({ events: [{ ...event, payload: { ...event.payload, followsUp: 'q-1' } }] });
+    expect(result.stderr).toContain('follows up q-1: the owner answered Keep re-gating: "Keep it." (answer ans-1); q-1 is resolved\n');
+    expect(JSON.parse(result.stdout).followedUp).toEqual(followedUp);
+  });
+
+  it('says "text only" for an answer with no option, and that only the link was written for a resolved target', async () => {
+    replies = { 'questions/check': [{ status: 200, body: passed }],
+      events: [{ status: 200, body: { events: [], cursor: 2, replayed: false, lint: [], followedUp: { ...followedUp, optionIds: [], optionLabels: [], resolved: false } } }] };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--json', await draft(), '--follows-up', 'q-1']);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain('follows up q-1: the owner answered text only: "Keep it." (answer ans-1); q-1 was already resolved; only the link was written');
+  });
+
+  it.each([
+    ['conflict', 409, 3, 'follow-up target q-1 is not answered yet (state open): revise it with attention.updated'],
+    ['forbidden', 403, 3, 'followsUp names an item outside this workspace'],
+    ['not-found', 404, 7, 'follow-up target q-9 not found'],
+    ['invalid-request', 400, 2, 'a follow-up must reach the owner'],
+  ])('a check that refuses the follow-up with %s (HTTP %s) exits %s by its code, with nothing posted', async (code, status, exit, message) => {
+    replies = { 'questions/check': [{ status: 200, body: followUpDefect(code, status, message) }] };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--json', await draft(), '--follows-up', 'q-1']);
+    expect(result.code).toBe(exit);
+    expect(result.stderr).toContain(`followsUp: ${message}`);
+    expect(result.stderr).toContain(`error: ${code}`);
+    expect(urls()).toEqual(['questions/check']);
+  });
+
+  it('a refusal from the events route after a passed check (a race) exits 3 with the server body', async () => {
+    replies = { 'questions/check': [{ status: 200, body: passed }],
+      events: [{ status: 409, body: { error: 'follow-up target q-1 is already followed up by q-3', code: 'conflict', followsUp: { reason: 'already-followed', followedBy: 'q-3', tip: 'q-4' } } }] };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--json', await draft(), '--follows-up', 'q-1']);
+    expect(result.code).toBe(3);
+    expect(result.stderr).toContain('already followed up by q-3');
+  });
+
+  it('--fix keeps followsUp on the reshaped event', async () => {
+    const wording = { ...passed, ok: false, question: null, defects: [{ field: 'options', measured: 'x', limit: 'y', message: 'options: x, y' }] };
+    const { itemId: _itemId, humanReview: _review, ...question } = event.payload;
+    const reshaped = { ...question, decision: 'D, reworded?', source: question };
+    replies = {
+      'questions/check': [{ status: 200, body: wording }, { status: 200, body: passed }],
+      'questions/reshape': [{ status: 200, body: { outcome: 'reshaped', promptVersion: 'v', question: reshaped } }],
+      events: [{ status: 200, body: { events: [], cursor: 2, replayed: false, lint: [], followedUp } }],
+    };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--fix', '--json', await draft(), '--follows-up', 'q-1']);
+    expect(result.code).toBe(0);
+    expect(urls()).toEqual(['questions/check', 'questions/reshape', 'questions/check', 'events']);
+    expect(requests[2].body).toMatchObject({ followsUp: 'q-1', itemId: 'q-2', runId: 'run-1' });
+    expect((requests[3].body as { events: Array<{ payload: Record<string, unknown> }> }).events[0].payload).toMatchObject({ followsUp: 'q-1', decision: 'D, reworded?' });
+  });
+
+  it('a refused follow-up is never sent to the reshape, even with --fix', async () => {
+    const both = { ...followUpDefect('conflict', 409, 'not answered'), defects: [
+      { field: 'options', measured: 'x', limit: 'y', message: 'options: x, y' },
+      followUpDefect('conflict', 409, 'not answered').defects[0],
+    ] };
+    replies = { 'questions/check': [{ status: 200, body: both }] };
+    const result = await cli(['mc', 'ask', '-w', 'ws-a', '--fix', '--json', await draft(), '--follows-up', 'q-1']);
+    expect(result.code).toBe(2);
+    expect(urls()).toEqual(['questions/check']);
+  });
+
+  it('refuses --follows-up on attention.updated, and without an id, before any request', async () => {
+    const updated = await cli(['mc', 'ask', '-w', 'ws-a', '--json', await draft({ ...event, type: 'attention.updated', expectedRevision: 1 }), '--follows-up', 'q-1']);
+    expect(updated.code).toBe(2);
+    expect(updated.stderr).toContain('--follows-up applies to attention.opened only');
+    const bare = await cli(['mc', 'ask', '-w', 'ws-a', '--json', await draft(), '--follows-up']);
+    expect(bare.code).toBe(2);
+    expect(requests).toHaveLength(0);
+  });
+});

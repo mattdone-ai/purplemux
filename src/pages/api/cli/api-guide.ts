@@ -1851,10 +1851,31 @@ Question format v2 (ADR-0037):
   most one option on single and confirm, and gives text when a selected option has needsText
   (400 invalid-request otherwise).
 
+  A follow-up question (ADR-0037 amendment D2): an answer, text alone too, makes the item
+  "answered", and an answered item takes no attention.updated. To ask again, open a new item with
+  "followsUp": "<answered item id>" in the attention.opened payload, beside itemId and humanReview
+  (it is not a question field). In the same write the store links the new item to the earlier one,
+  acknowledges the earlier answer's delivery and resolves the earlier item with "Followed up by
+  <new id>." (event id system:follow-up:<new id>, reserved). The new item must carry a humanReview
+  whose humanNeed is not none (400 invalid-request). The 200 body carries "followedUp": { "itemId",
+  "answerId", "optionIds", "optionLabels", "text", "resolved" } (a batch with two or more follow-ups
+  carries "followedUps": [...] instead); read the answer there, since its paste is never sent.
+  "resolved" is false when the earlier item was already resolved: the store writes the link only.
+  Refusals write nothing: an open, candidate or cancelled target 409 with "followsUp": { "reason":
+  "not-answered" } (revise an open item with attention.updated instead); another run 409
+  "other-run"; a target already followed up 409 "already-followed" with "followedBy" and "tip"
+  (the last item of the chain: follow that one up); another workspace 403 forbidden; an unknown id
+  404; followsUp equal to the item's own id, or on attention.updated, 400 invalid-request. Every
+  served item carries "followsUp": { "itemId", "title", "answer": { "optionIds", "optionLabels",
+  "text", "at" } } | null and "followedBy": { "itemId", "title", "state" } | null.
+
 POST /api/cli/mission-control/questions/check?workspaceId=WS   { "question": { ... } }
   Any valid token. The events route's question check without the write: 200 { "ok", "formatVersion",
   "minVersion", "defects", "lint", "question" (normalized, null when refused), "reshape": {
-  "enabled", "reason" | null } }: enabled only where reshape-question routes in WS.
+  "enabled", "reason" | null } }: enabled only where reshape-question routes in WS. With
+  "followsUp", "itemId" and "runId" beside the question (a WS token only), it also answers the
+  follow-up refusal the events route would give, as a defect of field "followsUp" with its "code",
+  "status" and "followsUp" detail; nothing is written.
 
 POST /api/cli/mission-control/questions/reshape?workspaceId=WS   { "question": { ... } }
   A tab of WS, or admin. The curator's reshape of a refused draft (story 23). It posts nothing. 200 {
@@ -1872,6 +1893,11 @@ CLI equivalents:
   posted, or prints any lint and posts the event. --fix asks the curator reshape route: a
   "reshaped" draft is checked again and posted in the same command; any other outcome prints with
   the defects and exits 2. "mc" is "mission".
+  purplemux mc ask -w WS --json @DRAFT --follows-up ID [--fix]
+  Puts "followsUp": ID on the draft's attention.opened. A refused follow-up prints and exits 3
+  (not-answered, other-run, already-followed, forbidden), 7 (unknown ID) or 2 (no human review),
+  with nothing posted. On success it prints one line: follows up ID: the owner answered <labels, or
+  "text only">: "<text>" (answer <id>); ID is resolved. --fix keeps the field.
   purplemux mission snapshot -w WS
   purplemux mission bootstrap -w WS
   purplemux mission events -w WS --json '{"events":[...]}'
