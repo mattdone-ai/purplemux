@@ -130,6 +130,8 @@ to an exit code through one table:
      7  not found (standing orders, ADR-0041)    so-not-found                               —
      3  refused by state (proposal, ADR-0041)    so-proposal-refused (reason duplicate,     after the state changes
                                                  open-proposal or no-orchestrator-run)
+     2  usage error (steer and send, story 14)   steer-reason-invalid,                      fix the command
+                                                 terminal-not-command-line
 
 The CLI writes the code and its class to stderr, e.g.
   error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
@@ -439,7 +441,7 @@ POST /api/cli/tabs/<tabId>/restart?workspaceId=WS
        prints "ok TAB_ID restarted (resumed)" or "(fresh)".
 
 POST /api/cli/tabs/<tabId>/send?workspaceId=WS
-  Body: { "content": "...", "waitMs"?: 0..600000 }
+  Body: { "content": "...", "waitMs"?: 0..600000, "raw"?: boolean }
   Send text to the tab and press Enter. Typed into Claude Code, bracketed paste elsewhere.
   For an agent tab (claude-code / codex-cli / grok-cli) the send waits until the tab can
   accept a turn, up to waitMs (default 60000). A booting agent swallows the Enter after a
@@ -457,6 +459,39 @@ POST /api/cli/tabs/<tabId>/send?workspaceId=WS
   tab-not-found, session-not-running and target-changed are permanent (CLI exit 4): never
   retry them. readiness-timeout is retryable (CLI exit 5), a bounded number of times;
   startup-prompt (also exit 5) only after someone answers the dialog.
+  400 { "code": "terminal-not-command-line", "tabId", "panelType": "terminal", "lines", "error" } (exit 2,
+    D30): the target is a terminal tab and the text holds more than one line (trailing line breaks
+    are not counted). A shell runs each line as a command, so prose fails line by line. Nothing is
+    typed. The error says "saw N lines; expected one shell command line". A multi-line command (a
+    heredoc, a quoted multi-line string, a backslash continuation) needs raw: true (--raw); prose
+    belongs in an agent tab.
+
+POST /api/cli/tabs/<tabId>/steer?workspaceId=WS
+  Body: { "content": "...", "interrupt"?: boolean, "reason"?: "1..500 chars", "raw"?: boolean }
+  A mid-turn correction. With interrupt, the server sends Escape first (the agent stops its turn and
+  keeps its session), then types the content; without it, the content is typed into the composer
+  and waits for the turn to end. Own workspace only (403 forbidden, exit 3, for the admin token or
+  another workspace).
+  Interrupt default (story 14): a caller that is an agent tab (claude-code / codex-cli / grok-cli,
+  named by its tab token or its tmux session, ADR-0010) does NOT interrupt by default. Any other
+  caller tab (a terminal tab) and any caller that names no tab, or a tab the layout does not hold
+  ("unidentified"), interrupts by default, as before. interrupt: false is accepted from every
+  caller. interrupt: true needs a reason from every caller.
+  The classification is ADVISORY, not access control: a process with the workspace token that sends
+  no tab identity is "unidentified" and gets the interrupt default. The audit is the record: EVERY
+  steer that interrupts, by default or on request, appends one "steer-interrupt" line to
+  ~/.purplemux/audit/coordination.jsonl: the target, the caller (kind agent | other | unidentified,
+  tab, panel type, identity), explicit, the reason ("(none given)" for a default interrupt) and
+  whether the Escape landed.
+  CLI: purplemux tab steer -w WS TAB_ID [--interrupt --reason TEXT | --no-interrupt] [--raw] CONTENT...
+       Flags are read only before the content (for tab send too): every word from the content on is
+       sent byte for byte ("tab send T git log --raw" types "git log --raw"), and -- ends the flags.
+  Response: { "status": "steered", "interrupted": boolean }
+  400 { "code": "steer-reason-invalid" } (exit 2): interrupt: true without a reason, a reason over
+    500 characters, or a reason without interrupt: true. Nothing is typed. The error text says what
+    it saw and what it expected.
+  400 { "code": "terminal-not-command-line", ... } (exit 2): as for send (D30).
+  404 tab-not-found, 409 target-changed and session-not-running: as for send (exit 4).
 
 GET /api/cli/tabs/<tabId>/status?workspaceId=WS
   Response: { "tabId", "workspaceId", "alive", "command", "cliState", "agentProviderId", "agentSessionId", "claudeSessionId",

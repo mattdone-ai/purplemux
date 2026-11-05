@@ -212,6 +212,8 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'so-unreadable': EXIT.CONFLICT,
   'so-struck': EXIT.CONFLICT,
   'so-proposal-refused': EXIT.CONFLICT,
+  'steer-reason-invalid': EXIT.USAGE,
+  'terminal-not-command-line': EXIT.USAGE,
 }));
 
 // Where the class alone does not tell the caller what happened.
@@ -1915,25 +1917,107 @@ const readStdin = () => new Promise((resolve, reject) => {
   process.stdin.on('error', reject);
 });
 
-// Same shape as tab send, but interrupts the current turn first so a busy
-// worker reads the correction now instead of after its tangent finishes.
+/**
+ * Flags for `tab send` and `tab steer` are read only BEFORE the content (story 14 r2). The first
+ * word that is not a flag of the command is the tab ID; the next one starts the content, and from
+ * there every word is content, byte for byte: `tab send T git log --raw` types `git log --raw`. A
+ * literal `--` ends the flags at once (the word after it is the tab ID if none was given yet), so
+ * content that starts with a dash still reaches the tab. A word after the content starts that
+ * equals one of the command's flags is still sent as text; without `--`, stderr names it, because
+ * the caller may have meant the flag.
+ */
+const parseLeadingArgs = (args, { values, booleans }) => {
+  const flags = Object.create(null);
+  let tabId = null;
+  let terminated = false;
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === '--') {
+      terminated = true;
+      i++;
+      break;
+    }
+    if (values.includes(arg)) {
+      if (!Object.hasOwn(flags, arg)) flags[arg] = i + 1 < args.length ? args[i + 1] : null;
+      i += 2;
+      continue;
+    }
+    if (booleans.includes(arg)) {
+      flags[arg] = true;
+      i++;
+      continue;
+    }
+    if (tabId !== null) break;
+    tabId = arg;
+    i++;
+  }
+  if (terminated && tabId === null && i < args.length) tabId = args[i++];
+  const contentWords = args.slice(i);
+  const known = [...values, ...booleans];
+  const textFlags = terminated ? [] : [...new Set(contentWords.filter((word) => known.includes(word)))];
+  return {
+    tabId,
+    content: contentWords.join(' '),
+    has: (...names) => names.some((name) => Object.hasOwn(flags, name)),
+    value: (...names) => {
+      for (const name of names) if (Object.hasOwn(flags, name)) return flags[name];
+      return null;
+    },
+    textFlags,
+  };
+};
+
+const noteTextFlags = (parsed) => {
+  if (!parsed.textFlags.length) return;
+  process.stderr.write(
+    `note: ${parsed.textFlags.join(', ')} after the content went to the tab as text; flags are read only before the content (put \`--\` before the content to send such words without this note)\n`,
+  );
+};
+
+/** -f FILE / -f - / the content words, and the workspace; each refusal says what it saw. */
+const readTabInput = async (parsed) => {
+  if (parsed.has('--workspace', '-w') && !parsed.value('--workspace', '-w')) die('--workspace: saw no value; expected a workspace ID');
+  if (parsed.has('--file', '-f') && !parsed.value('--file', '-f')) die('--file: saw no value; expected a file path, or - for stdin');
+  const wsId = parsed.value('--workspace', '-w');
+  if (!wsId) die('--workspace is required');
+  if (!parsed.tabId) die('tab ID is required');
+  const file = parsed.value('--file', '-f');
+  const content = file ? (file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8')) : parsed.content;
+  if (!content) die('content is required (args, -f FILE, or -f - for stdin)');
+  return { wsId, tabId: parsed.tabId, content };
+};
+
+// Same shape as tab send, but it can interrupt the current turn first, so a busy worker reads the
+// correction now (story 14). The server decides the default: an agent tab does not interrupt unless
+// it passes --interrupt --reason; any other caller interrupts. The CLI refuses --interrupt without
+// --reason (exit 2) for every caller.
 const cmdTabSteer = async (args) => {
   requireEnv();
-  const file = flagValue(args, '--file') || flagValue(args, '-f');
-  const noInterrupt = args.includes('--no-interrupt');
-  const rest = stripBooleanFlags(stripFlags(args, ['--workspace', '-w', '--file', '-f']), ['--no-interrupt']);
-  const tabId = rest[0];
-  let content = rest.slice(1).join(' ');
-  if (!tabId) die('tab ID is required');
-  if (file) {
-    content = file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8');
+  const parsed = parseLeadingArgs(args, {
+    values: ['--workspace', '-w', '--file', '-f', '--reason'],
+    booleans: ['--no-interrupt', '--interrupt', '--raw'],
+  });
+  const interrupt = parsed.has('--interrupt');
+  const noInterrupt = parsed.has('--no-interrupt');
+  const reasonGiven = parsed.has('--reason');
+  const reason = parsed.value('--reason');
+  if (reasonGiven && (reason === null || !reason.trim())) {
+    die(`--reason: saw ${reason === null ? 'no value' : 'a blank value'}; expected a text of 1..500 characters before the content`);
   }
-  if (!content) die('content is required (args, -f FILE, or -f - for stdin)');
-  const wsId = resolveWsForTab(args);
+  if (interrupt && noInterrupt) die('--interrupt and --no-interrupt: saw both; expected at most one');
+  if (interrupt && !reasonGiven) die('--interrupt: saw no --reason; expected --interrupt --reason "<why the turn must stop>" before the content');
+  if (reasonGiven && !interrupt) die('--reason: saw it without --interrupt; expected --interrupt --reason TEXT, or no --reason');
+  const { wsId, tabId, content } = await readTabInput(parsed);
+  noteTextFlags(parsed);
   const { body } = await api(
     'POST',
     `/api/cli/tabs/${tabId}/steer?workspaceId=${encodeURIComponent(wsId)}`,
-    { content, ...(noInterrupt ? { interrupt: false } : {}) },
+    {
+      content,
+      ...(noInterrupt ? { interrupt: false } : interrupt ? { interrupt: true, reason } : {}),
+      ...(parsed.has('--raw') ? { raw: true } : {}),
+    },
   );
   out(body);
 };
@@ -1945,21 +2029,13 @@ const MAX_CLI_WAIT_MS = 240_000;
 
 const cmdTabSend = async (args) => {
   requireEnv();
-  const file = flagValue(args, '--file') || flagValue(args, '-f');
-  const waitMs = flagValue(args, '--wait-ms');
-  const noWait = args.includes('--no-wait');
-  const rest = stripBooleanFlags(
-    stripFlags(args, ['--workspace', '-w', '--file', '-f', '--wait-ms']),
-    ['--no-wait'],
-  );
-  const tabId = rest[0];
-  let content = rest.slice(1).join(' ');
-  if (!tabId) die('tab ID is required');
-  if (file) {
-    content = file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8');
-  }
-  if (!content) die('content is required (args, -f FILE, or -f - for stdin)');
-  const waitMsGiven = args.includes('--wait-ms');
+  const parsed = parseLeadingArgs(args, {
+    values: ['--workspace', '-w', '--file', '-f', '--wait-ms'],
+    booleans: ['--no-wait', '--raw'],
+  });
+  const noWait = parsed.has('--no-wait');
+  const waitMsGiven = parsed.has('--wait-ms');
+  const waitMs = parsed.value('--wait-ms');
   if (noWait && waitMsGiven) die('--no-wait and --wait-ms are mutually exclusive');
   // `--wait-ms` as the last token leaves no value to read; falling back to the
   // default would silently wait 60s for a caller that asked for something else.
@@ -1973,11 +2049,16 @@ const cmdTabSend = async (args) => {
   if (waitMsGiven && Number(waitMs) > MAX_CLI_WAIT_MS) {
     die(`--wait-ms must be at most ${MAX_CLI_WAIT_MS} (the CLI's HTTP client stops waiting at 300 s)`);
   }
-  const wsId = resolveWsForTab(args);
+  const { wsId, tabId, content } = await readTabInput(parsed);
+  noteTextFlags(parsed);
   const { body } = await api(
     'POST',
     `/api/cli/tabs/${tabId}/send?workspaceId=${encodeURIComponent(wsId)}`,
-    { content, ...(noWait ? { waitMs: 0 } : waitMs ? { waitMs: Number(waitMs) } : {}) },
+    {
+      content,
+      ...(noWait ? { waitMs: 0 } : waitMs ? { waitMs: Number(waitMs) } : {}),
+      ...(parsed.has('--raw') ? { raw: true } : {}),
+    },
   );
   out(body);
 };
@@ -3233,7 +3314,16 @@ Commands:
                   [--clear] [--on MARKERS] restores the workspace orchestrator. Cleared when TARGET closes.
                                            --on MARKERS (alone or with a target) forwards only those end lines,
                                            e.g. --on DONE,BLOCKED,NEEDS-DECISION; --on all lifts the filter
-  tab steer -w WS TAB_ID CONTENT...        Interrupt the current turn, then send CONTENT (use for a mid-turn correction; --no-interrupt to queue instead)
+  tab steer -w WS TAB_ID CONTENT...        Send CONTENT as a mid-turn correction. From an agent tab (claude-code,
+           [--interrupt --reason TEXT]     codex-cli, grok-cli) the default does NOT interrupt: the text waits for
+           [--no-interrupt] [--raw]        the turn to end. --interrupt --reason TEXT stops the turn first (Escape);
+           [-f FILE | -f -]                --interrupt without --reason exits 2. From any other caller, or one that
+                                           names no tab, the default interrupts, as before. --no-interrupt is
+                                           accepted from every caller. The agent/other split is advisory: every
+                                           interrupt writes one steer-interrupt audit line (the record). Into a
+                                           terminal tab, text with more than one line exits 2
+                                           (terminal-not-command-line) unless --raw. Flags go before the content;
+                                           every word from the content on is sent as is, and -- ends the flags
   tab send -w WS TAB_ID CONTENT...         Send input to a tab and press Enter. Waits up to 60s
                                            for an agent tab to be able to accept a turn; --wait-ms N (max
                                            240000) changes the budget, --no-wait answers immediately. On timeout nothing is
@@ -3243,6 +3333,11 @@ Commands:
                                            Exit 4 (tab-not-found, session-not-running, target-changed) means
                                            the tab is gone: never retry it, and never loop on it.
            [-f FILE | -f -]                Send file contents (or stdin with '-') — use for multi-line briefs
+           [--raw]                         Into a terminal tab, text with more than one line exits 2
+                                           (terminal-not-command-line): a shell runs each line as a command.
+                                           --raw types the text as is (a heredoc). Flags go before the
+                                           content; every word from the content on is sent as is, and --
+                                           ends the flags
   tab status -w WS TAB_ID                  Tab status (includes registered probes + background jobs)
   tab result -w WS TAB_ID                  Capture tab pane content. Dim text the agent shows on its composer line
              [--no-suggestions | --raw]    (a suggestion, never typed) reads "[suggestion] <text>" and is also in

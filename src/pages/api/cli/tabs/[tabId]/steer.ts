@@ -3,10 +3,19 @@ import { authorizeWorkspaceInput, findTab } from '@/lib/cli-utils';
 import { steerSession } from '@/lib/agent-steer';
 import { withAgentDispatchLock } from '@/lib/agent-dispatch-policy';
 import { TAB_NOT_FOUND_BODY, targetChangedBody } from '@/lib/cli-error';
+import { STEER_NO_REASON, decideSteerInterrupt, resolveSteerCaller } from '@/lib/steer-policy';
+import { parseRawFlag, rawRefusalText, terminalInputRefusal } from '@/lib/terminal-command-line';
+import { appendCoordinationAudit } from '@/lib/coordination-audit';
 
 /**
- * Correct a worker mid-turn. Unlike `send`, which queues behind whatever the
- * agent is doing, this interrupts first so the correction is read immediately.
+ * Correct a worker mid-turn. Unlike `send`, which waits for the agent to accept a turn, a steer can
+ * interrupt the current turn first, so the correction is read at once.
+ *
+ * The interrupt default depends on the caller (story 14, `@/lib/steer-policy`): an agent tab does
+ * not interrupt unless it sends `interrupt: true` with a reason; any other caller, identified or not,
+ * interrupts by default, as before. The classification is advisory: every steer that interrupts
+ * writes one `steer-interrupt` audit line, which is the record. A terminal target refuses
+ * multi-line text unless `raw: true` (D30, `@/lib/terminal-command-line`).
  */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'POST') {
@@ -21,10 +30,17 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
   if (!(await authorizeWorkspaceInput(req, res, workspaceId))) return;
 
-  const { content, interrupt } = req.body as { content?: string; interrupt?: boolean };
+  const body = (req.body ?? {}) as { content?: string; interrupt?: unknown; reason?: unknown; raw?: unknown };
+  const { content } = body;
   if (!content) {
     return res.status(400).json({ error: 'content is required' });
   }
+  const raw = parseRawFlag(body.raw);
+  if (raw === null) return res.status(400).json({ error: rawRefusalText(body.raw), code: 'invalid-request' });
+
+  const steerCaller = await resolveSteerCaller(req, res);
+  const decision = decideSteerInterrupt(body, steerCaller.kind);
+  if (!decision.ok) return res.status(400).json({ error: decision.error, code: decision.code });
 
   const found = await findTab(workspaceId, tabId);
   if (!found) return res.status(404).json(TAB_NOT_FOUND_BODY);
@@ -34,16 +50,43 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     if (!current || current.tab.sessionName !== found.tab.sessionName) {
       return res.status(409).json(targetChangedBody(tabId));
     }
+    // Read on the tab as it is under the lock: an agent switch can change the panel type in place.
+    const refusal = terminalInputRefusal(current.tab, content, raw);
+    if (refusal) return res.status(400).json(refusal);
     let policy = await checkPolicy();
     if (!policy.ok) return res.status(409).json(policy);
 
     const result = await steerSession(current.tab.sessionName, content, {
-      interrupt,
+      interrupt: decision.interrupt,
       beforeDeliver: async () => {
         policy = await checkPolicy();
         return policy.ok;
       },
     });
+    // Every interrupt, by default or on request, is audited: the caller classification is advisory.
+    if (decision.interrupt) {
+      const { caller } = steerCaller;
+      await appendCoordinationAudit({
+        event: 'steer-interrupt',
+        workspaceId,
+        tabId,
+        targetName: current.tab.name || null,
+        caller: {
+          kind: steerCaller.kind,
+          workspaceId: caller?.workspaceId ?? null,
+          tabId: caller?.tabId ?? null,
+          tabName: caller?.tabName ?? null,
+          panelType: steerCaller.panelType,
+          identity: caller?.identity ?? 'none',
+          verified: caller?.verified ?? false,
+        },
+        explicit: decision.explicit,
+        reason: decision.reason ?? STEER_NO_REASON,
+        interrupted: result.interrupted,
+        ok: result.ok && policy.ok,
+        ...(result.reason ? { failure: result.reason } : !policy.ok ? { failure: 'policy-refused' } : {}),
+      });
+    }
     if (!policy.ok) return res.status(409).json(policy);
     if (!result.ok) {
       if (result.reason === 'session not found') {
