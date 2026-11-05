@@ -1774,6 +1774,10 @@ POST /api/cli/mission-control/events?workspaceId=WS
   by supplying that item's current revision. Resolution requires the saved answer to have been
   acknowledged first. Event IDs are stable idempotency keys: identical retries replay; changed
   content under the same ID returns 409.
+  NEEDS-DECISION items (ADR-0041 §2): an attention.opened whose itemId starts with nd-<16 hex>
+  while another item of that prefix is open returns 409 { "error": "an item for this
+  NEEDS-DECISION line is already open: <id>", "code": "already-open", "current": <the open item> }.
+  Do not open another: name the open item's id.
 
   Update an attention item:
   purplemux mission events -w WS --json '{"events":[{"eventId":"evt-question-update-1","schemaVersion":1,"workspaceId":"WS","runId":"run-1","expectedRevision":1,"producerAt":1700000000002,"bindingGeneration":1,"type":"attention.updated","payload":{"itemId":"question-1","kind":"question","title":"Choose rollout","context":"Choose the production rollout strategy","storyIds":[],"options":[{"id":"gradual","label":"Gradual"}],"recommendation":"gradual","blockingScope":"story","canContinue":true}}]}'

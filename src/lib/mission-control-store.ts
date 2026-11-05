@@ -59,7 +59,7 @@ import {
   autoAnswerSubmissionId,
   type IAutoAnswerRule,
 } from '@/lib/mission-control-auto-answer';
-import { SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX } from '@/lib/mission-control-validation';
+import { needsDecisionLinePrefix, SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX } from '@/lib/mission-control-validation';
 
 const DEFAULT_DB_PATH = path.join(os.homedir(), '.purplemux', 'mission-control.sqlite');
 const SCHEMA_VERSION = 4;
@@ -1289,6 +1289,15 @@ export class MissionControlStore {
         missionConflict('attention item ID is already in use');
       }
       if (itemRow) missionConflict('attention item already exists', this.item(itemRow));
+      // One open item per NEEDS-DECISION line (#521, R-03): a second id with the same `nd-<lineKey>` is refused, so
+      // an open from a note sent before a restart, or a server open that raced it, never makes a second item.
+      const linePrefix = needsDecisionLinePrefix(itemId);
+      const openForLine = linePrefix ? this.openItemsWithIdPrefix(event.workspaceId, linePrefix).at(-1) : undefined;
+      const openForLineRow = openForLine ? this.itemRow(openForLine) : undefined;
+      if (openForLineRow) {
+        throw new MissionControlError(409, 'already-open',
+          `an item for this NEEDS-DECISION line is already open: ${openForLineRow.id}`, this.item(openForLineRow));
+      }
       // A proposal item and its record are one write (ADR-0041 §1 amendment D7): neither exists without the other.
       if (itemId.startsWith(SO_PROPOSAL_ITEM_PREFIX) !== (soProposal !== null)) {
         invalidMissionRequest(`a ${SO_PROPOSAL_ITEM_PREFIX} item opens only with its proposal record, and a record only with that item`);

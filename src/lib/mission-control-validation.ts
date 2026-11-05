@@ -97,6 +97,11 @@ const parse = <T>(schema: z.ZodType<T>, input: unknown): T => {
 // predictable, so a producer must not take the event ID first.
 // `system:needs-decision:` is the server's NEEDS-DECISION opener (ADR-0041): only it may take one.
 export const NEEDS_DECISION_EVENT_PREFIX = 'system:needs-decision:';
+/**
+ * `nd-<16 hex line key>`, the part of a NEEDS-DECISION item id that names the question (ADR-0041 §2), or null when
+ * the id has no such part. Any opener may take an `nd-` id; the store keeps one open item per prefix (#521, R-03).
+ */
+export const needsDecisionLinePrefix = (itemId: string): string | null => /^nd-[0-9a-f]{16}/.exec(itemId)?.[0] ?? null;
 /** The server's keep-or-strike item for an order the curator filed (story 23): only it may take one. */
 export const CURATOR_ORDER_EVENT_PREFIX = 'system:curator-so:';
 /** The server's fleet standing-order proposal item (ADR-0041 §1 amendment D7): only it may take one. */

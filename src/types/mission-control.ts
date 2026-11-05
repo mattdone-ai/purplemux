@@ -444,7 +444,7 @@ export interface IMissionAnswerResponse {
 
 export interface IMissionError {
   error: string;
-  code: 'invalid-request' | 'question-invalid' | 'unauthorized' | 'forbidden' | 'not-found' | 'conflict' | 'storage-unavailable';
+  code: 'invalid-request' | 'question-invalid' | 'unauthorized' | 'forbidden' | 'not-found' | 'conflict' | 'already-open' | 'storage-unavailable';
   current?: IMissionAttentionItem | IMissionRun;
   /** On 400 question-invalid: every defect of every refused event. */
   defects?: IMissionEventDefect[];
