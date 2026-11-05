@@ -122,6 +122,12 @@ export class TabEventsTable {
       WHERE workspace_id = ? AND tab_id = ? AND class = 'digest' AND delivered_at IS NULL AND digest_id IS NULL)`)
       .run(workspaceId, tabId).changes;
 
+  /** The tab's held events of one kind become `log` rows: a newer event of that kind replaces them (story hfl2-10). */
+  retirePendingKind = (workspaceId: string, tabId: string, kind: string): number =>
+    this.database.prepare(`UPDATE tab_events SET class = 'log' WHERE seq IN (SELECT seq FROM tab_events INDEXED BY tab_events_pending_idx
+      WHERE workspace_id = ? AND tab_id = ? AND class = 'digest' AND delivered_at IS NULL AND digest_id IS NULL AND kind = ?)`)
+      .run(workspaceId, tabId, kind).changes;
+
   pendingTabs = (): IPendingDigest[] =>
     (this.database.prepare(`SELECT workspace_id, tab_id, COUNT(*) AS count, MIN(at) AS oldest_at
       FROM tab_events INDEXED BY tab_events_pending_idx WHERE class = 'digest' AND delivered_at IS NULL AND digest_id IS NULL

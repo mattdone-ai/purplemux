@@ -52,6 +52,8 @@ Option 3.
    prompt (`StatusManager.isAtPrompt`: idle, ready-for-review, or busy only because its stop waits on its own
    background work; not halted by a usage limit, not being closed), re-checked inside the dispatch lock just before the
    paste (`IAutomatedPromptRequest.whenReady`), and 15 min have passed since the tab's last digest or 20 events wait.
+   A pending `standup-due` row makes the digest due regardless of the 15-min interval; the at-prompt check, the settle
+   window and `holdDigest` still apply (story hfl2-10, consult ruling b; fleet config `standup.dueMin`, default 45).
    No digest goes within 5 s of any delivery to the tab (an urgent paste, a notice, a send): the turn that paste
    started may not show in the tab's state yet (review round 2, F10). The window is read again inside the tab's
    dispatch lock, after any paste queued ahead of the digest. A 5 s tick and every new digest event check it.
