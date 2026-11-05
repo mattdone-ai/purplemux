@@ -367,6 +367,7 @@ interface ISoProposalRow {
   answer_id: string | null;
   order_id: string | null;
   reason: string | null;
+  reason_code: string | null;
   created_at: number;
   decided_at: number | null;
 }
@@ -383,6 +384,7 @@ const soProposalFromRow = (row: ISoProposalRow): IMissionSoProposalRecord => ({
   answerId: row.answer_id,
   orderId: row.order_id,
   reason: row.reason,
+  reasonCode: row.reason_code,
   createdAt: row.created_at,
   decidedAt: row.decided_at,
 });
@@ -399,6 +401,7 @@ export interface IMissionSoProposalOutcome {
   answerId?: string | null;
   orderId?: string | null;
   reason?: string | null;
+  reasonCode?: string | null;
   decidedAt: number;
 }
 
@@ -530,10 +533,13 @@ export class MissionControlStore {
       CREATE TABLE IF NOT EXISTS mission_so_proposals (
         item_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, proposer_tab_id TEXT NOT NULL, text TEXT NOT NULL,
         scope TEXT NOT NULL, check_name TEXT NOT NULL, cites TEXT, state TEXT NOT NULL, answer_id TEXT, order_id TEXT,
-        reason TEXT, created_at INTEGER NOT NULL, decided_at INTEGER
+        reason TEXT, reason_code TEXT, created_at INTEGER NOT NULL, decided_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS mission_so_proposals_state_idx ON mission_so_proposals(state);
     `);
+    // A table made before `reason_code` (story 02 r1) gains it; a column add is all a side table ever needs.
+    const columns = (this.database.prepare('PRAGMA table_info(mission_so_proposals)').all() as Array<{ name: string }>).map((c) => c.name);
+    if (!columns.includes('reason_code')) this.database.exec('ALTER TABLE mission_so_proposals ADD COLUMN reason_code TEXT');
   };
 
   /**
@@ -1059,9 +1065,10 @@ export class MissionControlStore {
    * caller writes no second audit row and sends no second line.
    */
   settleSoProposal = (itemId: string, outcome: IMissionSoProposalOutcome): boolean =>
-    this.database.prepare(`UPDATE mission_so_proposals SET state=?, answer_id=COALESCE(?, answer_id), order_id=?, reason=?, decided_at=?
-      WHERE item_id=? AND state='open'`)
-      .run(outcome.state, outcome.answerId ?? null, outcome.orderId ?? null, outcome.reason ?? null, outcome.decidedAt, itemId).changes === 1;
+    this.database.prepare(`UPDATE mission_so_proposals SET state=?, answer_id=COALESCE(?, answer_id), order_id=?, reason=?, reason_code=?,
+      decided_at=? WHERE item_id=? AND state='open'`)
+      .run(outcome.state, outcome.answerId ?? null, outcome.orderId ?? null, outcome.reason ?? null, outcome.reasonCode ?? null,
+        outcome.decidedAt, itemId).changes === 1;
 
   /**
    * The 72 h timeout (D7 rule 7): cancel the unanswered item with the server event `system:so-proposal:expire:<itemId>`

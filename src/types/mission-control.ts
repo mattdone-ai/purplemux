@@ -167,12 +167,15 @@ export interface IMissionSoProposalRecord {
   state: TSoProposalState;
   answerId: string | null;
   orderId: string | null;
+  /** The sentence the owner reads; never a code. */
   reason: string | null;
+  /** The code behind a `not-filed` reason (ADR-0041 D7 rule 6), recorded for the audit and never served on the item. */
+  reasonCode: string | null;
   createdAt: number;
   decidedAt: number | null;
 }
 
-/** What an item serves of its proposal: the outcome the owner reads on the card. */
+/** What an item serves of its proposal: the outcome the owner reads on the card. `reason` is a sentence, never a code. */
 export interface IMissionSoProposalView {
   state: TSoProposalState;
   orderId: string | null;

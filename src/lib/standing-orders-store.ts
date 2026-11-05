@@ -200,7 +200,8 @@ const planAdd = async (owner: string, input: IOrderInput, knownWorkspaces: reado
   }
   if (largest.bytes > STANDING_ORDERS_MAX_BYTES) {
     throw new StandingOrderError('so-too-large',
-      `standing orders for ${largest.workspaceId ?? 'the fleet'} would be ${largest.bytes} bytes, at most ${STANDING_ORDERS_MAX_BYTES}: strike an order or shorten this one`);
+      `standing orders for ${largest.workspaceId ?? 'the fleet'} would be ${largest.bytes} bytes, at most ${STANDING_ORDERS_MAX_BYTES}: strike an order or shorten this one`,
+      undefined, { ...largest });
   }
   return { order, updated, next, largest, reached: reached.length };
 };

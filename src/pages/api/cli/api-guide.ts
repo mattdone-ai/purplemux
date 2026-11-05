@@ -755,8 +755,9 @@ POST /api/cli/standing-orders/proposals   { "text", "why", "cites"?, "scope"?, "
   The owner's Yes files the fleet order as the server's admin caller with source "owner answer <answerId>
   on MC item <itemId> (<UTC date>), proposed by <ws>/<tab>"; No, text alone, a withdrawal
   (attention.cancelled) or 72 h with no answer files nothing. The item serves proposal: { state
-  (open | filed | declined | expired | withdrawn | not-filed), orderId, reason } | null. For expired and
-  not-filed the proposer tab gets one "[purplemux standing order] proposal <itemId> …" line.
+  (open | filed | declined | expired | withdrawn | not-filed), orderId, reason } | null; reason is a sentence,
+  and a not-filed code is recorded and audited, never served. For expired and not-filed the proposer tab
+  gets one "[purplemux standing order] proposal <itemId> …" line.
 CLI: purplemux so add (-w WS | --fleet) --text T --source S [--scope S] [--check C]; so propose --text T
 --why W [--cites C] [--scope S] [--check C]; so strike SO-N --reason R; so list [-w WS] [--all] [--json].
 

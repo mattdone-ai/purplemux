@@ -8,7 +8,7 @@
   "blockingScope": "none",
   "canContinue": true,
   "recommendation": null,
-  "context": "```text\nQuestions for the owner go to Mission Control first; the note to the Portfolio Scrum Master carries the item id.\n```\n\n- Scope: `fleet`; check: `prose`\n- Proposed by `ws-fixture/tab-sm`, the selected portfolio manager\n- Cites: owner message havmSUlPTFqnamLTshs1b of ws-zOfVyu, 2026-11-04T02:10Z\n- Reaches 9 workspaces and 14 live agent tabs\n- Largest prompt section after the add: 3120 bytes of 8192 (ws-fixture)\n\nYes files the order exactly as quoted. No, text alone, or no answer in 72 h files nothing.",
+  "context": "```text\nQuestions for the owner go to Mission Control first; the note to the Portfolio Scrum Master carries the item id.\n```\n\nScope, check and cited owner message, as the proposer wrote them:\n\n```text\nscope: fleet\ncheck: prose\ncites: owner message havmSUlPTFqnamLTshs1b of ws-zOfVyu, 2026-11-04T02:10Z\n```\n\n- Proposed by `ws-fixture/tab-sm`, the selected portfolio manager\n- Reaches 9 workspaces and 14 live agent tabs\n- Largest prompt section after the add: 3120 bytes of 8192 (ws-fixture)\n\nYes files the order exactly as quoted. No, text alone, or no answer in 72 h files nothing.",
   "evidence": {
     "source": "agent",
     "sourceId": "system:so-proposal:open:so-proposal-ae0b400994024045690a9380",

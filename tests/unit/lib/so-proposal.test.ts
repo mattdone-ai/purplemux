@@ -357,9 +357,16 @@ describe('the answer step (D7 rule 6; tests 6-9)', () => {
     answer(itemId, ['yes']);
     expect(await settleProposal(h.deps(), itemId)).toBe('not-filed');
     expect(fleetText()).toBe(full);
-    const reason = store.soProposal(itemId)!.reason!;
-    expect(reason).toMatch(/^so-too-large: standing orders for .* would be \d+ bytes, at most 8192/);
+    const record = store.soProposal(itemId)!;
+    const reason = record.reason!;
+    // The owner reads a sentence with the measured size; the code is recorded beside it and audited, never served.
+    expect(reason).toMatch(/^Filing it would make the standing orders of (the fleet|ws-\S+) \d{4} bytes, past the 8192-byte budget\. Strike an order, then propose again\.$/);
+    expect(reason).not.toMatch(/so-[a-z]/);
+    expect(record.reasonCode).toBe('so-too-large');
     expect(store.attentionItem(itemId)!.proposal).toEqual({ state: 'not-filed', orderId: null, reason });
+    expect(JSON.stringify(store.attentionItem(itemId)!.proposal)).not.toContain('so-too-large');
+    expect(h.events('so-proposal-not-filed')[0]).toMatchObject({ reason, reasonCode: 'so-too-large',
+      message: expect.stringMatching(/would be \d+ bytes, at most 8192/) });
     expect(h.routed).toEqual([{ workspaceId: 'ws-sm', tabId: 'tab-sm', kind: 'standing-order', class: 'urgent',
       text: `[purplemux standing order] proposal ${itemId} not filed: ${reason}: nothing filed` }]);
     expect(h.events('so-proposal-not-filed')).toHaveLength(1);
@@ -374,7 +381,7 @@ describe('the answer step (D7 rule 6; tests 6-9)', () => {
     const admin = await addStandingOrder(h.deps().orders, ADMIN, FLEET, { text: RULE, source: 'owner message x' });
     answer(itemId, ['yes']);
     expect(await settleProposal(h.deps(), itemId)).toBe('not-filed');
-    expect(store.soProposal(itemId)!.reason).toBe(`so-proposal-refused: duplicate: the active fleet order ${admin.order.id} already says this`);
+    expect(store.soProposal(itemId)).toMatchObject({ reason: `The active fleet order ${admin.order.id} already says this.`, reasonCode: 'duplicate' });
     expect((await readOrderFile(FLEET)).orders.filter((o) => o.text === RULE)).toHaveLength(1);
   });
 
@@ -422,8 +429,69 @@ describe('the answer step (D7 rule 6; tests 6-9)', () => {
     db.close();
     expect(item.state).toBe('open');
     expect(await settleProposal(h.deps(), itemId)).toBe('not-filed');
-    expect(store.soProposal(itemId)!.reason).toMatch(/came from system:auto-answer, not the owner/);
+    expect(store.soProposal(itemId)).toMatchObject({ reason: 'The answer did not come from the owner, so nothing was written.', reasonCode: 'system-actor' });
+    expect(h.events('so-proposal-not-filed')[0]).toMatchObject({ message: expect.stringMatching(/came from system:auto-answer, not the owner/) });
     expect((await readOrderFile(FLEET)).orders.some((o) => o.text === RULE)).toBe(false);
+  });
+});
+
+describe('review r1 fixes', () => {
+  it('finding 2: only a fleet order with exactly this answer\'s source counts as filed; a workspace order with that source does not', async () => {
+    startRun();
+    const h = new Harness();
+    const { itemId } = await propose(h);
+    const stored = answer(itemId, ['yes']);
+    const source = proposalOrderSource(stored.answer.id, itemId, stored.answer.createdAt, 'ws-sm', 'tab-sm');
+    // A seat that learned the answer id writes the exact source on its own workspace order, and a near miss on the fleet.
+    const spoof = await addStandingOrder(h.deps().orders, smCaller, 'ws-sm', { text: 'A workspace rule.', source });
+    const near = await addStandingOrder(h.deps().orders, ADMIN, FLEET, { text: 'A fleet rule.', source: `${source} (copy)` });
+    expect(await settleProposal(h.deps(), itemId)).toBe('filed');
+    const filed = (await readOrderFile(FLEET)).orders.filter((o) => o.source === source);
+    expect(filed.map((o) => o.text)).toEqual([RULE]);
+    expect(store.soProposal(itemId)!.orderId).toBe(filed[0].id);
+    expect([spoof.order.id, near.order.id]).not.toContain(filed[0].id);
+  });
+
+  it('finding 4: cites and check stay inside a fence, so a proposer\'s markdown never renders on the owner\'s card', async () => {
+    startRun();
+    const h = new Harness();
+    const cites = 'see [the owner](https://evil.example/) and ```code``` and **bold**';
+    const check = 'tests/a.test.ts` **x** `';
+    const { itemId } = await propose(h, { cites, check });
+    const context = store.attentionItem(itemId)!.context;
+    const lines = context.split('\n');
+    const open = lines.indexOf('````text');
+    const shut = lines.indexOf('````', open + 1);
+    expect(open).toBeGreaterThan(-1);
+    expect(lines.slice(open + 1, shut)).toEqual(['scope: fleet', `check: ${check}`, `cites: ${cites}`]);
+    expect(lines.filter((line, i) => (i < open || i > shut) && (line.includes('evil.example') || line.includes('**')))).toEqual([]);
+  });
+
+  it('finding 3: a failed audit write and a failed proposer line are retried once, then logged; the outcome stands', async () => {
+    startRun();
+    const h = new Harness();
+    const { itemId } = await propose(h, { text: `Keep this rule. ${'r'.repeat(560)}` });
+    h.now += 5_000;
+    const second = await propose(h, { text: `Another rule for every seat. ${'q'.repeat(560)}` });
+    await fillBudget(h);
+    answer(itemId, ['yes']);
+    const deps = h.deps();
+    let audits = 0;
+    let routes = 0;
+    const flaky: ISoProposalDeps = {
+      ...deps,
+      audit: async (entry) => { audits += 1; if (audits === 1) return false; return deps.audit(entry); },
+      orders: { ...deps.orders, route: async (event) => { routes += 1; if (routes === 1) throw new Error('router busy'); return deps.orders.route(event); } },
+    };
+    expect(await settleProposal(flaky, itemId)).toBe('not-filed');
+    expect([audits, routes]).toEqual([2, 2]);
+    expect(h.events('so-proposal-not-filed')).toHaveLength(1);
+    expect(h.routed.filter((r) => r.tabId === 'tab-sm' && r.text.includes(itemId))).toHaveLength(1);
+
+    answer(second.itemId, ['yes']);
+    const dead: ISoProposalDeps = { ...deps, audit: async () => false, orders: { ...deps.orders, route: async () => { throw new Error('down'); } } };
+    expect(await settleProposal(dead, second.itemId)).toBe('not-filed');
+    expect(store.soProposal(second.itemId)!.state).toBe('not-filed');
   });
 });
 
@@ -481,6 +549,22 @@ describe('rollback (test 14) and the admin path (test 11)', () => {
     live.store = store;
     expect(store.soProposal(itemId)!.state).toBe('open');
     expect(await runSoProposalPass(h.deps())).toEqual([{ itemId, outcome: 'filed' }]);
+  });
+
+  it('a mission_so_proposals table from before reason_code gains the column, and its rows keep their state', () => {
+    store.close();
+    const file = path.join(directory, 'old.sqlite');
+    const raw = new Database(file);
+    raw.exec(`CREATE TABLE mission_so_proposals (item_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, proposer_tab_id TEXT NOT NULL,
+      text TEXT NOT NULL, scope TEXT NOT NULL, check_name TEXT NOT NULL, cites TEXT, state TEXT NOT NULL, answer_id TEXT, order_id TEXT,
+      reason TEXT, created_at INTEGER NOT NULL, decided_at INTEGER);
+      INSERT INTO mission_so_proposals VALUES ('so-proposal-x','ws-sm','tab-sm','t','fleet','prose',NULL,'open',NULL,NULL,NULL,1,NULL);`);
+    raw.close();
+    store = new MissionControlStore(file);
+    live.store = store;
+    expect(store.soProposal('so-proposal-x')).toMatchObject({ state: 'open', reasonCode: null });
+    expect(store.settleSoProposal('so-proposal-x', { state: 'not-filed', reason: 'r', reasonCode: 'so-invalid', decidedAt: 2 })).toBe(true);
+    expect(store.soProposal('so-proposal-x')).toMatchObject({ state: 'not-filed', reason: 'r', reasonCode: 'so-invalid' });
   });
 
   it('the admin token still adds a fleet order with so add --fleet, and still cannot propose', async () => {

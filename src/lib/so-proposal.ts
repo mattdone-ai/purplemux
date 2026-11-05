@@ -25,14 +25,41 @@ export const proposalItemPrefix = (text: string): string => `${SO_PROPOSAL_ITEM_
 export const proposalItemId = (text: string, at: number): string =>
   `${proposalItemPrefix(text)}${(Math.floor(at / 1000) >>> 0).toString(16).padStart(8, '0')}`;
 
-const answerSourceHead = (answerId: string): string => `owner answer ${answerId} on MC item `;
-
-/** The filed order's source: the owner's answer is its authority; the proposer only wrote the draft. */
+/**
+ * The filed order's source: the owner's answer is its authority; the proposer only wrote the draft. The step finds the
+ * order of one answer by this exact string in the fleet file, so it is a pure function of the answer and the record.
+ */
 export const proposalOrderSource = (answerId: string, itemId: string, answeredAt: number, workspaceId: string, tabId: string): string =>
-  `${answerSourceHead(answerId)}${itemId} (${new Date(answeredAt).toISOString().slice(0, 10)} UTC), proposed by ${workspaceId}/${tabId}`;
+  `owner answer ${answerId} on MC item ${itemId} (${new Date(answeredAt).toISOString().slice(0, 10)} UTC), proposed by ${workspaceId}/${tabId}`;
 
-/** Whether an order's source names this owner answer: the look-up that files one order for one answer. */
-export const sourceNamesAnswer = (source: string, answerId: string): boolean => source.startsWith(answerSourceHead(answerId));
+/**
+ * Why a Yes filed nothing (D7 rule 6, `not-filed`). The code is recorded beside the reason (`reason_code`) and in the
+ * audit row with the store's message; the owner's card and the proposer's line read only the sentence below.
+ */
+export const NOT_FILED_CODES = ['so-too-large', 'so-unreadable', 'so-invalid', 'duplicate', 'system-actor'] as const;
+export type TNotFiledCode = (typeof NOT_FILED_CODES)[number];
+
+export interface INotFiledDetail {
+  /** The largest prompt section the add would leave, and its workspace (`so-too-large`). */
+  bytes?: number;
+  workspaceId?: string | null;
+  /** The active fleet order that already says this (`duplicate`). */
+  orderId?: string;
+}
+
+const NOT_FILED_REASONS: Readonly<Record<TNotFiledCode, (detail: INotFiledDetail) => string>> = {
+  'so-too-large': (d) => (d.bytes === undefined
+    ? `Filing it would pass the ${STANDING_ORDERS_MAX_BYTES}-byte budget of standing orders in a prompt. Strike an order, then propose again.`
+    : `Filing it would make the standing orders of ${d.workspaceId ?? 'the fleet'} ${d.bytes} bytes, past the ${STANDING_ORDERS_MAX_BYTES}-byte budget. Strike an order, then propose again.`),
+  'so-unreadable': () => 'A standing-order file could not be read, so nothing was written. Repair the file, then propose again.',
+  'so-invalid': () => 'The proposed order is no longer a valid order, so nothing was written.',
+  duplicate: (d) => (d.orderId ? `The active fleet order ${d.orderId} already says this.` : 'An active fleet order already says this.'),
+  'system-actor': () => 'The answer did not come from the owner, so nothing was written.',
+};
+
+/** The one sentence for a not-filed code; a code this release does not know gets a neutral sentence, never the code. */
+export const notFiledReason = (code: string, detail: INotFiledDetail = {}): string =>
+  (Object.hasOwn(NOT_FILED_REASONS, code) ? NOT_FILED_REASONS[code as TNotFiledCode](detail) : 'The order could not be filed, so nothing was written.');
 
 export interface IProposalDraft {
   text: string;
@@ -69,6 +96,9 @@ const clip = (text: string, max: number): string => {
 /** Format 2 `confirm`, class `scope`, no default and nothing recommended: only the owner's Yes files the order. */
 export const buildProposalQuestion = (draft: IProposalDraft, reach: IProposalReach): Record<string, unknown> => {
   const fence = fenceFor(draft.text);
+  // Every proposer-written field stays inside a fence: no markdown of the proposer reaches the owner's card.
+  const details = [`scope: ${draft.scope}`, `check: ${draft.check}`, `cites: ${draft.cites ?? 'nothing cited'}`].join('\n');
+  const detailsFence = fenceFor(details);
   return {
     formatVersion: 2,
     kind: 'question',
@@ -85,9 +115,13 @@ export const buildProposalQuestion = (draft: IProposalDraft, reach: IProposalRea
       draft.text,
       fence,
       '',
-      `- Scope: \`${draft.scope}\`; check: \`${draft.check}\``,
+      'Scope, check and cited owner message, as the proposer wrote them:',
+      '',
+      `${detailsFence}text`,
+      details,
+      detailsFence,
+      '',
       `- Proposed by \`${draft.workspaceId}/${draft.tabId}\`, the selected portfolio manager`,
-      `- Cites: ${draft.cites ?? 'nothing cited'}`,
       `- Reaches ${plural(reach.workspaces, 'workspace')} and ${plural(reach.liveTabs, 'live agent tab')}`,
       `- Largest prompt section after the add: ${reach.bytes} bytes of ${STANDING_ORDERS_MAX_BYTES}${reach.bytesWorkspace ? ` (${reach.bytesWorkspace})` : ''}`,
       '',

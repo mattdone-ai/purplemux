@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import MissionControlAnswerCard, { MissionControlDeliveryCard } from '@/components/features/mission-control/mission-control-answer-card';
 import { proposalOutcomeText } from '@/components/features/mission-control/proposal-outcome';
-import { buildProposalQuestion, proposalItemId } from '@/lib/so-proposal';
+import { NOT_FILED_CODES, buildProposalQuestion, notFiledReason, proposalItemId } from '@/lib/so-proposal';
 import {
   createMissionDraft,
   editMissionDraft,
@@ -457,6 +457,9 @@ describe('the fleet standing-order proposal card (so-proposal-*.json)', () => {
     const refused = renderToStaticMarkup(<MissionControlDeliveryCard item={notFiled} answer={undefined} delivery={undefined} workspaceName="Fixture" />);
     expect(refused).toContain(`Not filed: ${notFiled.proposal!.reason}`);
     expect(refused).toContain('data-proposal-state="not-filed"');
+    // Review r1 finding 1: the served reason is a sentence; no wire code reaches the card.
+    expect(notFiled.proposal!.reason).toBe(notFiledReason('so-too-large', { bytes: 8301, workspaceId: 'ws-fixture' }));
+    expect(refused).not.toMatch(/so-(too-large|unreadable|invalid|proposal-refused)|system-actor/);
   });
 
   it('every other item renders no proposal line; a state this page does not know is said in words, never as its token', () => {
@@ -470,5 +473,18 @@ describe('the fleet standing-order proposal card (so-proposal-*.json)', () => {
     expect(proposalOutcomeText({ state: 'filed', orderId: null, reason: null }).text).toBe('Filed; the order id is not available');
     expect(proposalOutcomeText({ state: 'not-filed', orderId: null, reason: null }).text).toBe('Not filed: no reason was recorded');
     for (const state of ['declined', 'expired', 'withdrawn'] as const) expect(proposalOutcomeText({ state, orderId: null, reason: null }).text).toMatch(/nothing filed$/);
+  });
+
+  it('one owning map turns each not-filed code into a sentence; a code it does not know gets a neutral sentence', () => {
+    for (const code of NOT_FILED_CODES) {
+      const sentence = notFiledReason(code, { bytes: 9000, workspaceId: 'ws-a', orderId: 'SO-9' });
+      expect(sentence).toMatch(/\.$/);
+      expect(sentence).not.toContain(code);
+    }
+    expect(notFiledReason('duplicate', { orderId: 'SO-9' })).toBe('The active fleet order SO-9 already says this.');
+    expect(notFiledReason('duplicate')).toBe('An active fleet order already says this.');
+    expect(notFiledReason('so-too-large')).toBe('Filing it would pass the 8192-byte budget of standing orders in a prompt. Strike an order, then propose again.');
+    expect(notFiledReason('forbidden')).toBe('The order could not be filed, so nothing was written.');
+    expect(notFiledReason('constructor')).toBe('The order could not be filed, so nothing was written.');
   });
 });

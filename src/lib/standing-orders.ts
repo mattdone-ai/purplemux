@@ -37,8 +37,16 @@ export type TStandingOrderErrorCode =
 /** Why a proposal was refused by state (ADR-0041 §1 amendment D7): the `reason` of `so-proposal-refused`. */
 export type TSoProposalRefusal = 'duplicate' | 'open-proposal' | 'no-orchestrator-run';
 
+/** What `so-too-large` measured: the largest prompt section the add would leave, and the workspace it is for. */
+export interface IOrderBudgetMeasure {
+  bytes: number;
+  workspaceId: string | null;
+}
+
 export class StandingOrderError extends Error {
-  constructor(readonly code: TStandingOrderErrorCode, message: string, readonly reason?: TSoProposalRefusal) {
+  constructor(
+    readonly code: TStandingOrderErrorCode, message: string, readonly reason?: TSoProposalRefusal, readonly measured?: IOrderBudgetMeasure,
+  ) {
     super(message);
     brandCodedError(this, 'StandingOrderError');
   }

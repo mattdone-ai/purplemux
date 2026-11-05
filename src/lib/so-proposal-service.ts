@@ -5,8 +5,8 @@ import { createLogger } from '@/lib/logger';
 import type { IMissionItemOpener, IMissionOpenRunBinding, MissionControlStore, TMissionSoProposalInput } from '@/lib/mission-control-store';
 import { SO_PROPOSAL_EVENT_PREFIX } from '@/lib/mission-control-validation';
 import {
-  EXPIRED_REASON, PROPOSAL_LIMITS, SO_PROPOSAL_TTL_MS, YES, buildProposalQuestion, proposalItemId, proposalOrderSource,
-  proposalOutcomeLine, sourceNamesAnswer,
+  EXPIRED_REASON, PROPOSAL_LIMITS, SO_PROPOSAL_TTL_MS, YES, buildProposalQuestion, notFiledReason, proposalItemId, proposalOrderSource,
+  proposalOutcomeLine,
 } from '@/lib/so-proposal';
 import { StandingOrderError, checkOrderInput, oneLine, type IStandingOrderFile } from '@/lib/standing-orders';
 import { addFleetOrderOnce, type IStandingOrderDeps } from '@/lib/standing-orders-service';
@@ -159,44 +159,81 @@ interface IClose {
   state: Exclude<TSoProposalState, 'open'>;
   answer?: IMissionAnswer | null;
   orderId?: string | null;
+  /** The sentence the owner and the proposer read; never a code. */
   reason?: string | null;
+  /** The code behind a `not-filed` reason and the store's own message: recorded and audited, never rendered. */
+  reasonCode?: string | null;
+  message?: string | null;
 }
+
+/**
+ * One retry, then a log line: the record is already closed, so a lost row or line is never a lost decision. A crash
+ * between the close and these writes still loses them (accepted, review r1 finding 3): the record holds the outcome.
+ */
+const twice = async (what: string, itemId: string, write: () => Promise<boolean>): Promise<void> => {
+  let failure = 'the write reported failure';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      if (await write()) return;
+      failure = 'the write reported failure';
+    } catch (err) {
+      failure = err instanceof Error ? err.message : String(err);
+    }
+  }
+  log.warn({ itemId }, `${what} failed twice (${failure})`);
+};
 
 /** Close the record once; only the step that closed it writes the audit row and the proposer's line. */
 const close = async (deps: ISoProposalDeps, record: IMissionSoProposalRecord, outcome: IClose, now: number, closed?: boolean): Promise<TSettleOutcome> => {
   const won = closed ?? deps.store().settleSoProposal(record.itemId, {
-    state: outcome.state, answerId: outcome.answer?.id ?? null, orderId: outcome.orderId ?? null, reason: outcome.reason ?? null, decidedAt: now,
+    state: outcome.state, answerId: outcome.answer?.id ?? null, orderId: outcome.orderId ?? null, reason: outcome.reason ?? null,
+    reasonCode: outcome.reasonCode ?? null, decidedAt: now,
   });
   if (!won) return 'none';
-  await deps.audit({
+  const entry = {
     event: `so-proposal-${outcome.state}`, itemId: record.itemId, workspaceId: record.workspaceId, tabId: record.proposerTabId,
     // Only a launch-verified tab passes the selection check, so every proposer is a launch identity.
     identity: 'launch', answerId: outcome.answer?.id ?? null, answerActor: outcome.answer?.actor ?? null,
     orderId: outcome.orderId ?? null, reason: outcome.reason ?? null, textSha256: textSha256(record.text),
-  });
+    ...(outcome.reasonCode ? { reasonCode: outcome.reasonCode, message: outcome.message ?? null } : {}),
+  };
+  // `appendCoordinationAudit` resolves false when the write failed; anything but false counts as written.
+  await twice('proposal audit row', record.itemId, async () => (await deps.audit(entry)) !== false);
   if (outcome.state === 'expired' || outcome.state === 'not-filed') {
-    const text = proposalOutcomeLine(record.itemId, outcome.state === 'expired' ? { expired: true } : { notFiled: outcome.reason ?? 'refused' });
-    await deps.orders.route({ workspaceId: record.workspaceId, tabId: record.proposerTabId, kind: 'standing-order', text, class: classifyWake('standing-order') })
-      .catch((err: unknown) => log.warn({ itemId: record.itemId }, `proposal line not sent (${err instanceof Error ? err.message : String(err)})`));
+    const text = proposalOutcomeLine(record.itemId, outcome.state === 'expired' ? { expired: true } : { notFiled: outcome.reason ?? notFiledReason('') });
+    await twice('proposal line to the proposer', record.itemId, async () => {
+      await deps.orders.route({
+        workspaceId: record.workspaceId, tabId: record.proposerTabId, kind: 'standing-order', text, class: classifyWake('standing-order'),
+      });
+      // Only a throw is a failure: the router holds or drops a line for a tab that is not live by its own rule.
+      return true;
+    });
   }
   return outcome.state;
 };
 
+/** The recorded code of a refused add: a duplicate is its own code, any other refusal keeps the store's code. */
+const notFiledCode = (err: StandingOrderError): string => (err.code === 'so-proposal-refused' && err.reason === 'duplicate' ? 'duplicate' : err.code);
+
 const fileOnYes = async (deps: ISoProposalDeps, record: IMissionSoProposalRecord, answer: IMissionAnswer, now: number): Promise<TSettleOutcome> => {
   const source = proposalOrderSource(answer.id, record.itemId, answer.createdAt, record.workspaceId, record.proposerTabId);
   let orderId: string;
+  let twin: string | null = null;
   try {
     const once = await addFleetOrderOnce(deps.orders, SERVER, { text: record.text, source, scope: record.scope, check: record.checkName }, (files) => {
-      const filed = files.flatMap((file) => file.orders).find((order) => sourceNamesAnswer(order.source, answer.id));
+      // One order for one answer: the fleet order whose source is exactly this answer's (review r1 finding 2).
+      const filed = files.find((file) => file.owner === FLEET)?.orders.find((order) => order.source === source);
       if (filed) return filed.id;
-      const twin = activeFleetTwin(files, record.text);
+      twin = activeFleetTwin(files, record.text);
       if (twin) throw refused('duplicate', `the active fleet order ${twin} already says this`);
       return null;
     });
     orderId = once.existing ?? once.result.order.id;
   } catch (err) {
     if (!(err instanceof StandingOrderError)) throw err;
-    return close(deps, record, { state: 'not-filed', answer, reason: `${err.code}: ${err.message}`.slice(0, 300) }, now);
+    const code = notFiledCode(err);
+    const reason = notFiledReason(code, { bytes: err.measured?.bytes, workspaceId: err.measured?.workspaceId, orderId: twin ?? undefined });
+    return close(deps, record, { state: 'not-filed', answer, reason, reasonCode: code, message: err.message.slice(0, 300) }, now);
   }
   return close(deps, record, { state: 'filed', answer, orderId }, now);
 };
@@ -217,7 +254,8 @@ export const settleProposal = async (deps: ISoProposalDeps, itemId: string): Pro
     const answer = store.answerById(item.answerId);
     if (!answer) return 'none';
     if (answer.actor.startsWith('system:')) {
-      return close(deps, record, { state: 'not-filed', answer, reason: `answer ${answer.id} came from ${answer.actor}, not the owner` }, now);
+      return close(deps, record, { state: 'not-filed', answer, reason: notFiledReason('system-actor'), reasonCode: 'system-actor',
+        message: `answer ${answer.id} came from ${answer.actor}, not the owner` }, now);
     }
     if (answer.optionIds.length === 1 && answer.optionIds[0] === YES) return fileOnYes(deps, record, answer, now);
     return close(deps, record, { state: 'declined', answer }, now);
