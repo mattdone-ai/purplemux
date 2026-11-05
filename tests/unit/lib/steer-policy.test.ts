@@ -19,9 +19,23 @@ const caller = (tabId: string | null): ICaller => ({
 });
 
 describe('decideSteerInterrupt', () => {
-  it('defaults by caller kind: agent false, other true', () => {
+  it('defaults by caller kind: agent false, other and unidentified true', () => {
     expect(decideSteerInterrupt({}, 'agent')).toEqual({ ok: true, interrupt: false, explicit: false, reason: null });
     expect(decideSteerInterrupt({}, 'other')).toEqual({ ok: true, interrupt: true, explicit: false, reason: null });
+    expect(decideSteerInterrupt({}, 'unidentified')).toEqual({ ok: true, interrupt: true, explicit: false, reason: null });
+  });
+
+  it('each refusal says what it saw and what it expected', () => {
+    const error = (body: { interrupt?: unknown; reason?: unknown }) => {
+      const d = decideSteerInterrupt(body, 'agent');
+      return d.ok ? null : d.error;
+    };
+    for (const body of [{ interrupt: 1 }, { interrupt: true }, { interrupt: true, reason: ' ' }, { interrupt: true, reason: 'r'.repeat(501) },
+      { interrupt: true, reason: null }, { reason: 'x' }, { interrupt: false, reason: 'x' }]) {
+      expect(error(body)).toMatch(/: saw .+; expected /);
+    }
+    expect(error({ interrupt: true, reason: 'a'.repeat(60) as unknown as string[] })).toBeNull();
+    expect(error({ interrupt: true, reason: ['x'] })).toBe('reason: saw an array; expected a text of 1..500 characters (--interrupt --reason "<why the turn must stop>")');
   });
 
   it('accepts interrupt: false from either kind', () => {
@@ -64,19 +78,19 @@ describe('resolveSteerCaller', () => {
     expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'other', panelType: panelType ?? 'terminal' });
   });
 
-  it('no caller, a caller without a tab, a tab the layout lacks, and a failed lookup are other', async () => {
+  it('no caller, a caller without a tab, a tab the layout lacks, and a failed lookup are unidentified', async () => {
     mocks.resolveCaller.mockResolvedValueOnce(null);
-    expect(await resolveSteerCaller(req)).toEqual({ kind: 'other', caller: null, panelType: null });
+    expect(await resolveSteerCaller(req)).toEqual({ kind: 'unidentified', caller: null, panelType: null });
     mocks.resolveCaller.mockResolvedValueOnce(caller(null));
-    expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'other', panelType: null });
+    expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'unidentified', panelType: null });
     expect(mocks.findTab).not.toHaveBeenCalled();
     mocks.resolveCaller.mockResolvedValueOnce(caller('gone'));
     mocks.findTab.mockResolvedValueOnce(null);
-    expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'other', panelType: null });
+    expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'unidentified', panelType: null });
     mocks.resolveCaller.mockRejectedValueOnce(new Error('layout unreadable'));
-    expect(await resolveSteerCaller(req)).toEqual({ kind: 'other', caller: null, panelType: null });
+    expect(await resolveSteerCaller(req)).toEqual({ kind: 'unidentified', caller: null, panelType: null });
     mocks.resolveCaller.mockResolvedValueOnce(caller('t1'));
     mocks.findTab.mockRejectedValueOnce(new Error('layout unreadable'));
-    expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'other', panelType: null });
+    expect(await resolveSteerCaller(req)).toMatchObject({ kind: 'unidentified', panelType: null });
   });
 });

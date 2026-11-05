@@ -485,7 +485,7 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
       const response = await call({ content: brief });
       expect(response.statusCode).toBe(400);
       expect(response.body).toEqual({
-        error: expect.stringContaining(`tab ${TAB_ID} is a terminal tab`),
+        error: expect.stringContaining(`tab ${TAB_ID} is a terminal tab, whose shell runs each line as a command: saw 3 lines; expected one shell command line. A multi-line command`),
         code: 'terminal-not-command-line',
         tabId: TAB_ID,
         panelType: 'terminal',
@@ -525,7 +525,7 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
     it('refuses a raw value that is not a boolean', async () => {
       const response = await call({ content: 'ls', raw: 'yes' });
       expect(response.statusCode).toBe(400);
-      expect(response.body).toEqual({ error: 'raw must be a boolean', code: 'invalid-request' });
+      expect(response.body).toEqual({ error: 'raw: saw the string "yes"; expected true or false', code: 'invalid-request' });
       expect(delivery.deliverPrompt).not.toHaveBeenCalled();
     });
   });

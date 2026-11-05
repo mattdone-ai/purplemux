@@ -37,8 +37,9 @@ export const terminalInputRefusal = (
   const lines = countInputLines(content);
   if (lines <= 1) return null;
   return {
-    error: `tab ${tab.id} is a terminal tab: its shell runs each line as a command, and this text holds ${lines} lines. `
-      + 'Send one shell command line, send prose to an agent tab, or pass --raw (raw: true) to type the text as is.',
+    error: `tab ${tab.id} is a terminal tab, whose shell runs each line as a command: saw ${lines} lines; `
+      + 'expected one shell command line. A multi-line command (a heredoc, a quoted multi-line string, a backslash '
+      + 'continuation) needs --raw (raw: true); prose belongs in an agent tab.',
     code: TERMINAL_INPUT_CODE,
     tabId: tab.id,
     panelType: 'terminal',
@@ -48,3 +49,7 @@ export const terminalInputRefusal = (
 
 /** `raw` in a request body: absent is false; null means a value that is not a boolean (refuse it). */
 export const parseRawFlag = (raw: unknown): boolean | null => (raw === undefined ? false : typeof raw === 'boolean' ? raw : null);
+
+/** The refusal text for a `raw` value that is not a boolean. */
+export const rawRefusalText = (raw: unknown): string =>
+  `raw: saw ${raw === null ? 'null' : typeof raw === 'string' ? `the string ${JSON.stringify(raw.slice(0, 40))}` : typeof raw}; expected true or false`;

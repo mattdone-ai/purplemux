@@ -18,7 +18,7 @@ import { getLedgerStore } from '@/lib/ledger-store';
 import { appendDelivered } from '@/lib/tab-event-router';
 import { createLogger } from '@/lib/logger';
 import { startupPromptFix, startupPromptLabel } from '@/lib/startup-prompt';
-import { parseRawFlag, terminalInputRefusal } from '@/lib/terminal-command-line';
+import { parseRawFlag, rawRefusalText, terminalInputRefusal } from '@/lib/terminal-command-line';
 
 const log = createLogger('tab-send');
 
@@ -65,7 +65,7 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     return res.status(400).json({ error: 'content is required' });
   }
   const raw = parseRawFlag(rawFlag);
-  if (raw === null) return res.status(400).json({ error: 'raw must be a boolean', code: 'invalid-request' });
+  if (raw === null) return res.status(400).json({ error: rawRefusalText(rawFlag), code: 'invalid-request' });
   const timeoutMs = resolveSendWaitMs(waitMs);
   if (timeoutMs === null) {
     return res

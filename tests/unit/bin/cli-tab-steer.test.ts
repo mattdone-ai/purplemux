@@ -91,16 +91,57 @@ describe('purplemux tab steer / tab send flags (story 14)', { timeout: 30_000 },
   });
 
   it.each([
-    ['--interrupt without --reason', ['--interrupt', 'stop'], '--interrupt needs --reason'],
-    ['--reason without --interrupt', ['--reason', 'why', 'stop'], '--reason is read only with --interrupt'],
-    ['--interrupt with --no-interrupt', ['--interrupt', '--no-interrupt', '--reason', 'why', 'stop'], 'mutually exclusive'],
-    ['a blank --reason', ['--interrupt', '--reason', '  ', 'stop'], '--reason needs a text'],
-    ['--reason as the last token', ['stop', '--interrupt', '--reason'], '--reason needs a text'],
-  ])('exits 2 for %s and sends nothing', async (_label, flags, text) => {
+    ['--interrupt without --reason', ['--interrupt', 'stop'], '--interrupt: saw no --reason; expected --interrupt --reason'],
+    ['--reason without --interrupt', ['--reason', 'why', 'stop'], '--reason: saw it without --interrupt; expected --interrupt --reason TEXT'],
+    ['--interrupt with --no-interrupt', ['--interrupt', '--no-interrupt', '--reason', 'why', 'stop'], 'saw both; expected at most one'],
+    ['a blank --reason', ['--interrupt', '--reason', '  ', 'stop'], '--reason: saw a blank value; expected a text'],
+    ['--reason as the last word', ['--interrupt', '--reason'], '--reason: saw no value; expected a text'],
+  ])('exits 2 for %s, says what it saw and expected, and sends nothing', async (_label, flags, text) => {
     const result = await cli(['tab', 'steer', '-w', 'ws-a', 'tab-t', ...flags]);
     expect(result.code).toBe(2);
     expect(result.stderr).toContain(text);
     expect(requests).toEqual([]);
+  });
+
+  describe('flags are read only before the content (r2)', () => {
+    it.each([
+      ['send', ['grep', '--raw', 'x'], 'grep --raw x'],
+      ['send', ['git', 'log', '--no-wait'], 'git log --no-wait'],
+      ['send', ['echo', '-w', 'ws-b', '-f', 'notes.md', '--wait-ms', '5'], 'echo -w ws-b -f notes.md --wait-ms 5'],
+      ['steer', ['echo', '--interrupt'], 'echo --interrupt'],
+      ['steer', ['grep', '--reason', 'foo', '--raw', '--no-interrupt'], 'grep --reason foo --raw --no-interrupt'],
+    ] as const)('tab %s keeps %j as content, byte for byte, and names the flag words on stderr', async (command, words, content) => {
+      const result = await cli(['tab', command, '-w', 'ws-a', 'tab-t', ...words]);
+      expect(result.code).toBe(0);
+      expect(requests).toHaveLength(1);
+      expect(requests[0].body).toEqual({ content });
+      expect(result.stderr).toContain('after the content went to the tab as text; flags are read only before the content');
+    });
+
+    it('a literal -- ends the flags: dash words after it are content, with no note', async () => {
+      const steer = await cli(['tab', 'steer', '-w', 'ws-a', 'tab-t', '--', '--interrupt', 'is', 'a', 'word']);
+      expect(steer.code).toBe(0);
+      expect(requests[0].body).toEqual({ content: '--interrupt is a word' });
+      expect(steer.stderr).not.toContain('note:');
+      const send = await cli(['tab', 'send', '-w', 'ws-a', '--raw', '--', 'tab-t', '-la', '--raw']);
+      expect(send.code).toBe(0);
+      expect(requests[1]).toEqual({ method: 'POST', url: '/api/cli/tabs/tab-t/send?workspaceId=ws-a', body: { content: '-la --raw', raw: true } });
+    });
+
+    it('reads flags between the tab ID and the content (the run-tabs and maintenance.sh shape)', async () => {
+      const brief = path.join(home, 'brief.md');
+      await fs.writeFile(brief, 'line one\nline two\n');
+      reply = { status: 200, body: { status: 'sent', submitted: true, cliState: null } };
+      const result = await cli(['tab', 'send', '-w', 'ws-a', 'tab-t', '-f', brief, '--wait-ms', '5000']);
+      expect(result.code).toBe(0);
+      expect(requests[0].body).toEqual({ content: 'line one\nline two\n', waitMs: 5000 });
+      expect(result.stderr).not.toContain('note:');
+    });
+
+    it('reads --interrupt --reason between the tab ID and the content', async () => {
+      await cli(['tab', 'steer', '-w', 'ws-a', 'tab-t', '--interrupt', '--reason', 'wrong branch', '--raw', 'git', 'status', '--raw']);
+      expect(requests[0].body).toEqual({ content: 'git status --raw', interrupt: true, reason: 'wrong branch', raw: true });
+    });
   });
 
   it('exits 2 for the server codes steer-reason-invalid and terminal-not-command-line', async () => {
@@ -121,8 +162,10 @@ describe('purplemux tab steer / tab send flags (story 14)', { timeout: 30_000 },
     expect(result.stdout).toContain('From an agent tab (claude-code,');
     expect(result.stdout).toContain('the default does NOT interrupt');
     expect(result.stdout).toContain('--interrupt --reason TEXT stops the turn first');
-    expect(result.stdout).toContain('From any other caller the default interrupts');
-    expect(result.stdout).toContain('--no-interrupt is accepted from every caller');
+    expect(result.stdout).toContain('names no tab, the default interrupts, as before');
+    expect(result.stdout).toContain('accepted from every caller. The agent/other split is advisory');
+    expect(result.stdout).toContain('interrupt writes one steer-interrupt audit line (the record)');
     expect(result.stdout).toContain('(terminal-not-command-line)');
+    expect(result.stdout).toContain('Flags go before the content');
   });
 });

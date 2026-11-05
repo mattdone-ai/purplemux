@@ -460,7 +460,9 @@ POST /api/cli/tabs/<tabId>/send?workspaceId=WS
   400 { "code": "terminal-not-command-line", "tabId", "panelType": "terminal", "lines", "error" } (exit 2,
     D30): the target is a terminal tab and the text holds more than one line (trailing line breaks
     are not counted). A shell runs each line as a command, so prose fails line by line. Nothing is
-    typed. Send one command line, send prose to an agent tab, or pass raw: true (--raw) for a heredoc.
+    typed. The error says "saw N lines; expected one shell command line". A multi-line command (a
+    heredoc, a quoted multi-line string, a backslash continuation) needs raw: true (--raw); prose
+    belongs in an agent tab.
 
 POST /api/cli/tabs/<tabId>/steer?workspaceId=WS
   Body: { "content": "...", "interrupt"?: boolean, "reason"?: "1..500 chars", "raw"?: boolean }
@@ -470,14 +472,22 @@ POST /api/cli/tabs/<tabId>/steer?workspaceId=WS
   another workspace).
   Interrupt default (story 14): a caller that is an agent tab (claude-code / codex-cli / grok-cli,
   named by its tab token or its tmux session, ADR-0010) does NOT interrupt by default. Any other
-  caller (a terminal tab, a workspace token that names no tab) interrupts by default, as before.
-  interrupt: false is accepted from every caller. interrupt: true needs a reason from every caller,
-  and each such steer appends one "steer-interrupt" line to ~/.purplemux/audit/coordination.jsonl:
-  the target, the caller (kind, tab, panel type, identity), the reason and whether it interrupted.
+  caller tab (a terminal tab) and any caller that names no tab, or a tab the layout does not hold
+  ("unidentified"), interrupts by default, as before. interrupt: false is accepted from every
+  caller. interrupt: true needs a reason from every caller.
+  The classification is ADVISORY, not access control: a process with the workspace token that sends
+  no tab identity is "unidentified" and gets the interrupt default. The audit is the record: EVERY
+  steer that interrupts, by default or on request, appends one "steer-interrupt" line to
+  ~/.purplemux/audit/coordination.jsonl: the target, the caller (kind agent | other | unidentified,
+  tab, panel type, identity), explicit, the reason ("(none given)" for a default interrupt) and
+  whether the Escape landed.
   CLI: purplemux tab steer -w WS TAB_ID [--interrupt --reason TEXT | --no-interrupt] [--raw] CONTENT...
+       Flags are read only before the content (for tab send too): every word from the content on is
+       sent byte for byte ("tab send T git log --raw" types "git log --raw"), and -- ends the flags.
   Response: { "status": "steered", "interrupted": boolean }
   400 { "code": "steer-reason-invalid" } (exit 2): interrupt: true without a reason, a reason over
-    500 characters, or a reason without interrupt: true. Nothing is typed.
+    500 characters, or a reason without interrupt: true. Nothing is typed. The error text says what
+    it saw and what it expected.
   400 { "code": "terminal-not-command-line", ... } (exit 2): as for send (D30).
   404 tab-not-found, 409 target-changed and session-not-running: as for send (exit 4).
 

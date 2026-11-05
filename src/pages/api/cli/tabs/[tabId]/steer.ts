@@ -3,8 +3,8 @@ import { authorizeWorkspaceInput, findTab } from '@/lib/cli-utils';
 import { steerSession } from '@/lib/agent-steer';
 import { withAgentDispatchLock } from '@/lib/agent-dispatch-policy';
 import { TAB_NOT_FOUND_BODY, targetChangedBody } from '@/lib/cli-error';
-import { decideSteerInterrupt, resolveSteerCaller } from '@/lib/steer-policy';
-import { parseRawFlag, terminalInputRefusal } from '@/lib/terminal-command-line';
+import { STEER_NO_REASON, decideSteerInterrupt, resolveSteerCaller } from '@/lib/steer-policy';
+import { parseRawFlag, rawRefusalText, terminalInputRefusal } from '@/lib/terminal-command-line';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
 
 /**
@@ -12,9 +12,10 @@ import { appendCoordinationAudit } from '@/lib/coordination-audit';
  * interrupt the current turn first, so the correction is read at once.
  *
  * The interrupt default depends on the caller (story 14, `@/lib/steer-policy`): an agent tab does
- * not interrupt unless it sends `interrupt: true` with a reason, and that interrupt writes one
- * `steer-interrupt` audit line; any other caller interrupts by default, as before. A terminal
- * target refuses multi-line text unless `raw: true` (D30, `@/lib/terminal-command-line`).
+ * not interrupt unless it sends `interrupt: true` with a reason; any other caller, identified or not,
+ * interrupts by default, as before. The classification is advisory: every steer that interrupts
+ * writes one `steer-interrupt` audit line, which is the record. A terminal target refuses
+ * multi-line text unless `raw: true` (D30, `@/lib/terminal-command-line`).
  */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'POST') {
@@ -35,7 +36,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     return res.status(400).json({ error: 'content is required' });
   }
   const raw = parseRawFlag(body.raw);
-  if (raw === null) return res.status(400).json({ error: 'raw must be a boolean', code: 'invalid-request' });
+  if (raw === null) return res.status(400).json({ error: rawRefusalText(body.raw), code: 'invalid-request' });
 
   const steerCaller = await resolveSteerCaller(req, res);
   const decision = decideSteerInterrupt(body, steerCaller.kind);
@@ -62,7 +63,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         return policy.ok;
       },
     });
-    if (decision.explicit && decision.interrupt) {
+    // Every interrupt, by default or on request, is audited: the caller classification is advisory.
+    if (decision.interrupt) {
       const { caller } = steerCaller;
       await appendCoordinationAudit({
         event: 'steer-interrupt',
@@ -78,7 +80,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
           identity: caller?.identity ?? 'none',
           verified: caller?.verified ?? false,
         },
-        reason: decision.reason,
+        explicit: decision.explicit,
+        reason: decision.reason ?? STEER_NO_REASON,
         interrupted: result.interrupted,
         ok: result.ok && policy.ok,
         ...(result.reason ? { failure: result.reason } : !policy.ok ? { failure: 'policy-refused' } : {}),

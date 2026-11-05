@@ -115,6 +115,7 @@ describe('POST /api/cli/tabs/[tabId]/steer (story 14)', { timeout: 15_000 }, () 
         tabId: TARGET,
         targetName: 'orchestrator',
         caller: { kind: 'agent', workspaceId: WS, tabId: 'tab-sm', tabName: 'scrum-master', panelType: 'claude-code', identity: 'launch', verified: true },
+        explicit: true,
         reason: 'owner ruled the slice out of scope',
         interrupted: true,
         ok: true,
@@ -143,13 +144,13 @@ describe('POST /api/cli/tabs/[tabId]/steer (story 14)', { timeout: 15_000 }, () 
     });
 
     it.each([
-      ['no reason', { interrupt: true }, 'needs a reason'],
-      ['a blank reason', { interrupt: true, reason: '   ' }, 'needs a reason'],
-      ['a reason over 500 characters', { interrupt: true, reason: 'r'.repeat(501) }, 'at most 500'],
-      ['a reason that is not a string', { interrupt: true, reason: 7 }, 'must be a string'],
-      ['a reason without interrupt: true', { reason: 'why' }, 'only with interrupt: true'],
-      ['a reason with interrupt: false', { interrupt: false, reason: 'why' }, 'only with interrupt: true'],
-    ])('refuses %s with 400 steer-reason-invalid and touches nothing', async (_label, fields, text) => {
+      ['no reason', { interrupt: true }, 'reason: saw interrupt: true with no reason; expected a text of 1..500 characters'],
+      ['a blank reason', { interrupt: true, reason: '   ' }, 'reason: saw interrupt: true with a blank reason; expected a text of 1..500'],
+      ['a reason over 500 characters', { interrupt: true, reason: 'r'.repeat(501) }, 'reason: saw 501 characters; expected at most 500'],
+      ['a reason that is not a string', { interrupt: true, reason: 7 }, 'reason: saw number 7; expected a text of 1..500'],
+      ['a reason without interrupt: true', { reason: 'why' }, 'reason: saw a reason without interrupt; expected interrupt: true with the reason'],
+      ['a reason with interrupt: false', { interrupt: false, reason: 'why' }, 'reason: saw a reason with interrupt: false; expected interrupt: true'],
+    ])('refuses %s with 400 steer-reason-invalid, says what it saw and expected, and touches nothing', async (_label, fields, text) => {
       callers.resolveCaller.mockResolvedValue(tabCaller('tab-sm'));
       const result = await call({ content: 'x', ...fields });
       expect(result.status).toBe(400);
@@ -161,29 +162,49 @@ describe('POST /api/cli/tabs/[tabId]/steer (story 14)', { timeout: 15_000 }, () 
 
     it('refuses an interrupt value that is not a boolean (400 invalid-request)', async () => {
       const result = await call({ content: 'x', interrupt: 'yes' });
-      expect(result).toEqual({ status: 400, body: { error: 'interrupt must be a boolean', code: 'invalid-request' } });
+      expect(result).toEqual({ status: 400, body: { error: 'interrupt: saw the string "yes"; expected true or false', code: 'invalid-request' } });
     });
   });
 
-  describe('AC3: every other caller keeps interrupt as the default', () => {
-    it.each([
-      ['a caller that names no tab (resolveCaller null)', () => null],
-      ['a workspace token without a tab', workspaceTokenCaller],
-      ['a terminal tab', () => tabCaller('tab-shell')],
-      ['a tab without a panel type', () => tabCaller('tab-legacy', 'session')],
-      ['a tab id the layout does not hold', () => tabCaller('tab-gone')],
-    ])('%s: sends Escape first, and writes no audit line', async (_label, make) => {
+  describe('AC3: every other caller keeps interrupt as the default, and every interrupt is audited (r2)', () => {
+    it.each<[string, () => ICaller | null, 'unidentified' | 'other', string | null]>([
+      ['a caller that names no tab (resolveCaller null)', () => null, 'unidentified', null],
+      ['a workspace token without a tab', workspaceTokenCaller, 'unidentified', null],
+      ['a tab id the layout does not hold', () => tabCaller('tab-gone'), 'unidentified', null],
+      ['a terminal tab', () => tabCaller('tab-shell'), 'other', 'terminal'],
+      ['a tab without a panel type', () => tabCaller('tab-legacy', 'session'), 'other', 'terminal'],
+    ])('%s: sends Escape first and writes one steer-interrupt line with reason "(none given)"', async (_label, make, kind, panelType) => {
       callers.resolveCaller.mockResolvedValue(make());
       const result = await call({ content: 'correct course' });
       expect(result).toEqual({ status: 200, body: { status: 'steered', interrupted: true } });
       expect(tmux.sendEscape).toHaveBeenCalledTimes(1);
-      expect(audit.appendCoordinationAudit).not.toHaveBeenCalled();
+      expect(audit.appendCoordinationAudit).toHaveBeenCalledTimes(1);
+      expect(audit.appendCoordinationAudit).toHaveBeenCalledWith(expect.objectContaining({
+        event: 'steer-interrupt',
+        tabId: TARGET,
+        caller: expect.objectContaining({ kind, panelType }),
+        explicit: false,
+        reason: '(none given)',
+        interrupted: true,
+        ok: true,
+      }));
     });
 
-    it('interrupt: false stays accepted from any other caller', async () => {
-      callers.resolveCaller.mockResolvedValue(tabCaller('tab-shell'));
-      expect((await call({ content: 'x', interrupt: false })).body).toEqual({ status: 'steered', interrupted: false });
+    it('a caller lookup that throws is unidentified: it interrupts and is audited', async () => {
+      callers.resolveCaller.mockRejectedValue(new Error('layout unreadable'));
+      expect((await call({ content: 'x' })).body).toEqual({ status: 'steered', interrupted: true });
+      expect(audit.appendCoordinationAudit).toHaveBeenCalledWith(expect.objectContaining({
+        caller: expect.objectContaining({ kind: 'unidentified', tabId: null, identity: 'none' }), reason: '(none given)',
+      }));
+    });
+
+    it('interrupt: false stays accepted from any other caller, and writes no line (nothing was interrupted)', async () => {
+      for (const make of [() => tabCaller('tab-shell'), workspaceTokenCaller]) {
+        callers.resolveCaller.mockResolvedValue(make());
+        expect((await call({ content: 'x', interrupt: false })).body).toEqual({ status: 'steered', interrupted: false });
+      }
       expect(tmux.sendEscape).not.toHaveBeenCalled();
+      expect(audit.appendCoordinationAudit).not.toHaveBeenCalled();
     });
 
     it('an explicit interrupt from any other caller also needs a reason and is audited', async () => {
@@ -191,7 +212,7 @@ describe('POST /api/cli/tabs/[tabId]/steer (story 14)', { timeout: 15_000 }, () 
       expect((await call({ content: 'x', interrupt: true })).body).toMatchObject({ code: 'steer-reason-invalid' });
       await call({ content: 'x', interrupt: true, reason: 'the owner typed it' });
       expect(audit.appendCoordinationAudit).toHaveBeenCalledWith(expect.objectContaining({
-        event: 'steer-interrupt', caller: expect.objectContaining({ kind: 'other', panelType: 'terminal' }), reason: 'the owner typed it',
+        event: 'steer-interrupt', caller: expect.objectContaining({ kind: 'other', panelType: 'terminal' }), explicit: true, reason: 'the owner typed it',
       }));
     });
   });
@@ -202,7 +223,8 @@ describe('POST /api/cli/tabs/[tabId]/steer (story 14)', { timeout: 15_000 }, () 
       const result = await call({ content: 'Read the brief.\nThen watch the load.' }, 'tab-shell');
       expect(result.status).toBe(400);
       expect(result.body).toMatchObject({ code: 'terminal-not-command-line', tabId: 'tab-shell', panelType: 'terminal', lines: 2 });
-      expect(String(result.body.error)).toContain('terminal tab');
+      expect(String(result.body.error)).toContain('is a terminal tab, whose shell runs each line as a command: saw 2 lines; expected one shell command line');
+      expect(String(result.body.error)).toContain('A multi-line command (a heredoc, a quoted multi-line string, a backslash continuation) needs --raw');
       expect(tmux.sendEscape).not.toHaveBeenCalled();
       expect(delivery.deliverPrompt).not.toHaveBeenCalled();
     });
@@ -220,7 +242,7 @@ describe('POST /api/cli/tabs/[tabId]/steer (story 14)', { timeout: 15_000 }, () 
     });
 
     it('refuses a raw value that is not a boolean', async () => {
-      expect(await call({ content: 'x', raw: 1 })).toEqual({ status: 400, body: { error: 'raw must be a boolean', code: 'invalid-request' } });
+      expect(await call({ content: 'x', raw: 1 })).toEqual({ status: 400, body: { error: 'raw: saw number; expected true or false', code: 'invalid-request' } });
     });
   });
 

@@ -440,7 +440,7 @@ describe('usage errors exit 2', () => {
     [['tab', 'send', '-w', 'WS']],
     [['tab', 'send', '-w', 'WS', 'tab-x']],
     [['tab', 'send', 'tab-x', 'hi']],
-    [['tab', 'send', '-w', 'WS', 'tab-x', 'hi', '--wait-ms']],
+    [['tab', 'send', '-w', 'WS', 'tab-x', '--wait-ms']],
     [['tab', 'send', '-w', 'WS', '--wait-ms', '240001', 'tab-x', 'hi']],
     [['nonsense']],
     [['tab', 'status']],
