@@ -59,7 +59,8 @@ export const buildRemoteClaudeCommand = (opts: {
 
 /**
  * The remote half of the pre-trust (D14, ruling R-05, story 05 consult ruling): the same keys as
- * workspace-trust.ts, written into the remote user's `~/.claude.json` for the tab's cwd by an atomic
+ * workspace-trust.ts (each key only when its REAL path is inside the workspace directory's real path),
+ * written into the remote user's `~/.claude.json` for the tab's cwd by an atomic
  * read-modify-write (a temporary in the same directory, then one rename). A remote tab has no claude home
  * of its own (ADR-0022), so its Claude reads that file. Python, not node: `ssh … sh -s` reads no login
  * profile, and on the pool hosts `node` is on PATH only in a login shell (measured on mdserver1). Exit 0:
@@ -93,24 +94,28 @@ def main_repository_root(git_root):
     return os.path.dirname(common_dir) if os.path.basename(common_dir) == '.git' else None
 
 def main(cwd, workspace_dir):
-    abs_cwd, real_cwd = os.path.abspath(cwd), os.path.realpath(cwd)
-    abs_ws, real_ws = os.path.abspath(workspace_dir), os.path.realpath(workspace_dir)
-    if not (within(real_cwd, real_ws) or within(abs_cwd, abs_ws)):
+    # Real paths only (review r1 BLOCK): a symlink inside the workspace that points out of it, or a
+    # <ws>/link/.. form, leaves the workspace when the process resolves it; a lexical match never counts.
+    real_cwd, real_ws = os.path.realpath(cwd), os.path.realpath(workspace_dir)
+    if not os.path.isdir(real_cwd) or not within(real_cwd, real_ws):
         return 3
-    keys = {abs_cwd, real_cwd}
-    if within(real_cwd, real_ws):
-        current = real_cwd
-        while True:
-            if os.path.lexists(os.path.join(current, '.git')):
-                keys.add(current)
-                main_root = main_repository_root(current)
-                if main_root and within(main_root, real_ws):
-                    keys.add(main_root)
-                break
-            parent = os.path.dirname(current)
-            if current == real_ws or parent == current or not within(parent, real_ws):
-                break
-            current = parent
+    candidates = [os.path.abspath(cwd), real_cwd]
+    current = real_cwd
+    while True:
+        if os.path.lexists(os.path.join(current, '.git')):
+            candidates.append(current)
+            main_root = main_repository_root(current)
+            if main_root:
+                candidates.append(main_root)
+            break
+        parent = os.path.dirname(current)
+        if current == real_ws or parent == current or not within(parent, real_ws):
+            break
+        current = parent
+    keys = []
+    for key in candidates:
+        if key not in keys and os.path.exists(key) and within(os.path.realpath(key), real_ws):
+            keys.append(key)
     target = os.path.realpath(os.path.join(os.path.expanduser('~'), '.claude.json'))
     try:
         with open(target, encoding='utf-8') as handle:
@@ -125,7 +130,7 @@ def main(cwd, workspace_dir):
     if not isinstance(projects, dict):
         projects = {}
     changed = False
-    for key in sorted(keys):
+    for key in keys:
         entry = projects.get(key)
         if entry is not None and not isinstance(entry, dict):
             continue

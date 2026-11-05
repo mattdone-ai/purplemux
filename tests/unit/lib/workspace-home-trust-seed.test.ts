@@ -115,6 +115,36 @@ describe('seedProjectDecisions with a tab cwd (story 05)', () => {
     });
   });
 
+  // Review r1 nit 2: several tabs launched together each add their own key; none is lost.
+  it('keeps every key when twelve launches seed the same home at once, and leaves no temporary', async () => {
+    await writeOwnerConfig({});
+    const cwds = Array.from({ length: 12 }, (_, i) => path.join(workspace, '.worktrees', `w${i}`));
+    for (const cwd of cwds) {
+      await fs.mkdir(cwd, { recursive: true });
+      await fs.writeFile(path.join(cwd, '.git'), 'gitdir: elsewhere\n');
+    }
+    const { seedProjectDecisions } = await import('@/lib/workspace-home');
+
+    await Promise.all(cwds.map((cwd) => seedProjectDecisions(claudeHome, [workspace], cwd)));
+
+    const { projects } = await readJson(path.join(claudeHome, '.claude.json'));
+    for (const cwd of cwds) expect(projects[cwd]).toMatchObject({ hasTrustDialogAccepted: true });
+    expect((await fs.readdir(claudeHome)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('a failed seed does not stop the next one queued behind it', async () => {
+    await writeOwnerConfig({});
+    const { seedProjectDecisions } = await import('@/lib/workspace-home');
+    const missingHome = path.join(mockHome.value, 'no-such-home');
+    const results = await Promise.allSettled([
+      seedProjectDecisions(missingHome, [workspace], workspace),
+      seedProjectDecisions(claudeHome, [workspace], workspace),
+    ]);
+    expect(results[0].status).toBe('rejected');
+    expect(results[1].status).toBe('fulfilled');
+    expect((await readJson(path.join(claudeHome, '.claude.json'))).projects[workspace]).toMatchObject({ hasTrustDialogAccepted: true });
+  });
+
   it('ensureWorkspaceClaudeHome passes the tab cwd through to the seed', async () => {
     await writeOwnerConfig({});
     await fs.mkdir(path.join(mockHome.value, '.purplemux'), { recursive: true });

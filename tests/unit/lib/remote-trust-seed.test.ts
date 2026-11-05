@@ -114,6 +114,44 @@ describe('the remote trust-seed script (story 05 AC 2)', () => {
     expect(seed(`${workspace}-sibling`).status).toBe(3);
   });
 
+  // Review r1 BLOCK: the real path decides, here as in workspace-trust.ts.
+  it('seeds nothing for a symlink inside the workspace that points out of it (exit 3)', () => {
+    const outside = path.join(home, 'elsewhere');
+    fs.mkdirSync(path.join(outside, '.git'), { recursive: true });
+    fs.symlinkSync(outside, path.join(workspace, 'link'));
+    expect(seed(path.join(workspace, 'link')).status).toBe(3);
+    expect(fs.existsSync(path.join(home, '.claude.json'))).toBe(false);
+  });
+
+  it('seeds nothing for <ws>/link/.. when the link points out (exit 3)', () => {
+    const outside = path.join(home, 'far', 'away');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.symlinkSync(outside, path.join(workspace, 'link'));
+    expect(seed(`${workspace}/link/..`).status).toBe(3);
+    expect(fs.existsSync(path.join(home, '.claude.json'))).toBe(false);
+  });
+
+  it('still seeds through a symlinked workspace directory, at both spellings of the cwd', () => {
+    const real = path.join(home, 'real-ws');
+    fs.mkdirSync(path.join(real, 'sub'), { recursive: true });
+    const link = path.join(home, 'linked-ws');
+    fs.symlinkSync(real, link);
+    expect(seed(path.join(link, 'sub'), link).status).toBe(0);
+    expect(Object.keys(config().projects).sort()).toEqual([path.join(link, 'sub'), path.join(real, 'sub')].sort());
+  });
+
+  it('never writes a main repository root whose real path leaves the workspace through a symlink', () => {
+    const realRepo = path.join(home, 'outside-repo');
+    fs.mkdirSync(path.join(realRepo, '.git', 'worktrees', 'wt'), { recursive: true });
+    fs.writeFileSync(path.join(realRepo, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
+    fs.symlinkSync(realRepo, path.join(workspace, 'repo-link'));
+    const worktree = path.join(workspace, 'wt');
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${workspace}/repo-link/.git/worktrees/wt\n`);
+    expect(seed(worktree).status).toBe(0);
+    expect(Object.keys(config().projects)).toEqual([worktree]);
+  });
+
   it('never climbs past the workspace directory to a git root above it', () => {
     const inner = path.join(workspace, 'packages');
     fs.mkdirSync(path.join(inner, 'a'), { recursive: true });

@@ -148,6 +148,44 @@ describe('resolveTrustTargets (real directories)', () => {
     expect(await resolveTrustTargets(`${workspace}-sibling`, [workspace])).toBeNull();
   });
 
+  // Review r1 BLOCK: the real path decides; a lexical path inside the workspace never qualifies.
+  it('seeds nothing for a symlink inside the workspace that points out of it', async () => {
+    const workspace = path.join(root, 'ws');
+    const outside = path.join(root, 'elsewhere');
+    await fs.mkdir(workspace);
+    await fs.mkdir(path.join(outside, '.git'), { recursive: true });
+    await fs.symlink(outside, path.join(workspace, 'link'));
+    expect(await resolveTrustTargets(path.join(workspace, 'link'), [workspace])).toBeNull();
+  });
+
+  it('seeds nothing for <ws>/link/.. when the link points out (the process resolves the link first)', async () => {
+    const workspace = path.join(root, 'ws');
+    const outside = path.join(root, 'far', 'away');
+    await fs.mkdir(workspace);
+    await fs.mkdir(outside, { recursive: true });
+    await fs.symlink(outside, path.join(workspace, 'link'));
+    expect(await resolveTrustTargets(`${workspace}/link/..`, [workspace])).toBeNull();
+  });
+
+  it('never writes a main repository root whose real path leaves the workspace through a symlink', async () => {
+    const workspace = path.join(root, 'ws');
+    const realRepo = path.join(root, 'outside-repo');
+    await fs.mkdir(workspace);
+    await fs.mkdir(path.join(realRepo, '.git', 'worktrees', 'wt'), { recursive: true });
+    await fs.writeFile(path.join(realRepo, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
+    await fs.symlink(realRepo, path.join(workspace, 'repo-link'));
+    const worktree = path.join(workspace, 'wt');
+    await fs.mkdir(worktree);
+    await fs.writeFile(path.join(worktree, '.git'), `gitdir: ${workspace}/repo-link/.git/worktrees/wt\n`);
+    expect((await resolveTrustTargets(worktree, [workspace]))?.keys).toEqual([worktree]);
+  });
+
+  it('seeds nothing for a cwd that does not exist (its real path cannot be read)', async () => {
+    const workspace = path.join(root, 'ws');
+    await fs.mkdir(workspace);
+    expect(await resolveTrustTargets(path.join(workspace, 'missing'), [workspace])).toBeNull();
+  });
+
   it('matches through a symlinked workspace directory and writes both spellings of the cwd', async () => {
     const real = path.join(root, 'real-ws');
     await fs.mkdir(path.join(real, 'sub'), { recursive: true });

@@ -152,6 +152,22 @@ describe('paneStartupPrompt (story 05, D14)', () => {
     expect(paneStartupPrompt('claude-code', quoted)).toBeNull();
   });
 
+  // Review r1 nit 4: a transcript that quotes both dialog lines, unprefixed, with a TYPED composer under them.
+  it('never reads a quoted dialog above a typed composer as the dialog', () => {
+    const quoted = ' Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n────────\n❯ why did the tab stop here\n────────\n';
+    expect(paneStartupPrompt('claude-code', quoted)).toBeNull();
+    const imports = '  Allow external CLAUDE.md file imports?\n  ❯ No, disable external imports\n────────\n❯ typed\n────────\n';
+    expect(paneStartupPrompt('claude-code', imports)).toBeNull();
+  });
+
+  it('needs the option line after the heading: an option quoted above a heading is not the dialog', () => {
+    expect(paneStartupPrompt('claude-code', '   Yes, I trust this folder\n\n Accessing workspace:\n /x\n')).toBeNull();
+  });
+
+  it('reads the dialog with the selection moved to Yes (the selected option is the last line)', () => {
+    expect(paneStartupPrompt('claude-code', ' Accessing workspace:\n /x\n\n   No, exit\n ❯ Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n')).toBe('folder-trust');
+  });
+
   it('needs the heading and an option line: the heading alone is not the dialog', () => {
     expect(paneStartupPrompt('claude-code', ' Allow external CLAUDE.md file imports?\n')).toBeNull();
     expect(paneStartupPrompt('claude-code', '  ❯ No, disable external imports\n')).toBeNull();

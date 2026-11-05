@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -172,10 +173,41 @@ const readJson = async (file: string): Promise<Record<string, unknown>> => {
   }
 };
 
+/**
+ * A temporary of its own per write (pid + random, review r1 nit 2): two writers that shared `<file>.tmp`
+ * could rename a half-written file into place, and the loser's rename failed with ENOENT.
+ */
 const writeJsonAtomic = async (file: string, data: unknown): Promise<void> => {
-  const tmp = `${file}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  await fs.rename(tmp, file);
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await fs.rename(tmp, file);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+};
+
+// One seed at a time per config file, across every module copy in the process (the custom server and the
+// Next bundle each load this module): several tabs launched together each add their own key, and an
+// unserialized read-modify-write kept only the last writer's (review r1 nit 2). A live Claude Code in
+// another tab can still rewrite the file; that race is accepted and falls through to `startup-prompt`.
+const SEED_CHAINS_KEY = '__ptClaudeHomeSeedChains';
+const seedChains = (): Map<string, Promise<void>> => {
+  const g = globalThis as Record<string, unknown>;
+  if (!(g[SEED_CHAINS_KEY] instanceof Map)) g[SEED_CHAINS_KEY] = new Map<string, Promise<void>>();
+  return g[SEED_CHAINS_KEY] as Map<string, Promise<void>>;
+};
+
+const serializedPerFile = (file: string, work: () => Promise<void>): Promise<void> => {
+  const chains = seedChains();
+  const run = (chains.get(file) ?? Promise.resolve()).then(work, work);
+  const settled = run.then(() => {}, () => {});
+  chains.set(file, settled);
+  void settled.then(() => {
+    if (chains.get(file) === settled) chains.delete(file);
+  });
+  return run;
 };
 
 /**
@@ -192,6 +224,10 @@ const writeJsonAtomic = async (file: string, data: unknown): Promise<void> => {
  */
 export const seedProjectDecisions = async (home: string, directories: string[], cwd?: string): Promise<void> => {
   const target = path.join(home, '.claude.json');
+  await serializedPerFile(target, () => seedOnce(target, directories, cwd));
+};
+
+const seedOnce = async (target: string, directories: string[], cwd?: string): Promise<void> => {
   const current = await readJson(target);
   const source = await readJson(CLAUDE_STATE_FILE);
   const sourceProjects = (source.projects ?? {}) as Record<string, Record<string, unknown>>;

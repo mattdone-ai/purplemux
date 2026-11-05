@@ -305,7 +305,9 @@ option list (`paneShowsEmptyComposer`, the check the inbox runs, with the dim su
 placeholder removed), and the tab is still `inactive` with no event since the probe began, the poll
 fires a synthetic `session-start` and logs `readiness: pane-probe`. The first-run picker
 (`❯ 2. Dark mode`) stays `inactive`. A folder-trust or external-imports dialog (`paneStartupPrompt`: the
-dialog heading and one of its option lines, with no empty composer under them) moves the tab to
+dialog heading, then one of its option lines after it, both at line start, and no composer line (`❯`,
+empty or typed) after the last option line, since a real dialog draws no composer and a quoted
+transcript has one under it) moves the tab to
 `startup-prompt` silently and with no orchestrator nudge (story 05, D14). The probe keeps reading a
 `startup-prompt` tab: another dialog updates `startupPrompt`, an empty composer is the synthetic
 `session-start`, any other screen is `inactive` again (no nudge), and an agent that exited (`No, exit`)

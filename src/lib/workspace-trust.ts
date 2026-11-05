@@ -11,8 +11,8 @@ import path from 'path';
  * imports approval at the MAIN repository root: for a worktree, the checkout its `.git` file points back
  * to (measured 2026-11-05: accepting the dialog in `repo/.worktrees/wt` wrote the approval at `repo`). A
  * worktree is its own git root, so the workspace directory above it never reaches it. The seed writes
- * the cwd, its git root and the main repository root, each only while it is inside the workspace
- * directory.
+ * the cwd, its git root and the main repository root, each only while its REAL path is inside a
+ * workspace directory's real path.
  */
 
 /** The keys Claude Code writes when a person accepts both dialogs (measured on 2.1.318). */
@@ -119,27 +119,39 @@ export const mainRepositoryRoot = async (gitRoot: string): Promise<string | null
   return path.basename(commonDir) === '.git' ? path.dirname(commonDir) : null;
 };
 
+/** The real path, or null when it cannot be read: a key the seed cannot place is never written. */
+const realOf = async (p: string): Promise<string | null> => fs.realpath(p).catch(() => null);
+
 /**
- * Where the seed writes for a local tab's cwd, or null when the cwd is outside every workspace directory.
- * Compared by real path, so a symlinked workspace directory or cwd still matches; the keys hold both
- * spellings when they differ, since Claude Code keys by the path its process sees.
+ * Where the seed writes for a local tab's cwd, or null when the cwd's REAL path is outside every workspace
+ * directory's real path (review r1 BLOCK, ruling R-05). The lexical path never qualifies a cwd: a symlink
+ * inside a workspace directory that points out of it, or a `<ws>/link/..` form, leaves the workspace when
+ * the process resolves it, and Claude Code keys trust by the path its process sees. Each key (the cwd as
+ * given, its real path, its git root, its main repository root) is written only when ITS real path is
+ * inside a workspace directory's real path; a key whose real path cannot be read is skipped.
  */
 export const resolveTrustTargets = async (cwd: string, directories: readonly string[]): Promise<ITrustTargets | null> => {
-  const resolvedCwd = path.resolve(cwd);
-  const realCwd = await realOrResolved(cwd);
-  const realDirs = await Promise.all(directories.map(async (dir) => ({ dir, real: await realOrResolved(dir), resolved: path.resolve(dir) })));
+  const realCwd = await realOf(cwd);
+  if (!realCwd) return null;
+  const realDirs = (await Promise.all(directories.map(async (dir) => ({ dir, real: await realOf(dir) }))))
+    .filter((candidate): candidate is { dir: string; real: string } => candidate.real !== null);
   let match: { dir: string; real: string } | null = null;
   for (const candidate of realDirs) {
-    const holds = isWithinDirectory(realCwd, candidate.real) || isWithinDirectory(resolvedCwd, candidate.resolved);
-    if (holds && (match === null || candidate.real.length > match.real.length)) match = candidate;
+    if (isWithinDirectory(realCwd, candidate.real) && (match === null || candidate.real.length > match.real.length)) match = candidate;
   }
   if (!match) return null;
-  const keys = new Set<string>([resolvedCwd, realCwd]);
-  const root = isWithinDirectory(realCwd, match.real) ? await gitRootWithin(realCwd, match.real) : null;
+  const candidates = [path.resolve(cwd), realCwd];
+  const root = await gitRootWithin(realCwd, match.real);
   if (root) {
-    keys.add(root);
+    candidates.push(root);
     const main = await mainRepositoryRoot(root);
-    if (main && isWithinDirectory(main, match.real)) keys.add(main);
+    if (main) candidates.push(main);
   }
-  return { workspaceDirectory: match.dir, keys: [...keys] };
+  const keys: string[] = [];
+  for (const key of candidates) {
+    if (keys.includes(key)) continue;
+    const real = await realOf(key);
+    if (real && realDirs.some((candidate) => isWithinDirectory(real, candidate.real))) keys.push(key);
+  }
+  return { workspaceDirectory: match.dir, keys };
 };
