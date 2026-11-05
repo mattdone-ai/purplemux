@@ -313,3 +313,15 @@ describe('the mc-question-v2 fixtures are valid served questions', () => {
     expect(verdict.ok ? [] : verdict.defects.map((entry) => entry.message)).toEqual([]);
   });
 });
+
+describe('selectedOptionLabels (ADR-0037 amendment D2; review r1 finding 4)', () => {
+  it('reads each id through the question\'s own options, and an id it lacks as neutral words, never the id', async () => {
+    const { OPTION_NOT_IN_QUESTION_LABEL, selectedOptionLabels } = await import('@/lib/mission-question-format');
+    const options = [{ id: 'keep', label: 'Keep re-gating' }, { id: '__proto__', label: 'Odd but real' }];
+    expect(selectedOptionLabels(options, ['keep', 'gone', '__proto__'])).toEqual(['Keep re-gating', OPTION_NOT_IN_QUESTION_LABEL, 'Odd but real']);
+    expect(selectedOptionLabels([], ['constructor', 'toString', 'hasOwnProperty'])).toEqual([
+      OPTION_NOT_IN_QUESTION_LABEL, OPTION_NOT_IN_QUESTION_LABEL, OPTION_NOT_IN_QUESTION_LABEL,
+    ]);
+    expect(OPTION_NOT_IN_QUESTION_LABEL).toBe('an option no longer in the question');
+  });
+});

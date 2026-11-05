@@ -58,6 +58,8 @@ const item = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionItem 
   evidenceLinks: [],
   lint: [],
   changes: null,
+  followsUp: null,
+  followedBy: null,
   createdAt: now - 60_000,
   updatedAt: now - 10_000,
   ...over,

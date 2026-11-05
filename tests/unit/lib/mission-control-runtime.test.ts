@@ -432,6 +432,8 @@ const snapshot = (runBinding: IMissionBinding | null = binding, runRevision = 4)
     evidenceLinks: [],
     lint: [],
     changes: null,
+    followsUp: null,
+    followedBy: null,
     createdAt: NOW,
     updatedAt: NOW,
   }],

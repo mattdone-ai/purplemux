@@ -151,6 +151,8 @@ The owner saw two items for one question, with no link between them.
    that answer still waits, the server never pastes it (the four guards above). So the 200 body carries
    `followedUp: {itemId, answerId, optionIds, optionLabels, text, resolved}`. The CLI prints it on one line:
    `follows up <id>: the owner answered <option labels, or "text only">: "<text>" (answer <id>); <id> is resolved`.
+   A batch with two or more follow-ups (of different targets) carries them as `followedUps: [...]` instead of
+   `followedUp` (consult ruling, story hfl2-01, 2026-11-05; additive under ADR-0004).
 5. **The served item.** Every item gains
    `followsUp: {itemId, title, answer: {optionIds, optionLabels, text, at}} | null` and
    `followedBy: {itemId, title, state} | null`. Each field names one step of a chain. Both fields are additive

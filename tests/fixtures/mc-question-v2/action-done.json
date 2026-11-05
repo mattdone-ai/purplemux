@@ -46,5 +46,7 @@
   "decision": "Pair your Pixel for wireless debugging.",
   "answerType": "action-done",
   "options": [],
-  "evidenceLinks": []
+  "evidenceLinks": [],
+  "followsUp": null,
+  "followedBy": null
 }

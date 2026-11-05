@@ -67,5 +67,7 @@
     "state": "filed",
     "orderId": "SO-12",
     "reason": null
-  }
+  },
+  "followsUp": null,
+  "followedBy": null
 }

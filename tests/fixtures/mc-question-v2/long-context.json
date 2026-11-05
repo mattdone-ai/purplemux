@@ -92,5 +92,7 @@
       "label": "Evidence 4",
       "url": "https://example.com/e/4"
     }
-  ]
+  ],
+  "followsUp": null,
+  "followedBy": null
 }
