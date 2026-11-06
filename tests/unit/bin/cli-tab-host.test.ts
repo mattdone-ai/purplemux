@@ -106,11 +106,20 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
     [400, 'remote-host-invalid', 2],
     [400, 'remote-type-unsupported', 2],
     [503, 'remote-host-unreachable', 6],
+    // Story 12: the kit's CLI does not run on the host; unmapped, so exit 1 (ADR-0016 item 10). Story 40 reads it.
+    [502, 'remote-kit-broken', 1],
   ])('HTTP %i %s exits %i', async (status, code, exit) => {
     reply = { status, body: { error: 'refused', code } };
     const result = await cli(['tab', 'create', '-w', 'ws-a', '--host', 'ai-server']);
     expect(result.code).toBe(exit);
     expect(result.stderr).toContain(code);
+  });
+
+  it('remote-kit-broken tells the caller a retry fails until the kit or the host is repaired', async () => {
+    reply = { status: 502, body: { error: 'the CLI kit does not run on ai-server', code: 'remote-kit-broken', host: 'ai-server', line: "Error: Cannot find module './x.js'" } };
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '--host', 'ai-server']);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('a retry fails the same way until a person repairs the kit or the host');
   });
 
   it('PMUX_URL sends every request to that server with the tab token, without a port file (ADR-0022)', async () => {

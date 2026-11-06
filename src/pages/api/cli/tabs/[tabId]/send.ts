@@ -17,6 +17,8 @@ import { isAgentPanelType } from '@/lib/agent-panel-types';
 import { getLedgerStore } from '@/lib/ledger-store';
 import { appendDelivered } from '@/lib/tab-event-router';
 import { createLogger } from '@/lib/logger';
+import { startupPromptFix, startupPromptLabel } from '@/lib/startup-prompt';
+import { parseRawFlag, rawRefusalText, terminalInputRefusal } from '@/lib/terminal-command-line';
 
 const log = createLogger('tab-send');
 
@@ -58,10 +60,12 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
 
   if (!(await authorizeWorkspaceInput(req, res, workspaceId))) return;
 
-  const { content, waitMs } = (req.body ?? {}) as { content?: string; waitMs?: unknown };
+  const { content, waitMs, raw: rawFlag } = (req.body ?? {}) as { content?: string; waitMs?: unknown; raw?: unknown };
   if (!content) {
     return res.status(400).json({ error: 'content is required' });
   }
+  const raw = parseRawFlag(rawFlag);
+  if (raw === null) return res.status(400).json({ error: rawRefusalText(rawFlag), code: 'invalid-request' });
   const timeoutMs = resolveSendWaitMs(waitMs);
   if (timeoutMs === null) {
     return res
@@ -92,11 +96,13 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
       findTarget: async (wsId, id) => {
         const found = await findTab(wsId, id);
         if (!found) return null;
+        const live = getStatusManager().getAllForClient()[id];
         return {
           sessionName: found.tab.sessionName,
           panelType: found.tab.panelType,
-          cliState: resolveTabCliState(found.tab, getStatusManager().getAllForClient()[id]),
+          cliState: resolveTabCliState(found.tab, live),
           waitingAtPrompt: getStatusManager().isWaitingAtPrompt(id),
+          startupPrompt: live?.startupPrompt?.kind ?? null,
         };
       },
       hasSession: hasSessionOrUnreachable,
@@ -109,6 +115,18 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
 
   if (!readiness.ok) {
     if (readiness.reason === 'tab-not-found') return res.status(404).json(TAB_NOT_FOUND_BODY);
+    if (readiness.reason === 'startup-prompt') {
+      // At once, with nothing typed: a paste would answer the dialog (D14).
+      return res.status(409).json({
+        error: 'agent-not-ready',
+        code: 'startup-prompt',
+        tabId,
+        cliState: readiness.cliState,
+        startupPrompt: readiness.startupPrompt,
+        startupPromptLabel: startupPromptLabel(readiness.startupPrompt),
+        detail: startupPromptFix(readiness.startupPrompt),
+      });
+    }
     return res.status(409).json({
       error: 'agent-not-ready',
       code: readiness.reason,
@@ -131,6 +149,12 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     }
     if (!await hasSessionOrUnreachable(latest.tab.sessionName)) {
       res.status(409).json({ error: 'agent-not-ready', code: 'session-not-running', tabId, detail: 'session-not-running' });
+      return false;
+    }
+    // A shell runs each line as a command (D30): multi-line text into a terminal tab needs raw: true.
+    const refusal = terminalInputRefusal(latest.tab, content, raw);
+    if (refusal) {
+      res.status(400).json(refusal);
       return false;
     }
     const policy = await checkPolicy({ consumeBootstrapForTarget: true });

@@ -15,12 +15,13 @@ const STATUS: Record<TStandingOrderErrorCode, number> = {
   'so-not-found': 404,
   'so-unreadable': 409,
   'so-struck': 409,
+  'so-proposal-refused': 409,
 };
 
 /** Every refusal carries `code`, which the CLI maps to its exit (ADR-0016). */
 export const sendStandingOrderError = (res: NextApiResponse, err: unknown): void => {
   if (isCodedError<StandingOrderError>(err, 'StandingOrderError', STATUS)) {
-    res.status(STATUS[err.code]).json({ error: err.message, code: err.code });
+    res.status(STATUS[err.code]).json({ error: err.message, code: err.code, ...(err.reason ? { reason: err.reason } : {}) });
     return;
   }
   log.error(`standing order route failed: ${err instanceof Error ? err.message : err}`);

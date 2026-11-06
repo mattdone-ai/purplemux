@@ -21,6 +21,17 @@ export const remoteHostUnreachableBody = (err: { message: string; host: string }
   host: err.host,
 });
 
+/**
+ * A remote create refused because the CLI kit does not run on the host (harness-flow-loop-2 story 12): 502, exit 1
+ * (ADR-0016). `line` names the cause (for example `Error: Cannot find module './x.js'`); no agent started.
+ */
+export const remoteKitBrokenBody = (err: { message: string; host: string; line: string }) => ({
+  error: err.message,
+  code: 'remote-kit-broken' as const,
+  host: err.host,
+  line: err.line,
+});
+
 export const targetChangedBody = (tabId: string) => ({
   error: 'agent-target-changed' as const,
   code: 'target-changed' as const,

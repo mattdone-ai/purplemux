@@ -1,5 +1,5 @@
 import type { TWakeClass } from '@/types/tab-events';
-import type { TCliState, TToolName } from '@/types/timeline';
+import type { TCliState, TStartupPrompt, TToolName } from '@/types/timeline';
 import type { TPanelType } from '@/types/terminal';
 import type { ISessionHistoryEntry } from '@/types/session-history';
 import type { IPermissionRequest } from '@/types/codex-permission';
@@ -41,6 +41,8 @@ export interface ITabStatusEntry {
   dismissedAt?: number | null;
   compactingSince?: number | null;
   permissionRequest?: IPermissionRequest | null;
+  /** The startup dialog a `startup-prompt` tab waits at, and since when (D14); null in every other state. */
+  startupPrompt?: IStartupPromptReading | null;
   processRetries?: number;
   jsonlPath?: string | null;
   lastEvent?: ILastEvent | null;
@@ -63,6 +65,11 @@ export interface ITabStatusEntry {
   turnEnd?: ITurnEndRecord | null;
   /** The provider-error episode this tab is in; a clean stop ends it (story 26). Runtime only. */
   turnError?: ITurnErrorEpisode | null;
+}
+
+export interface IStartupPromptReading {
+  kind: TStartupPrompt;
+  since: number;
 }
 
 export interface ITurnErrorEpisode {
@@ -132,6 +139,7 @@ export interface IStatusUpdateMessage {
   dismissedAt?: number | null;
   compactingSince?: number | null;
   permissionRequest?: IPermissionRequest | null;
+  startupPrompt?: IStartupPromptReading | null;
   lastEvent?: ILastEvent | null;
   eventSeq?: number;
 }

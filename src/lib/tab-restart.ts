@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { findTab } from '@/lib/cli-utils';
 import { withAgentDispatchLock } from '@/lib/agent-dispatch-policy';
 import { getStatusManager } from '@/lib/status-manager';
-import { hasSession, hasSessionOrUnreachable, killSession } from '@/lib/tmux';
+import { hasSession, hasSessionOrUnreachable, killSession, probeRemoteKit } from '@/lib/tmux';
 import { registerSessionHost } from '@/lib/session-host';
 import { emitTabRestart } from '@/lib/tab-lifecycle';
 import { markTabRestarted, mutateTabAtomically, restartTabSessionUnguarded } from '@/lib/layout-store';
@@ -150,6 +150,9 @@ const restartLocked = async (request: IRestartTabInput, run: IRestartRun): Promi
     registerSessionHost(tab.sessionName, tab.host);
     // Throws RemoteHostError before anything is killed (ADR-0028 §4): the caller answers 503.
     await hasSessionOrUnreachable(tab.sessionName);
+    // The create after the kill probes the kit; a broken kit must leave the old session alive (story 12 review r1).
+    // Throws RemoteKitBrokenError before anything is killed; the route answers it with its generic failure.
+    await probeRemoteKit(tab.sessionName);
   }
 
   emitTabRestart({ workspaceId, tabId, sessionName: tab.sessionName, restartId: run.restartId, phase: 'restarting' });

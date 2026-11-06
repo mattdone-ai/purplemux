@@ -172,33 +172,84 @@ export interface IOrderChange {
   workspaceId: string | null;
 }
 
+interface IAddPlan {
+  order: IStandingOrder;
+  updated: IStandingOrderFile;
+  next: number;
+  largest: { bytes: number; workspaceId: string | null };
+  /** How many workspaces' prompts the add reaches. */
+  reached: number;
+}
+
+/** The order an add would write and the largest prompt section it leaves; the caller holds the lock. Writes nothing. */
+const planAdd = async (owner: string, input: IOrderInput, knownWorkspaces: readonly string[], now: number): Promise<IAddPlan> => {
+  if (!isOrderOwner(owner)) throw new StandingOrderError('so-invalid', `an order belongs to the fleet or a workspace id ws-…, got ${JSON.stringify(owner)}`);
+  const fields = checkOrderInput(input, owner);
+  const files = await readAllOrderFilesLocked();
+  const mine = files.find((file) => file.owner === owner) ?? await readOrderFileLocked(owner);
+  const next = Math.max(await readHighWater(), ...files.flatMap((file) => file.orders.map((order) => orderNumber(order.id)))) + 1;
+  const order: IStandingOrder = { id: `SO-${next}`, ...fields, state: 'active', added: new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z') };
+  const updated = { owner, orders: [...mine.orders, order] };
+  const fleet = owner === FLEET ? updated : files[0];
+  let largest = { bytes: owner === FLEET ? sectionBytes(fleet.orders, []) : 0, workspaceId: null as string | null };
+  const reached = await reachedWorkspaces(owner, knownWorkspaces);
+  for (const ws of reached) {
+    const own = ws === owner ? updated : files.find((file) => file.owner === ws) ?? { owner: ws, orders: [] };
+    const bytes = sectionBytes(fleet.orders, own.orders);
+    if (bytes > largest.bytes) largest = { bytes, workspaceId: ws };
+  }
+  if (largest.bytes > STANDING_ORDERS_MAX_BYTES) {
+    throw new StandingOrderError('so-too-large',
+      `standing orders for ${largest.workspaceId ?? 'the fleet'} would be ${largest.bytes} bytes, at most ${STANDING_ORDERS_MAX_BYTES}: strike an order or shorten this one`,
+      undefined, { ...largest });
+  }
+  return { order, updated, next, largest, reached: reached.length };
+};
+
+const addOrderLocked = async (owner: string, input: IOrderInput, knownWorkspaces: readonly string[], now: number): Promise<IOrderChange> => {
+  const { order, updated, next, largest } = await planAdd(owner, input, knownWorkspaces, now);
+  await writeAtomic(orderSeqPath(), JSON.stringify({ high: next }));
+  await write(updated);
+  return { owner, order, ...largest };
+};
+
 /**
  * At most 8 KB of standing orders reach any one workspace's prompt (ADR-HFL-05 decision 4): an add that
  * would pass it is refused with the measured size. `knownWorkspaces` are the workspaces the fleet reaches.
  */
 export const addOrder = (owner: string, input: IOrderInput, knownWorkspaces: readonly string[], now: number): Promise<IOrderChange> =>
+  withLock(() => addOrderLocked(owner, input, knownWorkspaces, now));
+
+export interface IAddMeasure {
+  /** The largest prompt section the add would leave, and the workspace it is for. */
+  bytes: number;
+  workspaceId: string | null;
+  /** The workspaces whose prompt the add would reach. */
+  workspaces: number;
+}
+
+/** What an add would do, with the same checks and refusals as the add, writing nothing (ADR-0041 §1 amendment D7). */
+export const measureAdd = (owner: string, input: IOrderInput, knownWorkspaces: readonly string[], now: number): Promise<IAddMeasure> =>
   withLock(async () => {
-    if (!isOrderOwner(owner)) throw new StandingOrderError('so-invalid', `an order belongs to the fleet or a workspace id ws-…, got ${JSON.stringify(owner)}`);
-    const fields = checkOrderInput(input, owner);
-    const files = await readAllOrderFilesLocked();
-    const mine = files.find((file) => file.owner === owner) ?? await readOrderFileLocked(owner);
-    const next = Math.max(await readHighWater(), ...files.flatMap((file) => file.orders.map((order) => orderNumber(order.id)))) + 1;
-    const order: IStandingOrder = { id: `SO-${next}`, ...fields, state: 'active', added: new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z') };
-    const updated = { owner, orders: [...mine.orders, order] };
-    const fleet = owner === FLEET ? updated : files[0];
-    let largest = { bytes: owner === FLEET ? sectionBytes(fleet.orders, []) : 0, workspaceId: null as string | null };
-    for (const ws of await reachedWorkspaces(owner, knownWorkspaces)) {
-      const own = ws === owner ? updated : files.find((file) => file.owner === ws) ?? { owner: ws, orders: [] };
-      const bytes = sectionBytes(fleet.orders, own.orders);
-      if (bytes > largest.bytes) largest = { bytes, workspaceId: ws };
-    }
-    if (largest.bytes > STANDING_ORDERS_MAX_BYTES) {
-      throw new StandingOrderError('so-too-large',
-        `standing orders for ${largest.workspaceId ?? 'the fleet'} would be ${largest.bytes} bytes, at most ${STANDING_ORDERS_MAX_BYTES}: strike an order or shorten this one`);
-    }
-    await writeAtomic(orderSeqPath(), JSON.stringify({ high: next }));
-    await write(updated);
-    return { owner, order, ...largest };
+    const plan = await planAdd(owner, input, knownWorkspaces, now);
+    return { ...plan.largest, workspaces: plan.reached };
+  });
+
+export type TAddOnce = { change: IOrderChange; existing?: undefined } | { change?: undefined; existing: string };
+
+/**
+ * An add that one hold of the host lock guards: `guard` reads every file first and names an order that already
+ * stands for this add (nothing is written), throws to refuse, or returns null to add (ADR-0041 §1 amendment D7: one
+ * order for one owner answer, whoever runs the step).
+ */
+export const addOrderOnce = (
+  owner: string, input: IOrderInput, knownWorkspaces: readonly string[], now: number,
+  guard: (files: readonly IStandingOrderFile[]) => string | null,
+): Promise<TAddOnce> =>
+  withLock(async () => {
+    const existing = guard(await readAllOrderFilesLocked());
+    if (existing) return { existing };
+    return { change: await addOrderLocked(owner, input, knownWorkspaces, now) };
   });
 
 /** Find an order by id in any file; the caller holds the lock. */

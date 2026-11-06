@@ -13,9 +13,12 @@ import {
   formatMissionAge,
 } from '@/components/features/mission-control/mission-control-utils';
 import QuestionMarkdown from '@/components/features/mission-control/question-markdown';
+import { ProposalOutcome } from '@/components/features/mission-control/proposal-outcome';
 import {
   answerTypeHint,
   changedFields,
+  followedByView,
+  followsUpView,
   hasVisibleRevision,
   noticeOptionLabel,
   isContextCollapsible,
@@ -145,6 +148,44 @@ const OriginalWording = ({ source }: { source: Record<string, unknown> }) => {
         )}
       </div>
     </details>
+  );
+};
+
+/** "Follows up: <earlier title>" with the owner's earlier answer and a link to the earlier card (ADR-0037 amendment D2). */
+export const FollowsUpNote = ({ item }: { item: Pick<IMissionAttentionItem, 'followsUp'> }) => {
+  const view = followsUpView(item);
+  if (!view) return null;
+  return (
+    <div className="space-y-1 rounded-md border border-foreground/10 bg-muted/40 px-3 py-2 text-sm" data-follows-up>
+      <p className="break-words">
+        <span className="text-muted-foreground">Follows up: </span>
+        <a href={view.href} className="font-medium text-ui-blue underline-offset-2 hover:underline">{view.title}</a>
+      </p>
+      {view.choices === null
+        ? <p className="text-xs text-muted-foreground">Your earlier answer is not available.</p>
+        : (
+          <p className="break-words text-xs text-foreground/80" data-follows-up-answer>
+            <span className="text-muted-foreground">You answered: </span>{view.choices}
+            {view.text && <> · <q className="select-text">{view.text}</q></>}
+          </p>
+        )}
+    </div>
+  );
+};
+
+/** "Followed up by: <new title>" with a link, and the state the earlier card is in (ADR-0037 amendment D2). */
+export const FollowedByNote = ({ item }: { item: Pick<IMissionAttentionItem, 'followedBy' | 'state'> }) => {
+  const view = followedByView(item);
+  if (!view) return null;
+  const own = itemStateLabel(item.state);
+  const next = itemStateLabel(view.state);
+  return (
+    <p className="break-words text-sm" data-followed-by>
+      <span className="font-medium" title={own.served ? `Served state: ${own.served}` : undefined}>{own.label}</span>
+      <span className="text-muted-foreground"> · Followed up by: </span>
+      <a href={view.href} className="font-medium text-ui-blue underline-offset-2 hover:underline">{view.title}</a>
+      <span className="text-muted-foreground" title={next.served ? `Served state: ${next.served}` : undefined}> ({next.label.toLowerCase()})</span>
+    </p>
   );
 };
 
@@ -391,12 +432,15 @@ const MissionControlAnswerCard = ({
           <span>·</span>
           <span>{confidenceLabel(item)}</span>
         </div>
+        <FollowsUpNote item={item} />
         <CardTitle id={headingId} className="select-text break-words text-lg font-semibold leading-7">{view.heading}</CardTitle>
         {view.subtitle && <p className="select-text break-words text-xs text-muted-foreground">{view.subtitle}</p>}
         {view.whyNow && <p className="select-text break-words text-sm text-foreground/80" data-why-now>{view.whyNow}</p>}
       </CardHeader>
       <CardContent className="space-y-4 px-4 pb-4 sm:px-5 sm:pb-5">
         {view.blocked && <BlockedCost blocked={view.blocked} />}
+        <ProposalOutcome proposal={item.proposal} />
+        <FollowedByNote item={item} />
         <RevisionNotice draft={draft} />
 
         {item.humanReview?.humanNeed !== 'none' && item.humanReview?.humanReason && (
@@ -602,6 +646,7 @@ export const MissionControlDeliveryCard = ({
         </div>
         <div>
           <p className="break-words text-sm font-medium">{item.title}</p>
+          {item.proposal && <div className="mt-2"><ProposalOutcome proposal={item.proposal} /></div>}
           {answer && (
             <p className="mt-1 break-words text-sm text-muted-foreground">
               {answer.text || (answer.actionCompleted ? 'Action marked complete' : `${answer.optionIds.length} option selected`)}

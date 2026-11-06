@@ -24,6 +24,11 @@ vi.mock('@/lib/tmux', async (importOriginal) => ({
   getAllPanesInfo: vi.fn(async () => new Map()),
 }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await import('@/lib/status-manager');
+
 const entry = (cliState: ITabStatusEntry['cliState'], panelType: ITabStatusEntry['panelType']): ITabStatusEntry => ({
   cliState, workspaceId: 'ws-1', tabName: 't', tmuxSession: 's', panelType,
 });

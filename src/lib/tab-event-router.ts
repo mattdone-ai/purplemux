@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
 import { createLogger } from '@/lib/logger';
 import { NUDGE_PREFIX } from '@/lib/orchestration';
+import { STANDUP_DUE_KIND } from '@/lib/standup';
 import type { TabEventsTable } from '@/lib/tab-events-store';
 import type { IPendingDigest, ITabEvent, TWakeClass } from '@/types/tab-events';
 
@@ -91,6 +92,8 @@ const READ_WITH = / — read with: purplemux tab result -w \S+ \S+$/;
 
 const digestLine = (event: ITabEvent): string => {
   const flat = event.text.replace(/\s+/g, ' ').trim();
+  // The due line is the server's own text and names no worker: it reads as itself (story hfl2-10).
+  if (event.kind === STANDUP_DUE_KIND) return `- ${hhmm(event.at)}Z ${flat}`;
   const body = (flat.startsWith(NUDGE_PREFIX) ? flat.slice(NUDGE_PREFIX.length).trim() : flat).replace(READ_WITH, '');
   const clipped = body.length > DIGEST_LINE_CHARS ? `${body.slice(0, DIGEST_LINE_CHARS - 1)}…` : body;
   return `- ${hhmm(event.at)}Z ${event.kind}: ${clipped}`;
@@ -102,16 +105,21 @@ export const appendDelivered = (table: TabEventsTable, event: ITabEventRoute, at
 
 /**
  * One message for every waiting event (ADR-HFL-05 decision 2): `DIGEST <n> since <time>`, a line per
- * event while they fit, then the pointer to the full list. At most DIGEST_MAX_BYTES in all.
+ * event while they fit, then the pointer to the full list. At most DIGEST_MAX_BYTES in all. A standup due
+ * line leads, so the 2 KB cut never drops the line that made the digest due (story hfl2-10).
  */
 export const renderDigest = (events: readonly ITabEvent[], workspaceId: string, tabId: string): string => {
-  const since = iso(events[0].at);
+  const since = iso(Math.min(...events.map((event) => event.at)));
   const header = `DIGEST ${events.length} since ${since}`;
   const pointer = (shown: number) => (shown === events.length
     ? `Full text: purplemux events show -w ${workspaceId} ${tabId} --since ${since}`
     : `${events.length - shown} more: purplemux events show -w ${workspaceId} ${tabId} --since ${since}`);
+  const ordered = [
+    ...events.filter((event) => event.kind === STANDUP_DUE_KIND),
+    ...events.filter((event) => event.kind !== STANDUP_DUE_KIND),
+  ];
   const lines: string[] = [];
-  for (const event of events) {
+  for (const event of ordered) {
     const next = [header, ...lines, digestLine(event), pointer(lines.length + 1)].join('\n');
     if (bytes(next) > DIGEST_MAX_BYTES) break;
     lines.push(digestLine(event));
@@ -282,7 +290,10 @@ export class TabEventRouter {
       if (!pending.length) return false;
       const now = this.deps.now();
       const last = table.lastDigestAt(workspaceId, tabId);
-      const due = pending.length >= DIGEST_MAX_WAITING || last === null || now - last >= DIGEST_INTERVAL_MS;
+      // A held standup due line makes the digest due at once (story hfl2-10, consult ruling b; ADR-0035 §3). Only that
+      // kind skips the interval: the hold, the prompt and the settle window below still decide.
+      const due = pending.length >= DIGEST_MAX_WAITING || last === null || now - last >= DIGEST_INTERVAL_MS
+        || pending.some((event) => event.kind === STANDUP_DUE_KIND);
       if (!due || this.deps.holdDigest?.(tabId) || !this.deps.atPrompt(tabId) || !this.settled(table, workspaceId, tabId)) return false;
       const message = renderDigest(pending, workspaceId, tabId);
       const delivered = await this.paste(workspaceId, tabId, message,
@@ -318,6 +329,23 @@ export class TabEventRouter {
         this.deps.onStale?.({ workspaceId, tabId, count, oldestAt });
       }
       if (this.deps.atPrompt(tabId)) await this.flush(workspaceId, tabId);
+    }
+  }
+
+  /**
+   * The tab's held events of one kind become `log` rows: a newer event replaces them, or a standup posted since makes a
+   * held due line false (story hfl2-10). Returns how many; 0 when the log cannot be written.
+   */
+  retireKind(workspaceId: string, tabId: string, kind: string): number {
+    const table = this.tableOrNull();
+    if (!table) return 0;
+    try {
+      const retired = table.retirePendingKind(workspaceId, tabId, kind);
+      if (retired) log.info({ workspaceId, tabId, kind, retired }, 'held tab events retired: replaced');
+      return retired;
+    } catch (err) {
+      log.warn(`held ${kind} events of ${tabId} not retired: ${err instanceof Error ? err.message : err}`);
+      return 0;
     }
   }
 

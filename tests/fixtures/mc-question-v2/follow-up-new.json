@@ -1,0 +1,83 @@
+{
+  "id": "q-follow-new",
+  "workspaceId": "ws-fixture",
+  "runId": "run-fixture",
+  "revision": 1,
+  "state": "open",
+  "storyIds": [],
+  "blockingScope": "story",
+  "canContinue": true,
+  "recommendation": null,
+  "context": "The owner chose the trial in text; the lane needs the trial's scope before it starts.",
+  "evidence": {
+    "source": "agent",
+    "sourceId": "evt-q-follow-new",
+    "observedAt": 1762135200000,
+    "confidence": "confirmed"
+  },
+  "answerId": null,
+  "resolution": null,
+  "humanReview": {
+    "humanNeed": "decision",
+    "humanReason": "Only the owner can choose this.",
+    "handling": "The orchestrator checked the epic documents; they leave this open.",
+    "reviewerTabId": "tab-orch",
+    "binding": {
+      "tabId": "tab-orch",
+      "providerId": "claude",
+      "sessionId": "session-1",
+      "generation": 1,
+      "runtimeGeneration": "launch-1"
+    },
+    "eventId": "evt-review",
+    "reviewedAt": 1762128000000
+  },
+  "candidateReason": null,
+  "class": "scope",
+  "defaultOptionId": null,
+  "autoAnswer": null,
+  "lint": [],
+  "changes": null,
+  "createdAt": 1762135200000,
+  "updatedAt": 1762135200000,
+  "formatVersion": 2,
+  "kind": "question",
+  "title": "Gate re-run policy: trial scope",
+  "decision": "Which lanes does the 7-day trial cover?",
+  "whyNow": "The trial starts at the next landing window.",
+  "answerType": "single",
+  "options": [
+    {
+      "id": "all",
+      "label": "Every lane",
+      "consequence": "The trial measures the whole queue.",
+      "recommended": true,
+      "needsText": false
+    },
+    {
+      "id": "v2",
+      "label": "The v2 lane only",
+      "consequence": "The other lanes keep re-gating.",
+      "recommended": false,
+      "needsText": false
+    }
+  ],
+  "recommendationWhy": "One lane gives too few landings in 7 days to judge the guard.",
+  "evidenceLinks": [],
+  "followsUp": {
+    "itemId": "q-follow-earlier",
+    "title": "Gate re-run policy",
+    "answer": {
+      "optionIds": [
+        "trial"
+      ],
+      "optionLabels": [
+        "Trial it for 7 days"
+      ],
+      "text": "Trial it, but tell me which lanes first.",
+      "at": 1762131600000
+    }
+  },
+  "followedBy": null,
+  "proposal": null
+}

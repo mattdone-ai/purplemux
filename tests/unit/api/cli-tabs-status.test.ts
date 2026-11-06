@@ -116,6 +116,15 @@ describe('GET /api/cli/tabs/[tabId]/status', () => {
     expect((await get()).body).toMatchObject({ alive: false, turnEnd });
   });
 
+  it('reports a startup prompt with its label and since when, and nothing of it in any other state (story 05, D14)', async () => {
+    statusManager.getAllForClient.mockReturnValue({ 'tab-1': { cliState: 'startup-prompt', agentSessionId: null, startupPrompt: { kind: 'folder-trust', since: 7 } } });
+    expect((await get()).body).toMatchObject({
+      cliState: 'startup-prompt', startupPrompt: 'folder-trust', startupPromptLabel: 'the folder-trust prompt', startupPromptSince: 7,
+    });
+    statusManager.getAllForClient.mockReturnValue({ 'tab-1': { cliState: 'idle', agentSessionId: null, startupPrompt: null } });
+    expect((await get()).body).not.toHaveProperty('startupPromptLabel');
+  });
+
   it('reports the tab\'s identity (story 36)', async () => {
     expect((await get()).body).toMatchObject({ identity: 'hook' });
   });

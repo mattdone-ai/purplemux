@@ -104,6 +104,28 @@ describe('GET /api/cli/tabs status fields', () => {
     expect(body.tabs.map((t) => [t.tabId, t.identity])).toEqual([['tab-busy', 'launch'], ['tab-new', 'hook'], ['tab-sh', 'none']]);
   });
 
+  it('names a startup prompt in words beside the token, only for a tab in that state (story 05, D14)', async () => {
+    statuses.value = {
+      'tab-busy': { cliState: 'startup-prompt', startupPrompt: { kind: 'external-imports', since: 42 }, lastEvent: null, busySince: null },
+    };
+    const { body } = await listTabs();
+    expect(body.tabs[0]).toMatchObject({
+      tabId: 'tab-busy',
+      cliState: 'startup-prompt',
+      startupPrompt: 'external-imports',
+      startupPromptLabel: 'the external CLAUDE.md imports prompt',
+      startupPromptSince: 42,
+    });
+    expect(body.tabs[1]).not.toHaveProperty('startupPrompt');
+    expect(body.tabs[1]).not.toHaveProperty('startupPromptLabel');
+  });
+
+  it('a startup prompt whose kind this build does not know reads as a neutral word', async () => {
+    statuses.value = { 'tab-busy': { cliState: 'startup-prompt', startupPrompt: { kind: 'theme-picker', since: 1 }, lastEvent: null, busySince: null } };
+    const { body } = await listTabs();
+    expect(body.tabs[0]).toMatchObject({ startupPrompt: null, startupPromptLabel: 'a Claude Code startup prompt' });
+  });
+
   it('reports null for a tab that has neither a live nor a persisted state', async () => {
     const { body } = await listTabs();
     expect(body.tabs[2]).toMatchObject({ tabId: 'tab-sh', cliState: null, lastEvent: null, busySince: null });

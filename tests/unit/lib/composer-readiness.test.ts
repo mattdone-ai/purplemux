@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
-import { checkComposerReady, paneShowsEmptyComposer } from '@/lib/composer-readiness';
+import { checkComposerReady, paneShowsEmptyComposer, paneStartupPrompt } from '@/lib/composer-readiness';
 import type { TCliState } from '@/types/timeline';
 
 const EMPTY = 'done\n────────\n❯ \n────────\n';
@@ -88,6 +88,9 @@ describe('suggestion-aware readiness (story 17, L7)', () => {
     ['a fresh Claude, 80x24 detached (dim placeholder)', 'claude-fresh-80x24.ansi', true],
     ['a fresh Claude, 200x60', 'claude-fresh-200x60.ansi', true],
     ['a trust prompt (❯ No, exit)', 'claude-trust-prompt.ansi', false],
+    ['a trust prompt above 23 blank rows (2.1.318, 120x40)', 'claude-trust-prompt-120x40.ansi', false],
+    ['the external-imports dialog', 'claude-external-imports-prompt.ansi', false],
+    ['a composer above 26 blank rows (2.1.318, 120x40: the rows no longer push it out of the window)', 'claude-external-imports-accepted.ansi', true],
     ['the first-run theme picker (❯ 2. Dark mode)', 'claude-onboarding-theme.ansi', false],
   ])('paneShowsEmptyComposer: %s → %s', (_label, name, ready) => {
     expect(paneShowsEmptyComposer('claude-code', pane(name))).toBe(ready);
@@ -118,5 +121,74 @@ describe("a Codex approval dialog the tab does not know about (ppc-48, option C)
     });
 
     expect(result).toEqual({ ok: false, reason: 'interactive-prompt-active' });
+  });
+});
+
+// D14 (story 05): the Claude Code startup dialogs no hook reports. Real captures: `claude-trust-prompt.ansi`
+// (2026-09-26) and, from Claude Code 2.1.318 on 2026-11-05 (120x40, a scratch CLAUDE_CONFIG_DIR),
+// `claude-trust-prompt-120x40.ansi`, `claude-external-imports-prompt.ansi` and the same pane after the
+// prompt was accepted, `claude-external-imports-accepted.ansi`. The three 2026-11-04 incidents
+// (ws-zOfVyu D14, hfl-37, hfl-38) showed these same dialogs; no capture of them was kept.
+describe('paneStartupPrompt (story 05, D14)', () => {
+  it.each([
+    ['the folder-trust dialog (2026-09-26)', 'claude-trust-prompt.ansi', 'folder-trust'],
+    ['the folder-trust dialog (2.1.318, 120x40)', 'claude-trust-prompt-120x40.ansi', 'folder-trust'],
+    ['the external-imports dialog, No selected (hfl-38 shape)', 'claude-external-imports-prompt.ansi', 'external-imports'],
+    ['the composer after the imports dialog was accepted', 'claude-external-imports-accepted.ansi', null],
+    ['an empty composer', 'claude-empty-composer.ansi', null],
+    ['the first-run theme picker', 'claude-onboarding-theme.ansi', null],
+    ['a fresh Claude, 80x24', 'claude-fresh-80x24.ansi', null],
+  ])('%s → %s', (_label, name, kind) => {
+    expect(paneStartupPrompt('claude-code', pane(name))).toBe(kind);
+  });
+
+  it('reads the older numbered trust wording', () => {
+    const older = ' Do you trust the files in this folder?\n\n /home/mdone/portfolio\n\n ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to exit\n';
+    expect(paneStartupPrompt('claude-code', older)).toBe('folder-trust');
+  });
+
+  it('never reads the dialog wording in a conversation above an empty composer', () => {
+    const quoted = '⏺ The tab stopped at:\nAccessing workspace:\nYes, I trust this folder\n\n────────\n❯ \n────────\n';
+    expect(paneStartupPrompt('claude-code', quoted)).toBeNull();
+  });
+
+  // Review r1 nit 4: a transcript that quotes both dialog lines, unprefixed, with a TYPED composer under them.
+  it('never reads a quoted dialog above a typed composer as the dialog', () => {
+    const quoted = ' Accessing workspace:\n\n ❯ No, exit\n   Yes, I trust this folder\n\n────────\n❯ why did the tab stop here\n────────\n';
+    expect(paneStartupPrompt('claude-code', quoted)).toBeNull();
+    const imports = '  Allow external CLAUDE.md file imports?\n  ❯ No, disable external imports\n────────\n❯ typed\n────────\n';
+    expect(paneStartupPrompt('claude-code', imports)).toBeNull();
+  });
+
+  it('needs the option line after the heading: an option quoted above a heading is not the dialog', () => {
+    expect(paneStartupPrompt('claude-code', '   Yes, I trust this folder\n\n Accessing workspace:\n /x\n')).toBeNull();
+  });
+
+  it('reads the dialog with the selection moved to Yes (the selected option is the last line)', () => {
+    expect(paneStartupPrompt('claude-code', ' Accessing workspace:\n /x\n\n   No, exit\n ❯ Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n')).toBe('folder-trust');
+  });
+
+  it('needs the heading and an option line: the heading alone is not the dialog', () => {
+    expect(paneStartupPrompt('claude-code', ' Allow external CLAUDE.md file imports?\n')).toBeNull();
+    expect(paneStartupPrompt('claude-code', '  ❯ No, disable external imports\n')).toBeNull();
+  });
+
+  // Synthetic (no capture was kept): the 2026-11-05 ai-server incident, a UserPromptSubmit hook that failed and
+  // restored the prompt with "Original prompt:". It is not a startup dialog and must not read as one.
+  it('does not read a hook-blocked prompt as a startup dialog', () => {
+    const blocked = '⏺ UserPromptSubmit operation blocked by hook:\n  hook exited 127\n\n  Original prompt: Read the brief\n\n────────\n❯ Read the brief\n────────\n';
+    expect(paneStartupPrompt('claude-code', blocked)).toBeNull();
+  });
+
+  it('knows no startup dialog outside Claude Code', () => {
+    expect(paneStartupPrompt('codex-cli', pane('claude-trust-prompt.ansi'))).toBeNull();
+    expect(paneStartupPrompt('terminal', pane('claude-external-imports-prompt.ansi'))).toBeNull();
+    expect(paneStartupPrompt(undefined, pane('claude-trust-prompt.ansi'))).toBeNull();
+  });
+
+  it('a composer check refuses a startup-prompt tab before it reads the pane', async () => {
+    const { result, capture } = check('startup-prompt', { pane: pane('claude-trust-prompt.ansi') });
+    expect(await result).toEqual({ ok: false, reason: 'composer-not-ready:startup-prompt' });
+    expect(capture).not.toHaveBeenCalled();
   });
 });

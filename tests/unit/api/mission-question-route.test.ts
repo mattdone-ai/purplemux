@@ -7,7 +7,10 @@ import type { ICaller } from '@/lib/caller';
 // without the write; the min-version key is the admin's.
 
 // `itemStates`: the events route reads the touched items' states before applying (story 33 R2).
-const store = vi.hoisted(() => ({ applyEvents: vi.fn(), unreplayedEventIds: vi.fn(), humanInboxPolicy: vi.fn(), itemStates: vi.fn(() => new Map()) }));
+const store = vi.hoisted(() => ({
+  applyEvents: vi.fn(), unreplayedEventIds: vi.fn(), humanInboxPolicy: vi.fn(), itemStates: vi.fn(() => new Map()),
+  followUpRefusal: vi.fn((_input: unknown): unknown => null),
+}));
 const scope = vi.hoisted(() => ({ resolveCliScope: vi.fn() }));
 const fleet = vi.hoisted(() => ({ value: null as string | null, unreadable: false }));
 
@@ -68,6 +71,7 @@ beforeEach(() => {
   fleet.unreadable = false;
   scope.resolveCliScope.mockReturnValue({ type: 'workspace', workspaceId: 'ws-a' });
   store.applyEvents.mockReturnValue({ events: [], cursor: 0, replayed: false });
+  store.followUpRefusal.mockReturnValue(null);
   store.unreplayedEventIds.mockImplementation((events: Array<{ eventId: string }>) => new Set(events.map((e) => e.eventId)));
   store.humanInboxPolicy.mockReturnValue({ version: 1, legacyReviewPending: 0 });
 });
@@ -187,6 +191,73 @@ describe('class: absent lint on a human-reviewed item (story 36, D6)', () => {
     expect((await check(v2)).body).toMatchObject({ ok: true, lint: [] });
     expect((await call('@/pages/api/cli/mission-control/questions/check', { question: { ...v2, class: 'money' }, humanReview: review })).body)
       .toMatchObject({ ok: true, lint: [] });
+  });
+});
+
+describe('follow-ups (ADR-0037 amendment D2)', () => {
+  const review = { humanNeed: 'decision', humanReason: 'Only the owner decides.', handling: 'Checked.', reviewerTabId: 'tab-o' };
+  const checkFollowUp = (extra: Record<string, unknown>) =>
+    call('@/pages/api/cli/mission-control/questions/check', { question: v2, humanReview: review, ...extra });
+
+  it('the events route passes followsUp to the store beside the question, and its 200 body carries followedUp', async () => {
+    const followedUp = { itemId: 'item-a', answerId: 'ans-1', optionIds: ['keep'], optionLabels: ['Keep'], text: 'T', resolved: true };
+    store.applyEvents.mockReturnValue({ events: [], cursor: 3, replayed: false, followedUp });
+    const r = await post([event('e-f', { ...v2, humanReview: review, followsUp: 'item-a' })]);
+    expect(r.status).toBe(200);
+    expect(r.body.followedUp).toEqual(followedUp);
+    const [events] = store.applyEvents.mock.calls[0] as [Array<{ payload: Record<string, unknown> }>];
+    expect(events[0].payload.followsUp).toBe('item-a');
+  });
+
+  it('a 409 refusal carries the followsUp detail in its body', async () => {
+    const { MissionControlError } = await import('@/lib/mission-control-errors');
+    store.applyEvents.mockImplementation(() => {
+      throw new MissionControlError(409, 'conflict', 'already followed up', undefined,
+        { followsUp: { reason: 'already-followed', followedBy: 'item-b', tip: 'item-c' } });
+    });
+    const r = await post([event('e-f', { ...v2, humanReview: review, followsUp: 'item-a' })]);
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ code: 'conflict', followsUp: { reason: 'already-followed', followedBy: 'item-b', tip: 'item-c' } });
+  });
+
+  it('refuses followsUp on attention.updated with 400 invalid-request, before the store', async () => {
+    const r = await post([{ ...event('e-u', { ...v2, followsUp: 'item-a' }), type: 'attention.updated', expectedRevision: 1 }]);
+    expect(r).toMatchObject({ status: 400, body: { code: 'invalid-request', error: 'followsUp is set when an item opens; a link never changes' } });
+    expect(store.applyEvents).not.toHaveBeenCalled();
+  });
+
+  it('the check route reports a refused follow-up as a defect of field followsUp, with its code, and keeps the question', async () => {
+    const { MissionControlError } = await import('@/lib/mission-control-errors');
+    store.followUpRefusal.mockReturnValue(new MissionControlError(409, 'conflict', 'follow-up target item-a is not answered yet', undefined,
+      { followsUp: { reason: 'not-answered' } }));
+    const r = await checkFollowUp({ followsUp: 'item-a', itemId: 'item-b', runId: 'run-a' });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.defects).toEqual([expect.objectContaining({
+      field: 'followsUp', code: 'conflict', status: 409, followsUp: { reason: 'not-answered' },
+      message: 'followsUp: follow-up target item-a is not answered yet',
+    })]);
+    expect(r.body.question).toMatchObject({ decision: v2.decision });
+    expect(store.followUpRefusal).toHaveBeenCalledWith({
+      workspaceId: 'ws-a', runId: 'run-a', itemId: 'item-b', followsUp: 'item-a', humanReview: { humanNeed: 'decision' },
+    });
+  });
+
+  it('the check route passes a follow-up the store accepts, and checks nothing when the body names none', async () => {
+    expect((await checkFollowUp({ followsUp: 'item-a', itemId: 'item-b', runId: 'run-a' })).body.ok).toBe(true);
+    store.followUpRefusal.mockClear();
+    expect((await checkFollowUp({})).body.ok).toBe(true);
+    expect(store.followUpRefusal).not.toHaveBeenCalled();
+  });
+
+  it('the check route answers forbidden for another workspace token, and invalid-request without the ids', async () => {
+    scope.resolveCliScope.mockReturnValue({ type: 'workspace', workspaceId: 'ws-other' });
+    expect((await checkFollowUp({ followsUp: 'item-a', itemId: 'item-b', runId: 'run-a' })).body.defects)
+      .toEqual([expect.objectContaining({ field: 'followsUp', code: 'forbidden', status: 403 })]);
+    scope.resolveCliScope.mockReturnValue({ type: 'workspace', workspaceId: 'ws-a' });
+    expect((await checkFollowUp({ followsUp: 'item-a' })).body.defects)
+      .toEqual([expect.objectContaining({ field: 'followsUp', code: 'invalid-request', status: 400 })]);
+    expect(store.followUpRefusal).not.toHaveBeenCalled();
   });
 });
 

@@ -54,6 +54,18 @@ const V2_FIELDS = new Set([
 const V2_OPTION_FIELDS = new Set(['id', 'label', 'consequence', 'recommended', 'needsText']);
 const V2_EVIDENCE_FIELDS = new Set(['label', 'url']);
 
+/** What an owner face shows for a selected option id that the question no longer holds: never the id (ADR-0037 amendment D2). */
+export const OPTION_NOT_IN_QUESTION_LABEL = 'an option no longer in the question';
+
+/**
+ * The labels of the selected options, read from one label map of the question's own options (own-property check, so
+ * an id such as `constructor` never reads a prototype member). An id the question lacks reads as the neutral words.
+ */
+export const selectedOptionLabels = (options: ReadonlyArray<{ id: string; label: string }>, optionIds: readonly string[]): string[] => {
+  const labels: Record<string, string> = Object.fromEntries(options.map((option) => [option.id, option.label]));
+  return optionIds.map((optionId) => (Object.hasOwn(labels, optionId) ? labels[optionId] : OPTION_NOT_IN_QUESTION_LABEL));
+};
+
 export const defect = (field: string, measured: string, limit: string): IMissionQuestionDefect => ({
   field,
   measured,

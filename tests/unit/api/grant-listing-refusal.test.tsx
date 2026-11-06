@@ -38,6 +38,17 @@ vi.mock('@/lib/workspace-token', async (importOriginal) => ({
   resolveCliScope: () => scopeHolder.scope,
 }));
 
+// The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
+// (story hfl2-53). Load it once here, at collection, outside every test's budget; the tests' own imports
+// resolve to this instance.
+await Promise.all([
+  import('@/pages/api/grants'),
+  import('@/pages/api/cli/grants'),
+  import('@/lib/grant-store'),
+  import('@/lib/cli-utils'),
+  import('@/components/features/workspace/portfolio-grants-panel'),
+]);
+
 const TAB_A: TCliScope = { type: 'workspace', workspaceId: 'ws-1', tabId: 'tab-a', tabVerified: true, tabIdentity: 'launch' };
 const TAB_O: TCliScope = { type: 'workspace', workspaceId: 'ws-1', tabId: 'tab-o', tabVerified: true, tabIdentity: 'launch' };
 const STATES = ['both readable', 'drive refused', 'owner refused', 'both refused'] as const;

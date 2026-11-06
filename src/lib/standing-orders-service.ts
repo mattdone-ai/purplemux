@@ -1,7 +1,11 @@
 import type { ICaller } from '@/lib/caller';
 import { createLogger } from '@/lib/logger';
-import { StandingOrderError, orderChangeLine, type IOrderInput, type IStandingOrder } from '@/lib/standing-orders';
-import { FLEET, addOrder, readAllOrderFiles, readOrderFile, strikeOrder, type IOrderChange } from '@/lib/standing-orders-store';
+import {
+  StandingOrderError, orderChangeLine, type IOrderInput, type IStandingOrder, type IStandingOrderFile,
+} from '@/lib/standing-orders';
+import {
+  FLEET, addOrder, addOrderOnce, readAllOrderFiles, readOrderFile, strikeOrder, type IOrderChange,
+} from '@/lib/standing-orders-store';
 import type { ITabEventRoute, ITabEventRouteResult } from '@/lib/tab-event-router';
 import { classifyWake } from '@/lib/wake-class';
 
@@ -56,6 +60,19 @@ export const addStandingOrder = async (
   mayChangeOrders(caller, owner);
   const change = await addOrder(owner, input, owner === FLEET ? await deps.workspaceIds() : [], deps.now());
   return fanOut(deps, change, 'added');
+};
+
+/**
+ * A fleet add that files at most one order for one cause (ADR-0041 §1 amendment D7): `guard` runs under the same hold
+ * of the host lock as the add and names the order that already stands for it. Only an add fans out.
+ */
+export const addFleetOrderOnce = async (
+  deps: IStandingOrderDeps, caller: ICaller, input: IOrderInput, guard: (files: readonly IStandingOrderFile[]) => string | null,
+): Promise<{ result: IStandingOrderResult; existing?: undefined } | { result?: undefined; existing: string }> => {
+  mayChangeOrders(caller, FLEET);
+  const once = await addOrderOnce(FLEET, input, await deps.workspaceIds(), deps.now(), guard);
+  if (once.existing !== undefined) return { existing: once.existing };
+  return { result: await fanOut(deps, once.change, 'added') };
 };
 
 export const strikeStandingOrder = async (

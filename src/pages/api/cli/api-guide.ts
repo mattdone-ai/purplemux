@@ -81,7 +81,9 @@ to an exit code through one table:
                                                  orchestration-recovery-required
      4  target gone (permanent)                  tab-not-found, session-not-running,        NEVER
                                                  target-changed
-     5  not ready yet                            readiness-timeout                          yes, bounded
+     5  not ready yet                            readiness-timeout;                         yes, bounded
+                                                 startup-prompt (an agent at a Claude       (startup-prompt:
+                                                 Code startup dialog; nothing typed)        after it is answered)
      6  server unreachable                       server-unreachable: connection refused,    yes, bounded
                                                  no port configured, a read interrupted;    (routes-absent:
                                                  routes-absent (404 without JSON: no such   no, until the
@@ -126,6 +128,10 @@ to an exit code through one table:
      2  usage error (standing orders, ADR-0041)  so-invalid, so-too-large                   fix the command, or strike an order
      3  refused by state (orders, ADR-0041)      so-unreadable, so-struck                   after the file is repaired
      7  not found (standing orders, ADR-0041)    so-not-found                               —
+     3  refused by state (proposal, ADR-0041)    so-proposal-refused (reason duplicate,     after the state changes
+                                                 open-proposal or no-orchestrator-run)
+     2  usage error (steer and send, story 14)   steer-reason-invalid,                      fix the command
+                                                 terminal-not-command-line
 
 The CLI writes the code and its class to stderr, e.g.
   error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
@@ -341,7 +347,9 @@ POST /api/cli/tabs
   "host" runs the tab's tmux on that host over ssh (ADR-0022). It must be listed in fleet config
   remote.hosts, else 400 { "code": "remote-host-invalid" }; terminal and claude-code tabs run remote,
   codex-cli and grok-cli do not: 400 { "code": "remote-type-unsupported" } (both CLI exit 2). A host that does not answer
-  over ssh is 503 { "code": "remote-host-unreachable", "host" } (exit 6). The pane gets
+  over ssh is 503 { "code": "remote-host-unreachable", "host" } (exit 6). The kit's CLI runs once
+  on the host before the session starts; when it does not run there, 502 { "code": "remote-kit-broken",
+  "host", "line" } (exit 1; "line" names the cause, e.g. a missing module) and no agent starts. The pane gets
   PMUX_TAB_ID, PMUX_WORKSPACE_ID, PMUX_URL (this server) and its own tab token, never the
   workspace token. A remote claude-code tab's hooks, transcript and CLI reach this server, so
   status, result, send, close and the watchdog work as for a local tab; status serves "host".
@@ -433,7 +441,7 @@ POST /api/cli/tabs/<tabId>/restart?workspaceId=WS
        prints "ok TAB_ID restarted (resumed)" or "(fresh)".
 
 POST /api/cli/tabs/<tabId>/send?workspaceId=WS
-  Body: { "content": "...", "waitMs"?: 0..600000 }
+  Body: { "content": "...", "waitMs"?: 0..600000, "raw"?: boolean }
   Send text to the tab and press Enter. Typed into Claude Code, bracketed paste elsewhere.
   For an agent tab (claude-code / codex-cli / grok-cli) the send waits until the tab can
   accept a turn, up to waitMs (default 60000). A booting agent swallows the Enter after a
@@ -443,13 +451,55 @@ POST /api/cli/tabs/<tabId>/send?workspaceId=WS
   404 { "error": "Tab not found", "code": "tab-not-found" }
   409 { "error": "agent-not-ready", "code", "tabId", "cliState", "detail": "readiness-timeout" | "session-not-running", "waitedMs"? }
     — nothing was pasted, so a later Enter cannot submit a half-forgotten prompt.
+  409 { "error": "agent-not-ready", "code": "startup-prompt", "tabId", "cliState", "startupPrompt":
+      "folder-trust" | "external-imports" | null, "startupPromptLabel", "detail" } — at once, with no
+      wait: the agent waits at a Claude Code startup dialog, and a paste would answer it. Answer the
+      dialog in the tab, or create the tab with --cwd under a workspace directory (pre-trusted).
   409 { "error": "agent-target-changed", "code": "target-changed", "tabId" } — the tab was replaced.
   tab-not-found, session-not-running and target-changed are permanent (CLI exit 4): never
-  retry them. readiness-timeout is retryable (CLI exit 5), a bounded number of times.
+  retry them. readiness-timeout is retryable (CLI exit 5), a bounded number of times;
+  startup-prompt (also exit 5) only after someone answers the dialog.
+  400 { "code": "terminal-not-command-line", "tabId", "panelType": "terminal", "lines", "error" } (exit 2,
+    D30): the target is a terminal tab and the text holds more than one line (trailing line breaks
+    are not counted). A shell runs each line as a command, so prose fails line by line. Nothing is
+    typed. The error says "saw N lines; expected one shell command line". A multi-line command (a
+    heredoc, a quoted multi-line string, a backslash continuation) needs raw: true (--raw); prose
+    belongs in an agent tab.
+
+POST /api/cli/tabs/<tabId>/steer?workspaceId=WS
+  Body: { "content": "...", "interrupt"?: boolean, "reason"?: "1..500 chars", "raw"?: boolean }
+  A mid-turn correction. With interrupt, the server sends Escape first (the agent stops its turn and
+  keeps its session), then types the content; without it, the content is typed into the composer
+  and waits for the turn to end. Own workspace only (403 forbidden, exit 3, for the admin token or
+  another workspace).
+  Interrupt default (story 14): a caller that is an agent tab (claude-code / codex-cli / grok-cli,
+  named by its tab token or its tmux session, ADR-0010) does NOT interrupt by default. Any other
+  caller tab (a terminal tab) and any caller that names no tab, or a tab the layout does not hold
+  ("unidentified"), interrupts by default, as before. interrupt: false is accepted from every
+  caller. interrupt: true needs a reason from every caller.
+  The classification is ADVISORY, not access control: a process with the workspace token that sends
+  no tab identity is "unidentified" and gets the interrupt default. The audit is the record: EVERY
+  steer that interrupts, by default or on request, appends one "steer-interrupt" line to
+  ~/.purplemux/audit/coordination.jsonl: the target, the caller (kind agent | other | unidentified,
+  tab, panel type, identity), explicit, the reason ("(none given)" for a default interrupt) and
+  whether the Escape landed.
+  CLI: purplemux tab steer -w WS TAB_ID [--interrupt --reason TEXT | --no-interrupt] [--raw] CONTENT...
+       Flags are read only before the content (for tab send too): every word from the content on is
+       sent byte for byte ("tab send T git log --raw" types "git log --raw"), and -- ends the flags.
+  Response: { "status": "steered", "interrupted": boolean }
+  400 { "code": "steer-reason-invalid" } (exit 2): interrupt: true without a reason, a reason over
+    500 characters, or a reason without interrupt: true. Nothing is typed. The error text says what
+    it saw and what it expected.
+  400 { "code": "terminal-not-command-line", ... } (exit 2): as for send (D30).
+  404 tab-not-found, 409 target-changed and session-not-running: as for send (exit 4).
 
 GET /api/cli/tabs/<tabId>/status?workspaceId=WS
   Response: { "tabId", "workspaceId", "alive", "command", "cliState", "agentProviderId", "agentSessionId", "claudeSessionId",
               "probes": [...], "backgroundJobs": [...], "turnEnd": {...} | null, "identity" }
+  cliState "startup-prompt": the agent waits at a Claude Code startup dialog that no hook reports
+  (folder trust, external CLAUDE.md imports); the row then also carries "startupPrompt"
+  ("folder-trust" | "external-imports" | null), "startupPromptLabel" (words for a person) and
+  "startupPromptSince" (ms). tab list rows carry the same three fields in that state.
   probes/backgroundJobs are the tab's registered liveness watch (see "Liveness watch"),
   so an idle tab that is HOLDING dead background work is distinguishable from an idle
   tab that is done.
@@ -635,7 +685,11 @@ body are never typed. Every note view carries fromLabel, the same server-made wo
 before the line is delivered, the note re-routes. One reminder reaches the recipient 30 min after
 the line reached its composer, and one notice reaches the sender's tab (if live) at 60 min; no
 more. A note unacked or undeliverable for 14 days expires (one notice to a live sender); acked and
-expired notes are pruned 14 days later. At turn start, run \`note list --open --to-me\`.
+expired notes are pruned 14 days later. An ack with a comment sends the sender's tab one fixed line,
+"[purplemux note n-…] acked by <ws>/<tab> at <time> with a comment — purplemux note show n-…": the
+comment is never typed, and the sender reads it as ackComment with note show. The line is queued
+when the sender's tab is live or its state is unknown; nothing goes to a closed tab, to a sender with
+no tab, or for an ack with no comment. At turn start, run \`note list --open --to-me\`.
 
 A routed note reads state "pending" while its notice waits in the inbox, "held" while the inbox
 holds it, and "delivered" only after the notice reached a composer (deliveredAt, also
@@ -664,6 +718,8 @@ GET /api/cli/notes/<id>
 POST /api/cli/notes/<id>/ack
   Same-workspace notes: the recipient workspace. Cross-workspace and legacy unknown-source notes:
   the verified currently routed recipient coordinator. Body: { "comment"? (≤ 500) }.
+  A non-empty comment queues one "acked … with a comment" line to the sender's tab (above); the
+  comment itself is pulled with note show.
   Response: { "note" } in state "acked". 404 note-not-found (exit 7); 403 forbidden (exit 3),
   also for a note that is not delivered.
 
@@ -731,8 +787,22 @@ POST /api/cli/standing-orders   { "text", "source", "workspaceId"?, "scope"?, "c
 POST /api/cli/standing-orders/<SO-n>/strike   { "reason" }
   The same authority as the order's file. 404 so-not-found; 409 so-struck when already struck (exit 3).
   The order stays in its file with "struck: <UTC> — <reason>".
-CLI: purplemux so add (-w WS | --fleet) --text T --source S [--scope S] [--check C]; so strike
-SO-N --reason R; so list [-w WS] [--all] [--json].
+POST /api/cli/standing-orders/proposals   { "text", "why", "cites"?, "scope"?, "check"? }
+  ADR-0041 §1 amendment D7: the launch tab of the selected portfolio manager only (selectedScrumMasterScope);
+  every other caller, the admin token included, gets 403 forbidden (exit 3). why: one line, at most 200;
+  cites: at most 300, the owner message the manager relays (into the item's context, never the order's
+  source). Checks before the item opens: 400 so-invalid, 400 so-too-large; 409 so-proposal-refused with
+  "reason": duplicate | open-proposal | no-orchestrator-run (exit 3). Then the server opens item
+  so-proposal-<16 hex text><8 hex time> on the manager's bound run: format 2, confirm (yes | no), class
+  scope, no default, nothing recommended. 201 { itemId, workspaceId, runId, workspaces, liveTabs, bytes }.
+  The owner's Yes files the fleet order as the server's admin caller with source "owner answer <answerId>
+  on MC item <itemId> (<UTC date>), proposed by <ws>/<tab>"; No, text alone, a withdrawal
+  (attention.cancelled) or 72 h with no answer files nothing. The item serves proposal: { state
+  (open | filed | declined | expired | withdrawn | not-filed), orderId, reason } | null; reason is a sentence,
+  and a not-filed code is recorded and audited, never served. For expired and not-filed the proposer tab
+  gets one "[purplemux standing order] proposal <itemId> …" line.
+CLI: purplemux so add (-w WS | --fleet) --text T --source S [--scope S] [--check C]; so propose --text T
+--why W [--cites C] [--scope S] [--check C]; so strike SO-N --reason R; so list [-w WS] [--all] [--json].
 
 ## Fleet config (ADR-0019)
 
@@ -753,6 +823,15 @@ Keys in use:
   watchdog.wait-backstop-hours
                Hours (0, 168], decimals allowed, a tab may wait on a live registered job or armed
                watch before its one "has been WAITING" nudge. Unset or invalid means 4.
+  standup.dueMin
+               Minutes [0, 1440], decimals allowed, the workspace's newest standup may age (a
+               workspace with none counts from the run's start) before the orchestrator hears
+               "standup due: last posted <N> min ago (purplemux standup report -w <WS>)". The
+               line goes once per due bucket (N, 2N, 4N ... min) while the orchestrator has a
+               busy, needs-input or ready-for-review worker, or with its idle heartbeat. It
+               makes the orchestrator's digest due at once, at its next prompt (ADR-0035 §3).
+               0 turns it off; unset or invalid means 45. Admin token only (exit 3 forbidden
+               for a tab).
   fleet-status.stall-minutes  fleet-status.waiting-long-minutes  fleet-status.unanswered-minutes
   fleet-status.composer-minutes
                The fleet flag thresholds (ADR-0023), in minutes (0, 10080], decimals allowed:
@@ -1747,6 +1826,10 @@ POST /api/cli/mission-control/events?workspaceId=WS
   by supplying that item's current revision. Resolution requires the saved answer to have been
   acknowledged first. Event IDs are stable idempotency keys: identical retries replay; changed
   content under the same ID returns 409.
+  NEEDS-DECISION items (ADR-0041 §2): an attention.opened whose itemId starts with nd-<16 hex>
+  while another item of that prefix is open returns 409 { "error": "an item for this
+  NEEDS-DECISION line is already open: <id>", "code": "already-open", "current": <the open item> }.
+  Do not open another: name the open item's id.
 
   Update an attention item:
   purplemux mission events -w WS --json '{"events":[{"eventId":"evt-question-update-1","schemaVersion":1,"workspaceId":"WS","runId":"run-1","expectedRevision":1,"producerAt":1700000000002,"bindingGeneration":1,"type":"attention.updated","payload":{"itemId":"question-1","kind":"question","title":"Choose rollout","context":"Choose the production rollout strategy","storyIds":[],"options":[{"id":"gradual","label":"Gradual"}],"recommendation":"gradual","blockingScope":"story","canContinue":true}}]}'
@@ -1851,10 +1934,33 @@ Question format v2 (ADR-0037):
   most one option on single and confirm, and gives text when a selected option has needsText
   (400 invalid-request otherwise).
 
+  A follow-up question (ADR-0037 amendment D2): an answer, text alone too, makes the item
+  "answered", and an answered item takes no attention.updated. To ask again, open a new item with
+  "followsUp": "<answered item id>" in the attention.opened payload, beside itemId and humanReview
+  (it is not a question field). In the same write the store links the new item to the earlier one,
+  acknowledges the earlier answer's delivery and resolves the earlier item with "Followed up by
+  <new id>." (event id system:follow-up:<new id>, reserved). The new item must carry a humanReview
+  whose humanNeed is not none (400 invalid-request). The 200 body carries "followedUp": { "itemId",
+  "answerId", "optionIds", "optionLabels", "text", "resolved" } (a batch with two or more follow-ups
+  carries "followedUps": [...] instead); read the answer there, since its paste is never sent. A
+  selected option id that the earlier question no longer holds is labelled "an option no longer in
+  the question", never the id.
+  "resolved" is false when the earlier item was already resolved: the store writes the link only.
+  Refusals write nothing: an open, candidate or cancelled target 409 with "followsUp": { "reason":
+  "not-answered" } (revise an open item with attention.updated instead); another run 409
+  "other-run"; a target already followed up 409 "already-followed" with "followedBy" and "tip"
+  (the last item of the chain: follow that one up); another workspace 403 forbidden; an unknown id
+  404; followsUp equal to the item's own id, or on attention.updated, 400 invalid-request. Every
+  served item carries "followsUp": { "itemId", "title", "answer": { "optionIds", "optionLabels",
+  "text", "at" } } | null and "followedBy": { "itemId", "title", "state" } | null.
+
 POST /api/cli/mission-control/questions/check?workspaceId=WS   { "question": { ... } }
   Any valid token. The events route's question check without the write: 200 { "ok", "formatVersion",
   "minVersion", "defects", "lint", "question" (normalized, null when refused), "reshape": {
-  "enabled", "reason" | null } }: enabled only where reshape-question routes in WS.
+  "enabled", "reason" | null } }: enabled only where reshape-question routes in WS. With
+  "followsUp", "itemId" and "runId" beside the question (a WS token only), it also answers the
+  follow-up refusal the events route would give, as a defect of field "followsUp" with its "code",
+  "status" and "followsUp" detail; nothing is written.
 
 POST /api/cli/mission-control/questions/reshape?workspaceId=WS   { "question": { ... } }
   A tab of WS, or admin. The curator's reshape of a refused draft (story 23). It posts nothing. 200 {
@@ -1872,6 +1978,11 @@ CLI equivalents:
   posted, or prints any lint and posts the event. --fix asks the curator reshape route: a
   "reshaped" draft is checked again and posted in the same command; any other outcome prints with
   the defects and exits 2. "mc" is "mission".
+  purplemux mc ask -w WS --json @DRAFT --follows-up ID [--fix]
+  Puts "followsUp": ID on the draft's attention.opened. A refused follow-up prints and exits 3
+  (not-answered, other-run, already-followed, forbidden), 7 (unknown ID) or 2 (no human review),
+  with nothing posted. On success it prints one line: follows up ID: the owner answered <labels, or
+  "text only">: "<text>" (answer <id>); ID is resolved. --fix keeps the field.
   purplemux mission snapshot -w WS
   purplemux mission bootstrap -w WS
   purplemux mission events -w WS --json '{"events":[...]}'

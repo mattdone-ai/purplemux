@@ -1,6 +1,7 @@
 import type {
   IFleetFlag, IFleetInbox, IFleetRow, IFleetTabFacts, IFleetThresholds, IFleetWait, TFleetFlag, TFleetState,
 } from '@/types/fleet-status';
+import { startupPromptLabel } from '@/lib/startup-prompt';
 
 // The pure half of the fleet status read model (ADR-0023): facts in, one row
 // out. Every rule here is a threshold on a stamp the server already holds; no
@@ -89,6 +90,8 @@ const stateOf = (facts: IFleetTabFacts): IStateResult => {
     case 'inactive':
       // The move to inactive leaves lastEvent alone: only the observed transition dates it.
       return { state: 'inactive', since: facts.inactiveSince };
+    case 'startup-prompt':
+      return { state: 'startup-prompt', since: status.startupPrompt?.since ?? null };
     default:
       return { state: 'unknown', since: lastAt };
   }
@@ -165,6 +168,10 @@ const flagsOf = (
     if (!finished && inState !== null && inState >= stallMs) {
       flags.push({ flag: 'stall', reason: `agent not running for ${formatDuration(inState)}` });
     }
+  } else if (state === 'startup-prompt') {
+    // A startup dialog never clears on its own and no hook reports it (D14): flagged at once.
+    const at = startupPromptLabel(facts.status?.startupPrompt?.kind);
+    flags.push({ flag: 'stall', reason: `waiting at ${at}${inState === null ? '' : ` for ${formatDuration(inState)}`}; answer it in the tab` });
   } else if (state === 'waiting') {
     const verdict = watchdogStall(facts, lastActivityAt, now);
     if (verdict) flags.push(verdict);

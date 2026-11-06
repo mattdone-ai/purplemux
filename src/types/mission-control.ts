@@ -152,6 +152,36 @@ export interface IMissionAutoAnswer {
   note: string;
 }
 
+/** A fleet standing-order proposal's record (ADR-0041 §1 amendment D7). */
+export const SO_PROPOSAL_STATES = ['open', 'filed', 'declined', 'expired', 'withdrawn', 'not-filed'] as const;
+export type TSoProposalState = (typeof SO_PROPOSAL_STATES)[number];
+
+export interface IMissionSoProposalRecord {
+  itemId: string;
+  workspaceId: string;
+  proposerTabId: string;
+  text: string;
+  scope: string;
+  checkName: string;
+  cites: string | null;
+  state: TSoProposalState;
+  answerId: string | null;
+  orderId: string | null;
+  /** The sentence the owner reads; never a code. */
+  reason: string | null;
+  /** The code behind a `not-filed` reason (ADR-0041 D7 rule 6), recorded for the audit and never served on the item. */
+  reasonCode: string | null;
+  createdAt: number;
+  decidedAt: number | null;
+}
+
+/** What an item serves of its proposal: the outcome the owner reads on the card. `reason` is a sentence, never a code. */
+export interface IMissionSoProposalView {
+  state: TSoProposalState;
+  orderId: string | null;
+  reason: string | null;
+}
+
 export type TMissionHumanReviewInput =
   | {
       humanNeed: 'none';
@@ -202,8 +232,56 @@ export interface IMissionAttentionItem extends Omit<IMissionQuestion, 'evidence'
   blocked?: IMissionBlockedCost;
   /** Owner messages the curator read as an answer to this item (story 23): links, never answers. Absent when none. */
   suggestedAnswers?: IMissionAnswerSuggestion[];
+  /**
+   * The fleet standing-order proposal this item asks about (ADR-0041 §1 amendment D7); null on every other item.
+   * Optional only for an item built by a release that did not serve it.
+   */
+  proposal?: IMissionSoProposalView | null;
+  /** The answered item this item follows up (ADR-0037 amendment D2), with the owner's answer to it; null when none. */
+  followsUp: IMissionFollowsUp | null;
+  /** The item that follows this item up (ADR-0037 amendment D2); null when none. */
+  followedBy: IMissionFollowedBy | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** One step back along a follow-up chain (ADR-0037 amendment D2, rule 5). */
+export interface IMissionFollowsUp {
+  itemId: string;
+  title: string;
+  /** The owner's answer to the earlier item; null only when its answer record is absent. */
+  answer: { optionIds: string[]; optionLabels: string[]; text: string; at: number } | null;
+}
+
+/** One step forward along a follow-up chain (ADR-0037 amendment D2, rule 5). */
+export interface IMissionFollowedBy {
+  itemId: string;
+  title: string;
+  state: TMissionItemState;
+}
+
+/**
+ * The answer a follow-up acknowledged, in the 200 body of the events route (ADR-0037 amendment D2, rule 4).
+ * `resolved` is false when the target was already resolved and the store wrote the link only.
+ */
+export interface IMissionFollowedUp {
+  itemId: string;
+  answerId: string | null;
+  optionIds: string[];
+  optionLabels: string[];
+  text: string;
+  resolved: boolean;
+}
+
+/** Why a follow-up was refused with 409 (ADR-0037 amendment D2, edge cases). */
+export type TMissionFollowUpRefusalReason = 'not-answered' | 'other-run' | 'already-followed';
+
+export interface IMissionFollowUpRefusal {
+  reason: TMissionFollowUpRefusalReason;
+  /** `already-followed`: the item that follows the target up. */
+  followedBy?: string;
+  /** `already-followed`: the last item of the chain, which the agent follows up next. */
+  tip?: string;
 }
 
 export interface IMissionAnswerSuggestion {
@@ -322,7 +400,7 @@ export type TMissionProducerEvent = IMissionEventBase & (
   | { type: 'run.resumed'; payload: { tabId: string; transferPendingAnswers: boolean } }
   | { type: 'progress.updated'; payload: { objective?: string; epic?: IMissionEpic | null; phase?: string | null; state?: 'running' | 'waiting'; nextStep?: string | null; storyCounts?: IMissionRun['storyCounts']; closeoutPending?: boolean } }
   | { type: 'run.finished'; payload: { state: 'completed' | 'cancelled'; summary: string; closeoutPending: boolean } }
-  | { type: 'attention.opened'; payload: IMissionQuestion & IMissionAttentionClassInput & { itemId: string; humanReview?: TMissionHumanReviewInput } }
+  | { type: 'attention.opened'; payload: IMissionQuestion & IMissionAttentionClassInput & { itemId: string; humanReview?: TMissionHumanReviewInput; followsUp?: string } }
   | { type: 'attention.updated'; payload: IMissionQuestion & IMissionAttentionClassInput & { itemId: string; humanReview?: TMissionHumanReviewInput } }
   | { type: 'attention.resolved'; payload: { itemId: string; resolution: string } }
   | { type: 'attention.cancelled'; payload: { itemId: string; reason: string } }
@@ -409,7 +487,7 @@ export interface IMissionAnswerResponse {
 
 export interface IMissionError {
   error: string;
-  code: 'invalid-request' | 'question-invalid' | 'unauthorized' | 'forbidden' | 'not-found' | 'conflict' | 'storage-unavailable';
+  code: 'invalid-request' | 'question-invalid' | 'unauthorized' | 'forbidden' | 'not-found' | 'conflict' | 'already-open' | 'storage-unavailable';
   current?: IMissionAttentionItem | IMissionRun;
   /** On 400 question-invalid: every defect of every refused event. */
   defects?: IMissionEventDefect[];

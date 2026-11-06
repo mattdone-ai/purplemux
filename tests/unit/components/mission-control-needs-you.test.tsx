@@ -50,6 +50,8 @@ const question = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionI
   evidenceLinks: [],
   lint: [],
   changes: null,
+  followsUp: null,
+  followedBy: null,
   createdAt: now - 60_000,
   updatedAt: now,
   ...over,

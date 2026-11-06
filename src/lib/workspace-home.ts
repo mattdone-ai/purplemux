@@ -1,7 +1,9 @@
+import { randomBytes } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { createLogger } from '@/lib/logger';
+import { resolveTrustTargets, trustedProjectEntry } from '@/lib/workspace-trust';
 
 const log = createLogger('workspace-home');
 
@@ -171,10 +173,41 @@ const readJson = async (file: string): Promise<Record<string, unknown>> => {
   }
 };
 
+/**
+ * A temporary of its own per write (pid + random, review r1 nit 2): two writers that shared `<file>.tmp`
+ * could rename a half-written file into place, and the loser's rename failed with ENOENT.
+ */
 const writeJsonAtomic = async (file: string, data: unknown): Promise<void> => {
-  const tmp = `${file}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
-  await fs.rename(tmp, file);
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await fs.rename(tmp, file);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+};
+
+// One seed at a time per config file, across every module copy in the process (the custom server and the
+// Next bundle each load this module): several tabs launched together each add their own key, and an
+// unserialized read-modify-write kept only the last writer's (review r1 nit 2). A live Claude Code in
+// another tab can still rewrite the file; that race is accepted and falls through to `startup-prompt`.
+const SEED_CHAINS_KEY = '__ptClaudeHomeSeedChains';
+const seedChains = (): Map<string, Promise<void>> => {
+  const g = globalThis as Record<string, unknown>;
+  if (!(g[SEED_CHAINS_KEY] instanceof Map)) g[SEED_CHAINS_KEY] = new Map<string, Promise<void>>();
+  return g[SEED_CHAINS_KEY] as Map<string, Promise<void>>;
+};
+
+const serializedPerFile = (file: string, work: () => Promise<void>): Promise<void> => {
+  const chains = seedChains();
+  const run = (chains.get(file) ?? Promise.resolve()).then(work, work);
+  const settled = run.then(() => {}, () => {});
+  chains.set(file, settled);
+  void settled.then(() => {
+    if (chains.get(file) === settled) chains.delete(file);
+  });
+  return run;
 };
 
 /**
@@ -185,9 +218,16 @@ const writeJsonAtomic = async (file: string, data: unknown): Promise<void> => {
  * Entries are merged, never overwritten: a directory the workspace already knows
  * about keeps whatever it has learned, and a re-rooted workspace picks up the
  * decision for its new directory on the next launch.
+ *
+ * The tab's cwd, when it is a workspace directory or under one, is pre-trusted
+ * (D14, ruling R-05): see workspace-trust.ts. An owner decision stays.
  */
-const seedProjectDecisions = async (home: string, directories: string[]): Promise<void> => {
+export const seedProjectDecisions = async (home: string, directories: string[], cwd?: string): Promise<void> => {
   const target = path.join(home, '.claude.json');
+  await serializedPerFile(target, () => seedOnce(target, directories, cwd));
+};
+
+const seedOnce = async (target: string, directories: string[], cwd?: string): Promise<void> => {
   const current = await readJson(target);
   const source = await readJson(CLAUDE_STATE_FILE);
   const sourceProjects = (source.projects ?? {}) as Record<string, Record<string, unknown>>;
@@ -212,6 +252,16 @@ const seedProjectDecisions = async (home: string, directories: string[]): Promis
     if (Object.keys(carried).length === 0) continue;
     projects[dir] = carried;
     changed = true;
+  }
+  const trust = cwd ? await resolveTrustTargets(cwd, directories) : null;
+  if (trust) {
+    const inherited = sourceProjects[trust.workspaceDirectory] ?? sourceProjects[path.resolve(trust.workspaceDirectory)];
+    for (const key of trust.keys) {
+      const next = trustedProjectEntry(projects[key], inherited, INHERITED_PROJECT_KEYS);
+      if (!next) continue;
+      projects[key] = next;
+      changed = true;
+    }
   }
 
   if (!changed && Object.keys(current).length > 0) return;
@@ -256,9 +306,10 @@ export const workspaceDirectories = async (wsId: string): Promise<string[]> =>
 
 /**
  * Build (or repair) the workspace's private Claude config dir and return its path
- * for CLAUDE_CONFIG_DIR. Idempotent — safe to call on every tab launch.
+ * for CLAUDE_CONFIG_DIR. Idempotent — safe to call on every tab launch. `cwd`
+ * is the tab's launch directory, pre-trusted when it is inside the workspace.
  */
-export const ensureWorkspaceClaudeHome = async (wsId: string): Promise<string> => {
+export const ensureWorkspaceClaudeHome = async (wsId: string, cwd?: string): Promise<string> => {
   const directories = await workspaceDirectories(wsId);
   const home = workspaceHomeDir(wsId);
   await fs.mkdir(home, { recursive: true });
@@ -284,7 +335,7 @@ export const ensureWorkspaceClaudeHome = async (wsId: string): Promise<string> =
     }),
   );
 
-  await seedProjectDecisions(home, directories);
+  await seedProjectDecisions(home, directories, cwd);
   return home;
 };
 

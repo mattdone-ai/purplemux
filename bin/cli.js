@@ -168,6 +168,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'session-not-running': EXIT.GONE,
   'target-changed': EXIT.GONE,
   'readiness-timeout': EXIT.NOT_READY,
+  'startup-prompt': EXIT.NOT_READY,
   'server-unreachable': EXIT.UNREACHABLE,
   'routes-absent': EXIT.UNREACHABLE,
   'remote-host-unreachable': EXIT.UNREACHABLE,
@@ -210,6 +211,9 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'so-not-found': EXIT.NOT_FOUND,
   'so-unreadable': EXIT.CONFLICT,
   'so-struck': EXIT.CONFLICT,
+  'so-proposal-refused': EXIT.CONFLICT,
+  'steer-reason-invalid': EXIT.USAGE,
+  'terminal-not-command-line': EXIT.USAGE,
 }));
 
 // Where the class alone does not tell the caller what happened.
@@ -219,6 +223,7 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'target-changed': 'permanent — the tab was replaced while the command waited; do not retry',
   'routes-absent': 'no such route on this server (an older server, a foreign server, or a malformed id) — retrying cannot help',
   'remote-host-unreachable': 'the remote host did not answer over ssh — retry, bounded, once it answers',
+  'remote-kit-broken': "the CLI kit does not run on the remote host; no agent started — a retry fails the same way until a person repairs the kit or the host",
   'wip-cap': "refused by state — close an agent tab first; only the workspace's orchestrator may pass --over-cap --reason",
   'tab-busy': 'the tab is mid-turn — retry when it is idle, or restart with --interrupt to abandon the turn',
   'restart-not-confirmed': 'a process or the session outlived the reap; nothing was relaunched — inspect the tab before a retry',
@@ -232,6 +237,11 @@ const hintFor = (code, detail) => {
   if (code === 'readiness-timeout' && Number.isFinite(detail?.waitedMs)) {
     const state = detail.cliState ? `, cliState ${detail.cliState}` : '';
     return `not ready after ${detail.waitedMs} ms${state} — retry, bounded`;
+  }
+  // The server names the dialog and the fix (D14); a retry cannot help until someone answers it.
+  if (code === 'startup-prompt') {
+    const served = typeof detail?.detail === 'string' && detail.detail ? detail.detail : 'the agent waits at a Claude Code startup prompt';
+    return `${served} — nothing was typed; a retry cannot help until the prompt is answered`;
   }
   if (code && Object.hasOwn(CODE_HINT, code)) return CODE_HINT[code];
   return EXIT_HINT[exitFor(code)];
@@ -944,7 +954,26 @@ const missionAsk = async (rest, wsId) => {
   if (!event || !['attention.opened', 'attention.updated'].includes(event.type) || !event.payload || typeof event.payload !== 'object') {
     die('mc ask takes one attention.opened or attention.updated event (or { "events": [that event] })');
   }
-  return out(await postAsk(event, wsId, rest.includes('--fix')));
+  // --follows-up (ADR-0037 amendment D2): the new item links to the answered item and resolves it.
+  const followsUp = flagValue(rest, '--follows-up');
+  if (rest.includes('--follows-up') && !followsUp) die('--follows-up takes the id of the answered item that this question follows up');
+  if (followsUp) {
+    if (event.type !== 'attention.opened') die('--follows-up applies to attention.opened only: a link is set when an item opens and never changes');
+    if (event.payload.followsUp !== undefined && event.payload.followsUp !== followsUp) {
+      die(`--follows-up ${followsUp} differs from the draft's followsUp ${event.payload.followsUp}; keep one`);
+    }
+    event.payload = { ...event.payload, followsUp };
+  }
+  const body = await postAsk(event, wsId, rest.includes('--fix'));
+  for (const entry of body.followedUps || (body.followedUp ? [body.followedUp] : [])) process.stderr.write(`${followedUpLine(entry)}\n`);
+  return out(body);
+};
+
+// The answer the follow-up acknowledged (ADR-0037 amendment D2, rule 4), on one line.
+const followedUpLine = (entry) => {
+  const labels = Array.isArray(entry.optionLabels) && entry.optionLabels.length ? entry.optionLabels.join(', ') : 'text only';
+  const state = entry.resolved ? `${entry.itemId} is resolved` : `${entry.itemId} was already resolved; only the link was written`;
+  return `follows up ${entry.itemId}: the owner answered ${labels}: ${JSON.stringify(entry.text || '')} (answer ${entry.answerId}); ${state}`;
 };
 
 // `--fix` (story 23 AC 3): the curator's reshape, accepted only past the preservation check and the format-2 validator.
@@ -962,8 +991,9 @@ const reshapeAsk = async (event, question, query) => {
   const { body: reshape } = await api('POST', `/api/cli/mission-control/questions/reshape?${query}`, { question });
   if (reshape.outcome === 'reshaped') {
     process.stderr.write(`--fix: the curator reshaped the draft (prompt ${reshape.promptVersion}); the original is kept in question_json.source\n`);
-    const { itemId, humanReview } = event.payload;
-    return { ...event, payload: { itemId, ...(humanReview ? { humanReview } : {}), ...reshape.question } };
+    const { itemId, humanReview, followsUp } = event.payload;
+    // --fix keeps the fields beside the question (ADR-0037 amendment D2, rule 2).
+    return { ...event, payload: { itemId, ...(humanReview ? { humanReview } : {}), ...(followsUp !== undefined ? { followsUp } : {}), ...reshape.question } };
   }
   const text = Object.hasOwn(RESHAPE_OUTCOME_TEXT, reshape.outcome) ? RESHAPE_OUTCOME_TEXT[reshape.outcome](reshape) : 'the curator answered an outcome this CLI does not know';
   process.stderr.write(`--fix: ${text}\n`);
@@ -972,13 +1002,21 @@ const reshapeAsk = async (event, question, query) => {
 
 // The question check, then the event: what `mc ask` does with a draft, and what `curator spot-check open` posts.
 const postAsk = async (event, wsId, fix) => {
-  const { itemId: _itemId, humanReview, ...question } = event.payload;
+  const { itemId, humanReview, followsUp, ...question } = event.payload;
   const query = `workspaceId=${encodeURIComponent(wsId)}`;
   // The review rides beside the question so the check names a missing class (story 36, D6); it is not a question field.
-  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, { question, ...(humanReview ? { humanReview } : {}) });
+  // So does a follow-up, with the ids the store checks it against (ADR-0037 amendment D2, rule 2).
+  const { body: check } = await api('POST', `/api/cli/mission-control/questions/check?${query}`, {
+    question,
+    ...(humanReview ? { humanReview } : {}),
+    ...(followsUp !== undefined ? { followsUp, itemId, runId: event.runId } : {}),
+  });
   if (!check.ok) {
     process.stderr.write(`question defects (${check.defects.length}, min-version ${check.minVersion}):\n${defectLines(check.defects)}\n`);
-    if (fix) {
+    // A refused follow-up is the store's refusal, not a wording defect: no reshape fixes it, and it exits by its own code.
+    const followUp = check.defects.find((d) => d.field === 'followsUp' && typeof d.code === 'string');
+    if (followUp && check.defects.length === 1) return fail(followUp.code, `${followUp.message}; nothing was posted`, followUp);
+    if (fix && !followUp) {
       const reshaped = await reshapeAsk(event, question, query);
       if (reshaped) return postAsk(reshaped, wsId, false);
     }
@@ -1338,7 +1376,7 @@ const cmdWait = async (args) => {
 };
 
 // Standing orders (ADR-0041): the owner's rules, written into every Claude tab's workspace prompt file.
-const SO_USAGE = 'usage: so add (-w WS | --fleet) --text TEXT --source "OWNER MESSAGE ID, UTC DATE" [--scope S] [--check HOOK|TEST|prose]; so strike SO-N --reason TEXT; so list [-w WS] [--all] [--json]';
+const SO_USAGE = 'usage: so add (-w WS | --fleet) --text TEXT --source "OWNER MESSAGE ID, UTC DATE" [--scope S] [--check HOOK|TEST|prose]; so propose --text TEXT --why TEXT [--cites TEXT] [--scope S] [--check HOOK|TEST|prose]; so strike SO-N --reason TEXT; so list [-w WS] [--all] [--json]';
 
 const printOrders = (orders) => {
   if (!orders.length) {
@@ -1374,6 +1412,24 @@ const cmdSo = async (args) => {
       const { body } = await api('POST', '/api/cli/standing-orders', data);
       if (rest.includes('--json')) return out(body);
       process.stdout.write(`${body.order.id} added (${body.owner}); its prompt section is ${body.bytes} bytes of 8192; ${body.promptsWritten} prompt file(s) rewritten, ${body.tabsNotified} live tab(s) told\n`);
+      return;
+    }
+    case 'propose': {
+      // The selected portfolio manager proposes a fleet order; the owner's Yes in Mission Control files it (ADR-0041 §1 amendment D7).
+      const positional = stripBooleanFlags(stripFlags(rest, ['--text', '--why', '--cites', '--scope', '--check']), ['--json']);
+      if (positional.length || ws) die(SO_USAGE);
+      const text = flagValue(rest, '--text');
+      const why = flagValue(rest, '--why');
+      if (!text || !why) die(SO_USAGE);
+      const data = { text, why };
+      for (const flag of ['cites', 'scope', 'check']) {
+        const value = flagValue(rest, `--${flag}`);
+        if (value !== null) data[flag] = value;
+      }
+      requireEnv();
+      const { body } = await api('POST', '/api/cli/standing-orders/proposals', data);
+      if (rest.includes('--json')) return out(body);
+      process.stdout.write(`${body.itemId} opened for the owner in Mission Control: Yes files the fleet order as quoted; it reaches ${body.workspaces} workspace(s) and ${body.liveTabs} live agent tab(s); the largest prompt section would be ${body.bytes} bytes of 8192\n`);
       return;
     }
     case 'strike': {
@@ -1861,25 +1917,107 @@ const readStdin = () => new Promise((resolve, reject) => {
   process.stdin.on('error', reject);
 });
 
-// Same shape as tab send, but interrupts the current turn first so a busy
-// worker reads the correction now instead of after its tangent finishes.
+/**
+ * Flags for `tab send` and `tab steer` are read only BEFORE the content (story 14 r2). The first
+ * word that is not a flag of the command is the tab ID; the next one starts the content, and from
+ * there every word is content, byte for byte: `tab send T git log --raw` types `git log --raw`. A
+ * literal `--` ends the flags at once (the word after it is the tab ID if none was given yet), so
+ * content that starts with a dash still reaches the tab. A word after the content starts that
+ * equals one of the command's flags is still sent as text; without `--`, stderr names it, because
+ * the caller may have meant the flag.
+ */
+const parseLeadingArgs = (args, { values, booleans }) => {
+  const flags = Object.create(null);
+  let tabId = null;
+  let terminated = false;
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === '--') {
+      terminated = true;
+      i++;
+      break;
+    }
+    if (values.includes(arg)) {
+      if (!Object.hasOwn(flags, arg)) flags[arg] = i + 1 < args.length ? args[i + 1] : null;
+      i += 2;
+      continue;
+    }
+    if (booleans.includes(arg)) {
+      flags[arg] = true;
+      i++;
+      continue;
+    }
+    if (tabId !== null) break;
+    tabId = arg;
+    i++;
+  }
+  if (terminated && tabId === null && i < args.length) tabId = args[i++];
+  const contentWords = args.slice(i);
+  const known = [...values, ...booleans];
+  const textFlags = terminated ? [] : [...new Set(contentWords.filter((word) => known.includes(word)))];
+  return {
+    tabId,
+    content: contentWords.join(' '),
+    has: (...names) => names.some((name) => Object.hasOwn(flags, name)),
+    value: (...names) => {
+      for (const name of names) if (Object.hasOwn(flags, name)) return flags[name];
+      return null;
+    },
+    textFlags,
+  };
+};
+
+const noteTextFlags = (parsed) => {
+  if (!parsed.textFlags.length) return;
+  process.stderr.write(
+    `note: ${parsed.textFlags.join(', ')} after the content went to the tab as text; flags are read only before the content (put \`--\` before the content to send such words without this note)\n`,
+  );
+};
+
+/** -f FILE / -f - / the content words, and the workspace; each refusal says what it saw. */
+const readTabInput = async (parsed) => {
+  if (parsed.has('--workspace', '-w') && !parsed.value('--workspace', '-w')) die('--workspace: saw no value; expected a workspace ID');
+  if (parsed.has('--file', '-f') && !parsed.value('--file', '-f')) die('--file: saw no value; expected a file path, or - for stdin');
+  const wsId = parsed.value('--workspace', '-w');
+  if (!wsId) die('--workspace is required');
+  if (!parsed.tabId) die('tab ID is required');
+  const file = parsed.value('--file', '-f');
+  const content = file ? (file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8')) : parsed.content;
+  if (!content) die('content is required (args, -f FILE, or -f - for stdin)');
+  return { wsId, tabId: parsed.tabId, content };
+};
+
+// Same shape as tab send, but it can interrupt the current turn first, so a busy worker reads the
+// correction now (story 14). The server decides the default: an agent tab does not interrupt unless
+// it passes --interrupt --reason; any other caller interrupts. The CLI refuses --interrupt without
+// --reason (exit 2) for every caller.
 const cmdTabSteer = async (args) => {
   requireEnv();
-  const file = flagValue(args, '--file') || flagValue(args, '-f');
-  const noInterrupt = args.includes('--no-interrupt');
-  const rest = stripBooleanFlags(stripFlags(args, ['--workspace', '-w', '--file', '-f']), ['--no-interrupt']);
-  const tabId = rest[0];
-  let content = rest.slice(1).join(' ');
-  if (!tabId) die('tab ID is required');
-  if (file) {
-    content = file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8');
+  const parsed = parseLeadingArgs(args, {
+    values: ['--workspace', '-w', '--file', '-f', '--reason'],
+    booleans: ['--no-interrupt', '--interrupt', '--raw'],
+  });
+  const interrupt = parsed.has('--interrupt');
+  const noInterrupt = parsed.has('--no-interrupt');
+  const reasonGiven = parsed.has('--reason');
+  const reason = parsed.value('--reason');
+  if (reasonGiven && (reason === null || !reason.trim())) {
+    die(`--reason: saw ${reason === null ? 'no value' : 'a blank value'}; expected a text of 1..500 characters before the content`);
   }
-  if (!content) die('content is required (args, -f FILE, or -f - for stdin)');
-  const wsId = resolveWsForTab(args);
+  if (interrupt && noInterrupt) die('--interrupt and --no-interrupt: saw both; expected at most one');
+  if (interrupt && !reasonGiven) die('--interrupt: saw no --reason; expected --interrupt --reason "<why the turn must stop>" before the content');
+  if (reasonGiven && !interrupt) die('--reason: saw it without --interrupt; expected --interrupt --reason TEXT, or no --reason');
+  const { wsId, tabId, content } = await readTabInput(parsed);
+  noteTextFlags(parsed);
   const { body } = await api(
     'POST',
     `/api/cli/tabs/${tabId}/steer?workspaceId=${encodeURIComponent(wsId)}`,
-    { content, ...(noInterrupt ? { interrupt: false } : {}) },
+    {
+      content,
+      ...(noInterrupt ? { interrupt: false } : interrupt ? { interrupt: true, reason } : {}),
+      ...(parsed.has('--raw') ? { raw: true } : {}),
+    },
   );
   out(body);
 };
@@ -1891,21 +2029,13 @@ const MAX_CLI_WAIT_MS = 240_000;
 
 const cmdTabSend = async (args) => {
   requireEnv();
-  const file = flagValue(args, '--file') || flagValue(args, '-f');
-  const waitMs = flagValue(args, '--wait-ms');
-  const noWait = args.includes('--no-wait');
-  const rest = stripBooleanFlags(
-    stripFlags(args, ['--workspace', '-w', '--file', '-f', '--wait-ms']),
-    ['--no-wait'],
-  );
-  const tabId = rest[0];
-  let content = rest.slice(1).join(' ');
-  if (!tabId) die('tab ID is required');
-  if (file) {
-    content = file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8');
-  }
-  if (!content) die('content is required (args, -f FILE, or -f - for stdin)');
-  const waitMsGiven = args.includes('--wait-ms');
+  const parsed = parseLeadingArgs(args, {
+    values: ['--workspace', '-w', '--file', '-f', '--wait-ms'],
+    booleans: ['--no-wait', '--raw'],
+  });
+  const noWait = parsed.has('--no-wait');
+  const waitMsGiven = parsed.has('--wait-ms');
+  const waitMs = parsed.value('--wait-ms');
   if (noWait && waitMsGiven) die('--no-wait and --wait-ms are mutually exclusive');
   // `--wait-ms` as the last token leaves no value to read; falling back to the
   // default would silently wait 60s for a caller that asked for something else.
@@ -1919,11 +2049,16 @@ const cmdTabSend = async (args) => {
   if (waitMsGiven && Number(waitMs) > MAX_CLI_WAIT_MS) {
     die(`--wait-ms must be at most ${MAX_CLI_WAIT_MS} (the CLI's HTTP client stops waiting at 300 s)`);
   }
-  const wsId = resolveWsForTab(args);
+  const { wsId, tabId, content } = await readTabInput(parsed);
+  noteTextFlags(parsed);
   const { body } = await api(
     'POST',
     `/api/cli/tabs/${tabId}/send?workspaceId=${encodeURIComponent(wsId)}`,
-    { content, ...(noWait ? { waitMs: 0 } : waitMs ? { waitMs: Number(waitMs) } : {}) },
+    {
+      content,
+      ...(noWait ? { waitMs: 0 } : waitMs ? { waitMs: Number(waitMs) } : {}),
+      ...(parsed.has('--raw') ? { raw: true } : {}),
+    },
   );
   out(body);
 };
@@ -3179,14 +3314,30 @@ Commands:
                   [--clear] [--on MARKERS] restores the workspace orchestrator. Cleared when TARGET closes.
                                            --on MARKERS (alone or with a target) forwards only those end lines,
                                            e.g. --on DONE,BLOCKED,NEEDS-DECISION; --on all lifts the filter
-  tab steer -w WS TAB_ID CONTENT...        Interrupt the current turn, then send CONTENT (use for a mid-turn correction; --no-interrupt to queue instead)
+  tab steer -w WS TAB_ID CONTENT...        Send CONTENT as a mid-turn correction. From an agent tab (claude-code,
+           [--interrupt --reason TEXT]     codex-cli, grok-cli) the default does NOT interrupt: the text waits for
+           [--no-interrupt] [--raw]        the turn to end. --interrupt --reason TEXT stops the turn first (Escape);
+           [-f FILE | -f -]                --interrupt without --reason exits 2. From any other caller, or one that
+                                           names no tab, the default interrupts, as before. --no-interrupt is
+                                           accepted from every caller. The agent/other split is advisory: every
+                                           interrupt writes one steer-interrupt audit line (the record). Into a
+                                           terminal tab, text with more than one line exits 2
+                                           (terminal-not-command-line) unless --raw. Flags go before the content;
+                                           every word from the content on is sent as is, and -- ends the flags
   tab send -w WS TAB_ID CONTENT...         Send input to a tab and press Enter. Waits up to 60s
                                            for an agent tab to be able to accept a turn; --wait-ms N (max
                                            240000) changes the budget, --no-wait answers immediately. On timeout nothing is
-                                           pasted and the call exits 5 (readiness-timeout).
+                                           pasted and the call exits 5 (readiness-timeout). An agent at a
+                                           Claude Code startup prompt (folder trust, external imports) is
+                                           refused at once with exit 5 (startup-prompt): answer the prompt.
                                            Exit 4 (tab-not-found, session-not-running, target-changed) means
                                            the tab is gone: never retry it, and never loop on it.
            [-f FILE | -f -]                Send file contents (or stdin with '-') — use for multi-line briefs
+           [--raw]                         Into a terminal tab, text with more than one line exits 2
+                                           (terminal-not-command-line): a shell runs each line as a command.
+                                           --raw types the text as is (a heredoc). Flags go before the
+                                           content; every word from the content on is sent as is, and --
+                                           ends the flags
   tab status -w WS TAB_ID                  Tab status (includes registered probes + background jobs)
   tab result -w WS TAB_ID                  Capture tab pane content. Dim text the agent shows on its composer line
              [--no-suggestions | --raw]    (a suggestion, never typed) reads "[suggestion] <text>" and is also in
@@ -3331,14 +3482,19 @@ Commands:
   mission answers -w WS [--run ID] [--all] Read unacknowledged answers for current answered items, each with its ackCommand; --all includes history
   mission ack -w WS --run ID --answer ID --generation N --revision N --event-id ID --producer-at MS
                                            Acknowledge one persisted answer after reading and applying it
-  mc ask -w WS --json @DRAFT [--fix]      Check one attention.opened/attention.updated event's question against the
+  mc ask -w WS --json @DRAFT [--follows-up ID] [--fix]
+                                           Check one attention.opened/attention.updated event's question against the
                                            server's format rules (ADR-0037), then post it. Defects print one per line
                                            (field: measured, limit) and exit 2 with nothing posted; lint on an accepted
                                            v1 question prints to stderr. --fix asks the curator to reshape a refused
                                            draft: where reshape-question routes, a reshape that keeps every option id,
                                            count, order, recommended, answerType, class and evidence URL is checked and
                                            posted (the original kept in question_json.source); elsewhere it is logged,
-                                           the defects print and it exits 2. "mc" is "mission".
+                                           the defects print and it exits 2. --follows-up ID (attention.opened only,
+                                           ADR-0037 D2) links the new item to the answered item ID and resolves ID in
+                                           the same write; it prints "follows up ID: the owner answered ..." and refuses
+                                           an unanswered (exit 3), followed-up (exit 3), foreign (exit 3) or unknown
+                                           (exit 7) target with nothing posted. "mc" is "mission".
   portfolio board --workspaces WS,WS       Scoped release blockers for the explicitly selected workspaces (current manager tab and read grants)
   portfolio report -w WS --json '{...}'    Current orchestrator reports a revisioned blocker; see API guide for schema
   portfolio applied -w WS --json '{...}'   Current orchestrator records application of a routed note, not blocker resolution
@@ -3447,6 +3603,11 @@ Commands:
                                            every Claude tab it reaches, and one urgent line to each live tab. A
                                            fleet order needs the admin token. Over 8192 bytes of active orders for
                                            one workspace is refused with the measured size (exit 2 so-too-large)
+  so propose --text TEXT --why TEXT [--cites TEXT] [--scope S] [--check NAME|prose]
+                                           The selected portfolio manager only: open a Mission Control item (confirm,
+                                           class scope, no default) for a fleet order; the owner's Yes files it as
+                                           quoted, No or 72 h files nothing. 3 so-proposal-refused: duplicate,
+                                           open-proposal or no-orchestrator-run
   so strike SO-N --reason TEXT             Strike an order; it stays in its file, struck, and live tabs are told
   so list [-w WS] [--all] [--json]         The active orders you load (--all: struck ones too), with their sources
   api-guide                                Print full HTTP API reference

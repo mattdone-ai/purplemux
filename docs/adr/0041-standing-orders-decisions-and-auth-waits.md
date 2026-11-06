@@ -5,7 +5,8 @@ Accepted (2026-11-03, epic `harness-flow-loop`, story 14; architecture ADR-HFL-0
 (a fourth watch kind, `auth`), ADR-0035 (the wake kind `standing-order`, urgent) and ADR-0037 (a server producer of
 format-2 questions).
 Amended 2026-11-04 (defect D7, §1 Authority: the portfolio manager proposes a fleet order and the owner confirms it):
-see the amendment at the end. Its code is deferred to the follow-on harness epic.
+see the amendment at the end. Its code landed in epic `harness-flow-loop-2`, story 02 (`src/lib/so-proposal.ts`,
+`src/lib/so-proposal-service.ts`, `POST /api/cli/standing-orders/proposals`, `purplemux so propose`).
 
 ## Context
 The owner's 572 messages of 20 Oct-3 Nov (harness audit, 2026-11-03) repeat the same rules: access already given 14,
@@ -94,7 +95,7 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
   `<tab name or id> · <workspace name or id>: <the line without the marker and the class tag, whitespace collapsed>`
   cut at 400 code points at a word, with a trailing `…` (story 36; 100 code points before it, with no mark, cut the
   options mid-word); it carries the tab and workspace, so a tap opens the tab. One push per workspace, tab and
-  normalized line in 24 h, kept in memory (at most 2,000 keys, oldest evicted; a restart may send one more). The
+  normalized line in 24 h, kept in memory (at most 2,000 keys, oldest evicted; a restart may send one more push). The
   dispatch is never awaited. The note says what the server did, never what the owner received:
   `[no MC item (<reason>): owner push dispatched, delivery not confirmed]`, or
   `[no MC item (<reason>): owner push for this line already dispatched at <UTC ISO time>]`. Not the inbox: an inbox
@@ -108,8 +109,9 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     normalized line) and gives that id to every stop of the line for 24 h from then, unless an item of that id has
     closed (answered, resolved, cancelled), when the line asks anew under the stop's own id. So "its id would be <id>"
     is true: a later server open, or the orchestrator's open from the (i) note, takes that id, and a second open meets
-    the same id (`already-open`). In memory, at most 2,000 keys; a restart may mint one more. The id shape above is
-    unchanged; only its second half is now the first stop's.
+    the same id (`already-open`). In memory, at most 2,000 keys; after a restart the store gives the id back (story 03
+    amendment of epic `harness-flow-loop-2`, below). The id shape above is unchanged; only its second half is now the
+    first stop's.
   - **The line key ignores a quoted id.** `nd-<32 hex>`, bare or in `()`/`[]`, is removed before the line is
     normalized, so an asker that quotes its item id in the repeat keeps the key and finds the same item.
   - **The notice.** After the stop is recorded, the asking tab gets one urgent event of wake kind `mission`. For every
@@ -124,12 +126,52 @@ on reaches the orchestrator as a nudge, and the owner only when a seat copies it
     open for the owner`), so it can name the item. When that nudge goes out, the target holds the note and the asker is
     told nothing itself.
   - **Once a day per line, notice and id.** Keyed by line key, notice kind (not opened / item) and id, 24 h, in memory
-    like the push (at most 2,000 keys; a restart may send one more). The line the tab repeats while it waits never wakes
+    like the push (at most 2,000 keys; a restart may send one more notice). The line the tab repeats while it waits never wakes
     it in a loop, while the open that follows a not-opened stop is still told; a repeat after the open sends nothing new.
   - **The (ii) push is unchanged, and it means "no item opened".** It goes out only when no item opened, so it never
     carries an `itemId`, and the phone opens the tab for it (an `nd-` id on a `needs-decision` alert would open that
     item; the server sends none). Its body is `needsDecisionPushDetail` (`needs-decision.ts`), exported so the phone's
     fixtures are built by the server's own function.
+
+- **Amendment (story 09 of epic `harness-flow-loop-2`, 2026-11-05; defect D28): who may open an owner item.** v2-scope, a
+  tab with a `reportsTo`, ended on a line that only quoted the marker, the server opened an owner item from it, and the
+  owner asked "why am I getting this?".
+  - **A tab with a `reportsTo` asks that tab, never the owner (SO-6).** Its `NEEDS-DECISION:` line opens no item and
+    sends no owner push. The nudge goes, whatever its `reportOn`, to its `reportsTo` while that is a live agent tab not
+    halted by a usage limit, else to a live, un-halted orchestrator, with the note `[no owner item: this tab reports to
+    <tab>, so its NEEDS-DECISION is answered by you[, the orchestrator (<tab> cannot take it)], never sent to the owner
+    (SO-6); answer it, or ask the owner on your own end line]`.
+  - **A question never vanishes (review r1).** When neither can take it (the `reportsTo` is gone or halted, and no live
+    orchestrator exists), the line takes today's path: the owner item opens (or the (i)/(ii) fallback runs), and the
+    item's context and human reason state `reports-to target unavailable: <tab> is gone or halted, and no live
+    orchestrator can take it`. Only then does a `reportsTo` tab's question reach the owner.
+  - **No question, no item.** The opener refuses a line whose text after `NEEDS-DECISION:` holds no `?` (or `？`):
+    outcome `no-question`, logged with the line. There is no owner push and no "open it yourself" note; the nudge note
+    is `[no MC item: the NEEDS-DECISION line holds no question mark, so the server opened nothing and told no one]`, and
+    an asker that the note does not reach gets `[needs-decision] item-not-opened: no-question. …`.
+  - A line that holds two markers is no end line at all (ADR-0018, story 09 amendment), so it never reaches the opener.
+
+- **Amendment (story 03 of epic `harness-flow-loop-2`, 2026-11-05; NomuPay/engineering#521, ruling R-03): one open item
+  per line, after a restart too.** The id memory above is in memory only. After a restart a miss minted a fresh id, so
+  the orchestrator could act on an (i) note from before the restart and open the old id while the server opened the
+  new one: two items for one question. The word `already-open` was true only of the server's own check.
+  - **The store answers a miss.** When the memory holds no open id for the line key (a restart, the 24 h window, or a
+    closed item), the opener reads the store's still-open items with the prefix `nd-<lineKey>` (`openItemsWithIdPrefix`)
+    and takes the newest; with none, the stop's own id. The opener remembers the id it takes. A failing read counts as
+    no open item. The opener's own dedupe also names the newest open item.
+  - **The store refuses a second open item for one line.** An `attention.opened` whose item id starts with
+    `nd-<16 hex>` is refused while another item of that prefix in the same workspace is candidate or open, from any
+    opener (server, orchestrator or worker). The response is HTTP 409 with the body
+    `{"error": "an item for this NEEDS-DECISION line is already open: <open item id>", "code": "already-open", "current": <the open item>}`.
+    The same id again stays the 409 `conflict` `attention item already exists`. Once the open item is answered,
+    resolved or cancelled, an `nd-` id of that line opens again.
+  - **A racing open is `already-open`, not `refused` (review r1).** If another opener takes the line between the
+    opener's dedupe and its own write, the opener reads the typed refusal: the outcome is `already-open` with the open
+    item's id (`current.id`), and the line keeps that id. So no "open it yourself" note and no (ii) push go out for an
+    item that is open. Every other refusal stays `refused`.
+  - **The asker hears a note that the repeat filter held back.** A tab already `ready-for-review` that ends on the same
+    marker again sends no second nudge. The note of that stop then reaches no tab, so the asker gets it itself (the
+    notice above): "the note rides the nudge" means the nudge that survives the repeat filter.
 
 ### 3. Auth waits
 - Watch kind `auth`, target `aws-sso:<profile>`, until `signed-in`, interval 60 s by default; CLI
@@ -177,7 +219,11 @@ now. Sources: the triage `_output/harness-flow-loop/briefs/D1-D8-triage.md`, row
 `n-sqL9hVZwJY`, D7.
 
 **Deferred to the follow-on harness epic:** all the code and all the tests below (triage estimate: about 150 agent
-minutes). Until that epic lands, §1 applies unchanged, and the interim workaround below is in force.
+minutes). Until that epic lands, §1 applies unchanged, and the interim workaround below is in force. (Landed:
+`harness-flow-loop-2` story 02. The tests are `tests/unit/lib/so-proposal.test.ts`, `so-proposal-authority.test.ts`,
+`tests/unit/api/so-proposal-answer-route.test.ts`, the `so propose` case of `tests/unit/bin/cli-so-wait.test.ts` and the
+proposal cases of `tests/unit/components/mission-question-card.test.tsx`. The interim workaround ends when the library
+text changes, story 39.)
 
 **Context.** The Portfolio SM (`tab-9gEerd` in `ws-zOfVyu`) ran `so add --fleet` to record an owner rule for every
 seat. The server refused it: "a fleet order is added or struck with the admin token" (`mayChangeOrders`,

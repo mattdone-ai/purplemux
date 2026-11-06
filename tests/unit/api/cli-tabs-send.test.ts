@@ -21,7 +21,10 @@ const cliUtils = vi.hoisted(() => ({
   ),
 }));
 
-const live = vi.hoisted(() => ({ entries: {} as Record<string, { cliState: TCliState }>, waiting: new Set<string>() }));
+const live = vi.hoisted(() => ({
+  entries: {} as Record<string, { cliState: TCliState; startupPrompt?: { kind: 'folder-trust' | 'external-imports'; since: number } | null }>,
+  waiting: new Set<string>(),
+}));
 const tabEvents = vi.hoisted(() => ({
   route: vi.fn(async (_event: unknown) => ({ class: 'digest', delivered: false, seq: 1, duplicate: false })),
 }));
@@ -253,6 +256,32 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
     expect(delivery.deliverPrompt).not.toHaveBeenCalled();
   });
 
+  it.each(['folder-trust', 'external-imports'] as const)(
+    'refuses a tab at the %s startup prompt at once, with the dialog and the fix, and types nothing (story 05, D14)',
+    async (kind) => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith('inactive')));
+      live.entries = { [TAB_ID]: { cliState: 'startup-prompt', startupPrompt: { kind, since: 1 } } };
+      const started = Date.now();
+
+      // The default 60 s budget: the refusal must not wait any of it.
+      const response = await call({ content: 'here is your brief' });
+
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(response.statusCode).toBe(409);
+      const label = kind === 'folder-trust' ? 'the folder-trust prompt' : 'the external CLAUDE.md imports prompt';
+      expect(response.body).toEqual({
+        error: 'agent-not-ready',
+        code: 'startup-prompt',
+        tabId: TAB_ID,
+        cliState: 'startup-prompt',
+        startupPrompt: kind,
+        startupPromptLabel: label,
+        detail: `the agent waits at ${label}: answer it in the tab, or create the tab with --cwd under a workspace directory, which purplemux pre-trusts`,
+      });
+      expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+    },
+  );
+
   it.each<TCliState>(['busy', 'inactive', 'unknown', 'cancelled'])(
     'refuses a send while %s',
     async (state) => {
@@ -446,5 +475,58 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
 
     expect(response.statusCode).toBe(405);
     expect(response.headers.Allow).toBe('POST');
+  });
+
+  describe('a terminal tab takes one shell command line (story 14, D30)', () => {
+    const brief = 'Watch the v2 QA load.\nReport each failed probe.\nStop at 06:00Z.';
+
+    it('refuses multi-line text with the tab type and the line count, and types nothing', async () => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+      const response = await call({ content: brief });
+      expect(response.statusCode).toBe(400);
+      expect(response.body).toEqual({
+        error: expect.stringContaining(`tab ${TAB_ID} is a terminal tab, whose shell runs each line as a command: saw 3 lines; expected one shell command line. A multi-line command`),
+        code: 'terminal-not-command-line',
+        tabId: TAB_ID,
+        panelType: 'terminal',
+        lines: 3,
+      });
+      expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+      expect(ledger.store.tabEvents.list(WORKSPACE_ID, { since: 0, limit: 5 })).toEqual([]);
+    });
+
+    it('counts a tab without a panel type as a terminal tab', async () => {
+      const { panelType: _panelType, ...legacy } = tabWith(undefined, 'terminal');
+      cliUtils.findTab.mockResolvedValue(locate(legacy as ITab));
+      expect((await call({ content: brief })).body).toMatchObject({ code: 'terminal-not-command-line', panelType: 'terminal' });
+    });
+
+    it('types one command line, a trailing line break included', async () => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+      const response = await call({ content: 'tail -f /tmp/qa-load.log\n' });
+      expect(response.statusCode).toBe(200);
+      expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, 'tail -f /tmp/qa-load.log\n');
+    });
+
+    it('types multi-line text as is with raw: true', async () => {
+      cliUtils.findTab.mockResolvedValue(locate(tabWith(undefined, 'terminal')));
+      const heredoc = "cat <<'EOF' > /tmp/x\nline\nEOF";
+      const response = await call({ content: heredoc, raw: true });
+      expect(response.statusCode).toBe(200);
+      expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, heredoc);
+    });
+
+    it('types multi-line text into an agent tab: the check is for a shell only', async () => {
+      const response = await call({ content: brief });
+      expect(response.statusCode).toBe(200);
+      expect(delivery.deliverPrompt).toHaveBeenCalledWith(SESSION_NAME, brief);
+    });
+
+    it('refuses a raw value that is not a boolean', async () => {
+      const response = await call({ content: 'ls', raw: 'yes' });
+      expect(response.statusCode).toBe(400);
+      expect(response.body).toEqual({ error: 'raw: saw the string "yes"; expected true or false', code: 'invalid-request' });
+      expect(delivery.deliverPrompt).not.toHaveBeenCalled();
+    });
   });
 });

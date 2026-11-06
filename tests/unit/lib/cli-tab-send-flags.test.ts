@@ -23,7 +23,8 @@ const cli = async (args: string[]): Promise<{ code: number; stderr: string }> =>
 
 describe('purplemux tab send --wait-ms', () => {
   it('rejects the flag with no value instead of silently using the default', async () => {
-    const { code, stderr } = await cli(['tab', 'send', '-w', 'ws-x', 'tab-1', 'hello', '--wait-ms']);
+    // Flags are read only before the content (story 14 r2), so the value-less flag is the last word.
+    const { code, stderr } = await cli(['tab', 'send', '-w', 'ws-x', 'tab-1', '--wait-ms']);
 
     expect(code).toBe(2);
     expect(stderr).toContain('--wait-ms must be a whole number of milliseconds');

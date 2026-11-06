@@ -9,6 +9,7 @@ import { tabIdentityOf } from '@/lib/tab-token';
 import { getStatusManager } from '@/lib/status-manager';
 import { resolveTabCliState } from '@/lib/tab-send';
 import { RemoteHostError } from '@/lib/remote-host';
+import { startupPromptBody } from '@/lib/startup-prompt';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
@@ -73,6 +74,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     alive: true,
     command,
     cliState: resolveTabCliState(found.tab, live),
+    ...startupPromptBody(live?.cliState, live?.startupPrompt),
     agentProviderId: provider?.id ?? null,
     agentSessionId,
     // Response key kept as `claudeSessionId` for back-compat with external CLI consumers.

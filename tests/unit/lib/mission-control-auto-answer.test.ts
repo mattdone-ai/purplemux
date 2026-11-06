@@ -16,6 +16,7 @@ import {
 import {
   readAutoAnswerRule,
   runAutoAnswerPass,
+  runTickPasses,
   startAutoAnswerTick,
   stopAutoAnswerTick,
   type IAutoAnswerDeps,
@@ -122,6 +123,8 @@ const item = (over: Partial<IMissionAttentionItem> = {}): IMissionAttentionItem 
   evidenceLinks: [],
   lint: [],
   changes: null,
+  followsUp: null,
+  followedBy: null,
   createdAt: T0,
   updatedAt: T0,
   ...over,
@@ -589,6 +592,20 @@ describe('the tick: once per process, on globalThis', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(log.error).toHaveBeenCalled();
     await stopAutoAnswerTick();
+  });
+});
+
+describe('the tick also settles fleet standing-order proposals (ADR-0041 §1 amendment D7)', () => {
+  it('runs the proposal pass after the rule\'s pass, whatever the rule holds: off, or a pass that failed', async () => {
+    const order: string[] = [];
+    await runTickPasses(async () => { order.push('auto'); return []; }, async () => { order.push('proposals'); return []; });
+    await runTickPasses(async () => { order.push('auto-failed'); throw new Error('rule unreadable'); }, async () => { order.push('proposals'); return []; });
+    expect(order).toEqual(['auto', 'proposals', 'auto-failed', 'proposals']);
+    expect(log.error).toHaveBeenCalled();
+  });
+
+  it('a failed proposal pass is logged and never stops the tick', async () => {
+    await expect(runTickPasses(async () => [], async () => { throw new Error('store down'); })).resolves.toBeUndefined();
   });
 });
 

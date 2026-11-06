@@ -76,7 +76,9 @@
         "label": "Lock-hours, 7 days",
         "url": "https://example.com/evidence/lock-hours"
       }
-    ]
+    ],
+    "followsUp": null,
+    "followedBy": null
   },
   "after": {
     "id": "q-single",
@@ -171,6 +173,8 @@
         "label": "Lock-hours, 7 days",
         "url": "https://example.com/evidence/lock-hours"
       }
-    ]
+    ],
+    "followsUp": null,
+    "followedBy": null
   }
 }

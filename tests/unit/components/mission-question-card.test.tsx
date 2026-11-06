@@ -2,7 +2,10 @@ import fs from 'fs';
 import path from 'path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import MissionControlAnswerCard from '@/components/features/mission-control/mission-control-answer-card';
+import MissionControlAnswerCard, { FollowedByNote, MissionControlDeliveryCard } from '@/components/features/mission-control/mission-control-answer-card';
+import MissionControlNeedsYou from '@/components/features/mission-control/mission-control-needs-you';
+import { proposalOutcomeText } from '@/components/features/mission-control/proposal-outcome';
+import { NOT_FILED_CODES, buildProposalQuestion, notFiledReason, proposalItemId } from '@/lib/so-proposal';
 import {
   createMissionDraft,
   editMissionDraft,
@@ -160,7 +163,8 @@ describe('question card layout per answer type (ADR-0037 §5)', () => {
 
 describe('Submit is never disabled without a visible reason (ADR-0037 §4)', () => {
   const drafts = (): Array<[string, IMissionDraft]> => {
-    const names = ['single.json', 'multi.json', 'confirm.json', 'text.json', 'action-done.json', 'needs-text.json', 'long-context.json', 'v1-item.json'];
+    const names = ['single.json', 'multi.json', 'confirm.json', 'text.json', 'action-done.json', 'needs-text.json', 'long-context.json', 'v1-item.json',
+      'so-proposal-open.json'];
     return names.flatMap((name) => {
       const source = item(name);
       const first = source.options[0]?.id;
@@ -410,5 +414,143 @@ describe('a suggested answer from an owner message (story 23 AC 2)', () => {
 
   it('an item without suggestions shows none', () => {
     expect(render(draftOf(item('single.json')))).not.toContain('data-suggested-answers');
+  });
+});
+
+// ADR-0041 §1 amendment D7 test 13: the fleet standing-order proposal card, driven by the so-proposal-* fixtures that the
+// phone reads too. Class Scope, no default, nothing recommended, the order quoted; after the answer, the outcome.
+describe('the fleet standing-order proposal card (so-proposal-*.json)', () => {
+  const fixtureInputs = (): Parameters<typeof buildProposalQuestion> => [
+    { text: 'Questions for the owner go to Mission Control first; the note to the Portfolio Scrum Master carries the item id.', scope: 'fleet',
+      check: 'prose', why: 'The owner said this rule to 3 seats in one day; a fleet order reaches every seat.',
+      cites: 'owner message havmSUlPTFqnamLTshs1b of ws-zOfVyu, 2026-11-04T02:10Z', workspaceId: 'ws-fixture', tabId: 'tab-sm' },
+    { workspaces: 9, liveTabs: 14, bytes: 3120, bytesWorkspace: 'ws-fixture' },
+  ];
+
+  it('the fixtures hold the question the server builds, with the reserved id of its text and open time', () => {
+    const built = buildProposalQuestion(...fixtureInputs());
+    for (const name of ['so-proposal-open.json', 'so-proposal-filed.json', 'so-proposal-not-filed.json']) {
+      const fixture = item(name) as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(built)) expect(fixture[key], `${name} ${key}`).toEqual(value);
+      expect(fixture.id).toBe(proposalItemId(fixtureInputs()[0].text, fixture.createdAt as number));
+      expect(fixture.defaultOptionId).toBeNull();
+    }
+  });
+
+  it('open: class Scope, no default line, no recommended mark, the order text quoted, and the proposal line', () => {
+    const question = item('so-proposal-open.json');
+    const html = render(draftOf(question));
+    expect(html).toContain('>Scope<');
+    expect(html).not.toContain('Default:');
+    expect(html).not.toContain('Recommended');
+    expect(html).toContain(fixtureInputs()[0].text);
+    expect(html).toContain('data-proposal-state="open"');
+    expect(html).toContain('Proposed fleet standing order: Yes files it exactly as quoted');
+    expect(html.match(/<button[^>]*data-option="(yes|no)"/g)).toHaveLength(2);
+  });
+
+  it('after the answer: "Filed as SO-n" or "Not filed: <reason>", on the answer card and the delivery card', () => {
+    const filed = item('so-proposal-filed.json');
+    const notFiled = item('so-proposal-not-filed.json');
+    expect(render(draftOf(filed))).toContain('Filed as SO-12');
+    const delivered = renderToStaticMarkup(<MissionControlDeliveryCard item={filed} answer={undefined} delivery={undefined} workspaceName="Fixture" />);
+    expect(delivered).toContain('Filed as SO-12');
+    const refused = renderToStaticMarkup(<MissionControlDeliveryCard item={notFiled} answer={undefined} delivery={undefined} workspaceName="Fixture" />);
+    expect(refused).toContain(`Not filed: ${notFiled.proposal!.reason}`);
+    expect(refused).toContain('data-proposal-state="not-filed"');
+    // Review r1 finding 1: the served reason is a sentence; no wire code reaches the card.
+    expect(notFiled.proposal!.reason).toBe(notFiledReason('so-too-large', { bytes: 8301, workspaceId: 'ws-fixture' }));
+    expect(refused).not.toMatch(/so-(too-large|unreadable|invalid|proposal-refused)|system-actor/);
+  });
+
+  it('every other item renders no proposal line; a state this page does not know is said in words, never as its token', () => {
+    expect(render(draftOf(item('confirm.json')))).not.toContain('data-proposal-state');
+    const odd = proposalOutcomeText({ state: 'rescinded' as never, orderId: null, reason: null });
+    expect(odd).toEqual({ text: 'Proposal state not recognised by this page: reload it', tone: 'neutral', served: 'rescinded' });
+    const html = render(draftOf({ ...item('so-proposal-open.json'), proposal: { state: 'rescinded' as never, orderId: null, reason: null } }));
+    expect(html).toContain('data-proposal-state="unknown"');
+    expect(html.replace(/title="[^"]*"/g, '')).not.toContain('rescinded');
+    expect(proposalOutcomeText({ state: 'constructor' as never, orderId: null, reason: null }).served).toBe('constructor');
+    expect(proposalOutcomeText({ state: 'filed', orderId: null, reason: null }).text).toBe('Filed; the order id is not available');
+    expect(proposalOutcomeText({ state: 'not-filed', orderId: null, reason: null }).text).toBe('Not filed: no reason was recorded');
+    for (const state of ['declined', 'expired', 'withdrawn'] as const) expect(proposalOutcomeText({ state, orderId: null, reason: null }).text).toMatch(/nothing filed$/);
+  });
+
+  it('one owning map turns each not-filed code into a sentence; a code it does not know gets a neutral sentence', () => {
+    for (const code of NOT_FILED_CODES) {
+      const sentence = notFiledReason(code, { bytes: 9000, workspaceId: 'ws-a', orderId: 'SO-9' });
+      expect(sentence).toMatch(/\.$/);
+      expect(sentence).not.toContain(code);
+    }
+    expect(notFiledReason('duplicate', { orderId: 'SO-9' })).toBe('The active fleet order SO-9 already says this.');
+    expect(notFiledReason('duplicate')).toBe('An active fleet order already says this.');
+    expect(notFiledReason('so-too-large')).toBe('Filing it would pass the 8192-byte budget of standing orders in a prompt. Strike an order, then propose again.');
+    expect(notFiledReason('forbidden')).toBe('The order could not be filed, so nothing was written.');
+    expect(notFiledReason('constructor')).toBe('The order could not be filed, so nothing was written.');
+  });
+});
+
+describe('follow-up cards (ADR-0037 amendment D2, rule 6), from the follow-up-* fixtures', () => {
+  const later = () => item('follow-up-new.json');
+  const earlier = () => item('follow-up-earlier.json');
+  const page = (focusItemId: string | null) => renderToStaticMarkup(
+    <MissionControlNeedsYou
+      snapshot={{ schemaVersion: 1, cursor: 1, generatedAt: Date.now(), workspaces: [], runs: [], items: [earlier(), later()], answers: [], deliveries: [], recentEvents: [], bootstrap: null } as unknown as IMissionSnapshot}
+      loading={false} unsupported={false} error={null} refreshing={false}
+      drafts={{ [later().id]: createMissionDraft(later(), 'submission-1') }}
+      focusItemId={focusItemId}
+      onRetry={() => undefined} onDraftChange={() => undefined} onAdoptCurrent={() => undefined} onSubmit={() => undefined}
+    />,
+  );
+
+  it('the new card shows "Follows up: <earlier title>" above the decision, the owner\'s earlier answer and a link to the earlier card', () => {
+    const html = render(draftOf(later()));
+    expect(html).toContain('data-follows-up');
+    expect(html).toContain('Follows up: </span><a href="/mission-control?view=answers&amp;item=q-follow-earlier"');
+    expect(html).toContain('>Gate re-run policy</a>');
+    expect(html).toContain('You answered: </span>Trial it for 7 days');
+    expect(html).toContain('<q class="select-text">Trial it, but tell me which lanes first.</q>');
+    expect(ascending(order(html, 'data-follows-up', 'data-follows-up-answer', `id="${later().id}-decision"`))).toBe(true);
+    expect(html).not.toContain('data-followed-by');
+  });
+
+  it('an earlier option the question no longer holds shows the neutral words the server serves, never the id', () => {
+    const gone = { ...later(), followsUp: { ...later().followsUp!, answer: { ...later().followsUp!.answer!, optionIds: ['trial-x'], optionLabels: ['an option no longer in the question'] } } };
+    const html = render(draftOf(gone));
+    expect(html).toContain('You answered: </span>an option no longer in the question');
+    expect(html).not.toContain('trial-x');
+  });
+
+  it('a text-only earlier answer reads "no option" with its text; an absent answer says so', () => {
+    const textOnly = { ...later(), followsUp: { ...later().followsUp!, answer: { ...later().followsUp!.answer!, optionIds: [], optionLabels: [] } } };
+    expect(render(draftOf(textOnly))).toContain('You answered: </span>no option');
+    const absent = { ...later(), followsUp: { ...later().followsUp!, answer: null } };
+    expect(render(draftOf(absent))).toContain('Your earlier answer is not available.');
+  });
+
+  it('the earlier card reads as resolved, "Followed up by: <new title>", with a link, and leaves the Needs you list', () => {
+    const html = page('q-follow-earlier');
+    expect(html).toContain('data-focus-missing="q-follow-earlier"');
+    expect(html).toContain('no longer needs an answer here (resolved).');
+    expect(html).toContain('data-followed-by');
+    expect(html).toContain('>Resolved</span>');
+    expect(html).toContain('Followed up by: </span><a href="/mission-control?view=answers&amp;item=q-follow-new"');
+    expect(html).toContain('>Gate re-run policy: trial scope</a>');
+    expect(html).not.toContain('data-question-card="q-follow-earlier"');
+    expect(html).toContain('data-question-card="q-follow-new"');
+  });
+
+  it('a state token this client does not know reads as a word, never the token', () => {
+    const html = renderToStaticMarkup(<FollowedByNote item={{ ...earlier(), state: 'archived' as never,
+      followedBy: { ...earlier().followedBy!, state: 'parked' as never } }} />);
+    expect(html).toContain('Unknown state');
+    expect(html).toContain('(unknown state)');
+    expect(html).not.toMatch(/>[^<]*(archived|parked)[^<]*</);
+  });
+
+  it('an item with no links shows neither note', () => {
+    const html = render(draftOf(item('single.json')));
+    expect(html).not.toContain('data-follows-up');
+    expect(html).not.toContain('data-followed-by');
   });
 });

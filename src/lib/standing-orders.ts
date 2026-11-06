@@ -31,10 +31,22 @@ export interface IStandingOrderFile {
   orders: IStandingOrder[];
 }
 
-export type TStandingOrderErrorCode = 'so-invalid' | 'so-too-large' | 'so-not-found' | 'so-unreadable' | 'so-struck' | 'forbidden';
+export type TStandingOrderErrorCode =
+  | 'so-invalid' | 'so-too-large' | 'so-not-found' | 'so-unreadable' | 'so-struck' | 'so-proposal-refused' | 'forbidden';
+
+/** Why a proposal was refused by state (ADR-0041 §1 amendment D7): the `reason` of `so-proposal-refused`. */
+export type TSoProposalRefusal = 'duplicate' | 'open-proposal' | 'no-orchestrator-run';
+
+/** What `so-too-large` measured: the largest prompt section the add would leave, and the workspace it is for. */
+export interface IOrderBudgetMeasure {
+  bytes: number;
+  workspaceId: string | null;
+}
 
 export class StandingOrderError extends Error {
-  constructor(readonly code: TStandingOrderErrorCode, message: string) {
+  constructor(
+    readonly code: TStandingOrderErrorCode, message: string, readonly reason?: TSoProposalRefusal, readonly measured?: IOrderBudgetMeasure,
+  ) {
     super(message);
     brandCodedError(this, 'StandingOrderError');
   }
@@ -48,7 +60,8 @@ const SCOPE = /^[A-Za-z0-9][A-Za-z0-9 ,._:/-]*$/;
 
 export const orderNumber = (id: string): number => Number(STANDING_ORDER_ID.exec(id)?.[1] ?? 0);
 
-const oneLine = (field: string, value: unknown, max: number): string => {
+/** One trimmed line of at most `max` characters, with no control or format character, or `so-invalid` naming the field. */
+export const oneLine = (field: string, value: unknown, max: number): string => {
   if (typeof value !== 'string' || !value.trim()) throw new StandingOrderError('so-invalid', `${field}: required, one line of at most ${max} characters`);
   const text = value.trim();
   if (REFUSED.test(text)) throw new StandingOrderError('so-invalid', `${field}: one line, with no control or format character`);

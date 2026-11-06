@@ -1,8 +1,10 @@
 import { alertOpenedAttention } from '@/lib/attention-alerts';
 import { MissionControlError } from '@/lib/mission-control-errors';
 import { resolveMissionTargetIdentity } from '@/lib/mission-control-runtime';
-import { getMissionControlStore, type IMissionEventAuthority, type IMissionItemOpener } from '@/lib/mission-control-store';
-import { parseMissionEventBatch } from '@/lib/mission-control-validation';
+import {
+  getMissionControlStore, type IMissionEventAuthority, type IMissionItemOpener, type TMissionSoProposalInput,
+} from '@/lib/mission-control-store';
+import { SO_PROPOSAL_ITEM_PREFIX, parseMissionEventBatch } from '@/lib/mission-control-validation';
 import { readQuestionMinVersion } from '@/lib/mission-question-config';
 import { getWorkspaceById } from '@/lib/workspace-store';
 
@@ -16,7 +18,7 @@ export const applyMissionEventBatch = async (
   workspaceId: string,
   rawEvents: unknown,
   opener: IMissionItemOpener | null,
-  options: { serverPrefix?: string } = {},
+  options: { serverPrefix?: string; soProposals?: ReadonlyMap<string, TMissionSoProposalInput> } = {},
 ) => {
   const questionMinVersion = await readQuestionMinVersion();
   const { events, lint } = parseMissionEventBatch(rawEvents, { questionMinVersion, serverPrefix: options.serverPrefix });
@@ -54,12 +56,21 @@ export const applyMissionEventBatch = async (
   // too). Read after the last await and straight before the apply, so nothing can commit in between.
   const previousStates = store.itemStates(events.flatMap((event) =>
     (event.type === 'attention.updated' && unreplayed.has(event.eventId) ? [event.payload.itemId] : [])));
-  const applied = store.applyEvents(events, authorities, { questionMinVersion });
+  // A proposal record rides only its own server producer's events (ADR-0041 §1 amendment D7).
+  const soProposals = options.serverPrefix && options.soProposals ? options.soProposals : undefined;
+  const applied = store.applyEvents(events, authorities, { questionMinVersion, soProposals });
   // An item that first becomes owner-visible alerts once (ADR-0032 channels), a server-opened one too; a replayed event never does.
   void alertOpenedAttention({ events: applied.events, fresh: unreplayed, openerTabId: opener?.tabId ?? null, previousStates });
   // An ask the owner must approve or decide, a server-opened NEEDS-DECISION one too, is matched against the standing
   // orders in shadow (ADR-0038 §2); a replay never is. Imported here so the curator never sits in this module's graph.
   const fresh = events.filter((event) => unreplayed.has(event.eventId));
   if (fresh.length) void import('@/lib/curator-service').then((curator) => curator.curatorOnMissionEvents(fresh)).catch(() => undefined);
+  // The SM withdraws a fleet standing-order proposal with attention.cancelled (ADR-0041 §1 amendment D7): settle it now,
+  // not at the next 60 s pass. An answer that came first still decides.
+  const withdrawn = fresh.flatMap((event) => (event.type === 'attention.cancelled' && event.payload.itemId.startsWith(SO_PROPOSAL_ITEM_PREFIX)
+    ? [event.payload.itemId] : []));
+  if (withdrawn.length) {
+    void import('@/lib/so-proposal-service').then((m) => withdrawn.forEach((itemId) => m.settleProposalSoon(itemId))).catch(() => undefined);
+  }
   return { ...applied, humanInboxPolicy: store.humanInboxPolicy(workspaceId), lint };
 };

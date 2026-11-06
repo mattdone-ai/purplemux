@@ -3,13 +3,24 @@ import { renderPaneResult } from '@/lib/pane-suggestions';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { TComposerReading } from '@/types/fleet-status';
 import type { TPanelType } from '@/types/terminal';
+import type { TStartupPrompt } from '@/types/timeline';
 
 // The checks an unattended sender runs before typing into an agent's
 // composer (ADR-0008, ADR-0012). Extracted from Mission Control's dispatch so
 // Mission Control and the tab inbox ask the same questions in the same order
 // and name a refusal the same way.
 
-const tail = (content: string, lines = 24): string => content.split('\n').slice(-lines).join('\n');
+/**
+ * The last `lines` lines of a capture, after the blank rows under the content: a pane taller than what the
+ * agent drew pads it with empty rows (measured: Claude Code 2.1.318 at 120x40 drew its composer with 26 blank
+ * rows below it), and those rows would push the composer out of the window.
+ */
+const tail = (content: string, lines = 24): string => {
+  const all = content.split('\n');
+  let end = all.length;
+  while (end > 0 && all[end - 1].replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '').trim() === '') end -= 1;
+  return all.slice(Math.max(0, end - lines), end).join('\n');
+};
 
 const composerMarker = (panelType: TPanelType | undefined): string | null => (panelType === 'codex-cli'
   ? '›'
@@ -51,6 +62,58 @@ export const paneShowsEmptyComposer = (panelType: TPanelType | undefined, conten
   if (parsePermissionOptions(tail(plain)).options.length > 0) return false;
   return hasEmptyAgentComposer(panelType, plain);
 };
+
+/**
+ * The Claude Code startup dialogs that stop a tab before any hook runs (D14). Texts measured on Claude Code
+ * 2.1.318 (the pane fixtures in tests/fixtures/panes/: `claude-trust-prompt*.ansi`,
+ * `claude-external-imports-*.ansi`); the older trust wording ("Do you trust the files in this folder?",
+ * numbered options) is kept. A dialog counts only with its heading, then one of its own option lines after
+ * it, each at line start, and no composer line (`❯` at line start) after the last option line: a real
+ * dialog draws no composer, and a transcript that quotes the dialog always has the composer under it
+ * (review r1 nit 4).
+ */
+const STARTUP_PROMPTS: ReadonlyArray<{ kind: TStartupPrompt; heading: RegExp; option: RegExp }> = [
+  {
+    kind: 'folder-trust',
+    heading: /^[ \t]*(?:Accessing workspace:|Do you trust the files in this folder\?)/,
+    option: /^[ \t]*(?:❯[ \t]*)?(?:\d+\.[ \t]*)?(?:Yes, I trust this folder|Yes, proceed|No, exit)\b/,
+  },
+  {
+    kind: 'external-imports',
+    heading: /^[ \t]*Allow external CLAUDE\.md file imports\?/,
+    option: /^[ \t]*(?:❯[ \t]*)?(?:\d+\.[ \t]*)?(?:Yes, allow external imports|No, disable external imports)\b/,
+  },
+];
+
+/** How far up the startup-dialog read looks: the trust dialog is 15 lines, plus a long wrapped path. */
+const STARTUP_PROMPT_SCAN_LINES = 40;
+
+/** The startup dialog a Claude pane shows, or null. Only Claude Code has these dialogs. */
+export const paneStartupPrompt = (panelType: TPanelType | undefined, content: string): TStartupPrompt | null => {
+  if (panelType !== 'claude-code') return null;
+  const plain = tail(withoutSuggestions(panelType, content), STARTUP_PROMPT_SCAN_LINES);
+  // A dialog that was answered is erased; an empty composer below old text means the agent is past it.
+  if (hasEmptyAgentComposer(panelType, plain)) return null;
+  const lines = plain.split('\n');
+  for (const prompt of STARTUP_PROMPTS) {
+    const heading = lines.findIndex((line) => prompt.heading.test(line));
+    if (heading < 0) continue;
+    let lastOption = -1;
+    for (let index = lines.length - 1; index > heading; index -= 1) {
+      if (prompt.option.test(lines[index])) {
+        lastOption = index;
+        break;
+      }
+    }
+    if (lastOption < 0) continue;
+    if (lines.slice(lastOption + 1).some((line) => COMPOSER_LINE.test(line))) continue;
+    return prompt.kind;
+  }
+  return null;
+};
+
+/** A composer line, empty or typed: the `❯` marker at line start. */
+const COMPOSER_LINE = /^[ \t]*❯/;
 
 /** How far up a fleet read looks for the composer line: a typed multi-line brief wraps far above 12 lines. */
 const COMPOSER_SCAN_LINES = 60;

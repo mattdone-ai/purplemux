@@ -19,7 +19,7 @@ import { createRateLimitsWatcher } from '@/lib/rate-limits-watcher';
 import { createClaudeUsagePoller } from '@/lib/claude-usage-poller';
 import { createLogger } from '@/lib/logger';
 import { capturePaneAtWidth } from '@/lib/capture-at-width';
-import { paneShowsEmptyComposer } from '@/lib/composer-readiness';
+import { paneShowsEmptyComposer, paneStartupPrompt } from '@/lib/composer-readiness';
 import { isCodexTuiReadyContent } from '@/lib/codex-tui-ready-detector';
 import { CODEX_PROVIDER_ID } from '@/lib/providers/codex';
 import { GROK_PROVIDER_ID } from '@/lib/providers/grok';
@@ -31,9 +31,17 @@ import { cacheCodexRateLimitsFromJsonl } from '@/lib/codex-rate-limits-cache';
 import { parsePermissionOptions } from '@/lib/permission-prompt';
 import type { IPaneInfo } from '@/lib/tmux';
 import type { ITab, IWorkspace, TPanelType } from '@/types/terminal';
-import type { TCliState } from '@/types/timeline';
-import type { ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
+import type { TCliState, TStartupPrompt } from '@/types/timeline';
+import type { IStartupPromptReading, ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
 import { addStandup, readAllLatestStandups, readLatestStandupEvidence } from '@/lib/standup-store';
+import {
+  STANDUP_DUE_CONFIG_KEY,
+  STANDUP_DUE_DEFAULT_MS,
+  STANDUP_DUE_KIND,
+  buildStandupDueLine,
+  parseStandupDueMinutes,
+  standupDueBucketMs,
+} from '@/lib/standup';
 import { buildNudgeMessage, buildHeartbeatMessage, nudgeKindForTransition, MAX_NUDGE_HISTORY, KICKOFF_FALLBACK_DELAY_MS, ORCH_IDLE_HEARTBEAT_MS, ORCH_MAX_HEARTBEATS } from '@/lib/orchestration';
 import { getSignalEngine } from '@/lib/signal-engine';
 import {
@@ -49,6 +57,7 @@ import {
   longWaitDue,
   parseIdleNudgeMinutes,
   parseWaitBackstopHours,
+  readTurnEnd,
   reportOnAdmits,
 } from '@/lib/turn-end';
 import { NudgeDeduper } from '@/lib/nudge-dedupe';
@@ -178,7 +187,18 @@ export const READINESS_PROBE_AFTER_MS = 8_000;
 // Claude only. grok-cli joins once a real grok pane is pinned as a fixture
 // (story 30 F8): its `[›❯>]` marker also matches a bare `>` line.
 const PANE_PROBE_PANELS: ReadonlySet<TPanelType> = new Set<TPanelType>(['claude-code']);
-const AGENT_GUARDED_STATES: Set<TCliState> = new Set(['busy', 'idle', 'needs-input', 'ready-for-review']);
+/**
+ * A persisted state as a restart reads it: `busy` is unknown until a hook speaks, and `startup-prompt` (runtime
+ * only, D14) is `inactive` until the pane probe reads the dialog again.
+ */
+const restoredCliState = (persisted: TCliState): TCliState => (persisted === 'busy'
+  ? 'unknown'
+  : persisted === 'startup-prompt' ? 'inactive' : persisted);
+
+/** What the Claude pane probe saw: an empty composer, a startup dialog, another screen, or no look yet. */
+type TPaneProbeReading = 'ready' | TStartupPrompt | 'other' | 'unread';
+
+const AGENT_GUARDED_STATES: Set<TCliState> = new Set(['busy', 'idle', 'needs-input', 'ready-for-review', 'startup-prompt']);
 // tmux set-titles emits "<cmd>|<path>" once a shell takes over the pane.
 // An agent CLI normally writes its own title (no pipe), so this regex
 // distinguishes "agent gone" from "agent rewrote title" without a process call.
@@ -248,6 +268,8 @@ interface INeedsDecisionResult {
   note: string;
   /** The nudge goes out whatever the tab's reportOn. */
   mustReach: boolean;
+  /** The nudge's recipient, chosen for a reportsTo tab's question (D28); absent: the escalation target. */
+  target?: string;
   /**
    * What the asking tab itself is told, once per line, notice and id a day. `ifUnheard`: only when the nudge carrying
    * the note does not go out (no escalation target, or its reportOn holds the marker back).
@@ -273,6 +295,13 @@ export class StatusManager {
   // tool call. Cached with a short TTL and refreshed off the hot path.
   private tabScopeCache = new Map<string, { scope?: string[]; cwd?: string; at: number }>();
   private orchKeeper = new Map<string, { idleSince: number | null; beats: number; lastBeatAt: number; stallAlerted: boolean }>();
+  /**
+   * Story hfl2-10: per workspace, the standup the due line counted from (its `at`, or the run's start) and the due
+   * bucket last routed for it. In memory: a server restart can repeat the line once for the current bucket.
+   */
+  private standupDueSent = new Map<string, { base: number; bucket: number }>();
+  /** Story hfl2-10: when this server first saw the workspace orchestrated; a run with no standup counts from it. */
+  private orchRunSeenAt = new Map<string, number>();
   /** Identical nudges within 60 s are dropped and counted (L49). */
   private nudgeDedupe = new NudgeDeduper();
   /** Turn-marker nudges a tab's `reportOn` withheld since the server started (ADR-0025). */
@@ -614,7 +643,7 @@ export class StatusManager {
         const provider = getProviderByPanelType(tab.panelType);
         const detected = await this.readTabMetadata(paneInfo, provider, tab);
         const persisted: TCliState = (tab.cliState as TCliState | undefined) ?? 'idle';
-        const cliState: TCliState = persisted === 'busy' ? 'unknown' : persisted;
+        const cliState: TCliState = restoredCliState(persisted);
 
         const { terminalStatus, listeningPorts } = provider
           ? { terminalStatus: 'idle' as const, listeningPorts: [] as number[] }
@@ -1022,7 +1051,7 @@ export class StatusManager {
 
         if (!existing) {
           const persisted: TCliState = (tab.cliState as TCliState | undefined) ?? 'idle';
-          const initialState: TCliState = persisted === 'busy' ? 'unknown' : persisted;
+          const initialState: TCliState = restoredCliState(persisted);
           const detected = await this.readTabMetadata(paneInfo, provider, tab);
           // lastEvent는 메모리 전용이라 재시작 시 유실. persisted needs-input을 복원할 때는
           // 클라이언트 ack가 seq=0과 매칭할 baseline이 필요하므로 합성한다.
@@ -1185,15 +1214,20 @@ export class StatusManager {
           }
         }
 
-        if (existing.cliState !== 'inactive') {
+        if (existing.cliState !== 'inactive' && existing.cliState !== 'startup-prompt') {
           this.inactiveSeenAt.delete(tab.id);
         } else if (provider && existing.panelType && PANE_PROBE_PANELS.has(existing.panelType)) {
           const seq = existing.eventSeq;
-          if (await this.checkAgentPaneReady(tab.id, existing, now, checkAgentRunning)
-              && this.stillInactiveAt(tab.id, existing, seq)) {
+          const probedState = existing.cliState;
+          const reading = await this.checkAgentPaneReady(tab.id, existing, now, checkAgentRunning);
+          if (reading === 'ready' && this.stillAt(tab.id, existing, probedState, seq)) {
             this.inactiveSeenAt.delete(tab.id);
             hookLog.info({ tabId: tab.id, panelType: existing.panelType }, 'readiness: pane-probe — synthetic session-start');
             this.updateTabFromHook(existing.tmuxSession, 'session-start');
+            continue;
+          }
+          if (reading !== 'ready' && reading !== 'unread' && this.stillAt(tab.id, existing, probedState, seq)
+              && this.applyStartupPromptReading(tab.id, existing, reading, now)) {
             continue;
           }
         }
@@ -1470,18 +1504,28 @@ export class StatusManager {
     if (!workspaceData) return;
     const workspaces = workspaceData.workspaces;
     const now = Date.now();
+    let standupDueMs: number | null = null;
+    const dueMs = async () => (standupDueMs ??= await this.readStandupDueMs());
     for (const ws of workspaces) {
       const orch = ws.orchestration;
-      if (!orch?.enabled || !orch.orchestratorTabId) { this.orchKeeper.delete(ws.id); continue; }
-      if (this.standups.get(ws.id)?.state === 'awaiting-human') { this.orchKeeper.delete(ws.id); continue; }
+      if (!orch?.enabled || !orch.orchestratorTabId) {
+        this.orchKeeper.delete(ws.id);
+        this.orchRunSeenAt.delete(ws.id);
+        this.standupDueSent.delete(ws.id);
+        continue;
+      }
+      if (!this.orchRunSeenAt.has(ws.id)) this.orchRunSeenAt.set(ws.id, now);
       const entry = this.tabs.get(orch.orchestratorTabId);
-      if (!entry) { this.orchKeeper.delete(ws.id); continue; }
-
-      const state = this.orchKeeper.get(ws.id) ?? { idleSince: null, beats: 0, lastBeatAt: 0, stallAlerted: false };
       const workersActive = [...this.tabs.entries()].some(([id, t]) =>
         id !== orch.orchestratorTabId && t.workspaceId === ws.id
         && isAgentPanelType(t.panelType)
         && (t.cliState === 'busy' || t.cliState === 'needs-input' || t.cliState === 'ready-for-review'));
+      // Story hfl2-10 (CARRY): an orchestrator with live workers is never heartbeaten, so the due line is its wake.
+      if (entry && workersActive) await this.announceStandupDue(ws.id, orch.orchestratorTabId, now, await dueMs());
+      if (this.standups.get(ws.id)?.state === 'awaiting-human') { this.orchKeeper.delete(ws.id); continue; }
+      if (!entry) { this.orchKeeper.delete(ws.id); continue; }
+
+      const state = this.orchKeeper.get(ws.id) ?? { idleSince: null, beats: 0, lastBeatAt: 0, stallAlerted: false };
 
       // busy = working; needs-input = waiting on the HUMAN (the alert already fired) — do not nag.
       if (entry.cliState === 'busy' || entry.cliState === 'needs-input' || workersActive) {
@@ -1517,6 +1561,8 @@ export class StatusManager {
       const idleMinutes = Math.round((now - state.idleSince) / 60_000);
       const message = buildHeartbeatMessage(idleMinutes, ws.id);
       const beats = state.beats + 1;
+      // The heartbeat's 160-character digest line would cut a line appended to it: the due line rides as its own row.
+      await this.announceStandupDue(ws.id, orch.orchestratorTabId, now, await dueMs());
       const { delivered } = await this.sendNudge(ws.id, orch.orchestratorTabId, orch.orchestratorTabId, entry.tabName, 'heartbeat', message, { beat: beats });
       // Last heartbeat of the episode: the orchestrator slept through every
       // nudge purplemux can send, so the human is the only one left to ask.
@@ -1529,6 +1575,43 @@ export class StatusManager {
       }
       log.info({ workspaceId: ws.id, beats, delivered }, 'orchestrator heartbeat');
     }
+  }
+
+  /** Fleet config `standup.dueMin` (ADR-0019), read once per keeper pass; the default on any problem. */
+  private async readStandupDueMs(): Promise<number> {
+    let fleet: Awaited<ReturnType<typeof readFleetConfig>> | null = null;
+    try {
+      fleet = await readFleetConfig();
+    } catch (err) {
+      log.warn(`fleet config unreadable; the standup due age stays at its default: ${err instanceof Error ? err.message : err}`);
+    }
+    return this.fleetDurationMs(fleet, STANDUP_DUE_CONFIG_KEY, parseStandupDueMinutes, STANDUP_DUE_DEFAULT_MS);
+  }
+
+  /**
+   * Story hfl2-10 (AC 1, AC 2; CARRY): when the workspace's newest standup is older than the due age (a workspace with
+   * none counts from the run's start), route the due line to the orchestrator once per due bucket (45, 90, 180 ...
+   * min). The line is a held digest row that makes the orchestrator's digest due at once (ADR-0035 §3), so it reaches
+   * the orchestrator at its next prompt, with every held event, in one wake. It replaces a due line still held.
+   */
+  private async announceStandupDue(workspaceId: string, orchestratorTabId: string, now: number, dueMs: number): Promise<void> {
+    const lastPostedAt = this.standups.get(workspaceId)?.at ?? null;
+    const base = lastPostedAt ?? this.orchRunSeenAt.get(workspaceId) ?? now;
+    const bucket = standupDueBucketMs(now - base, dueMs);
+    if (bucket === null) return;
+    const sent = this.standupDueSent.get(workspaceId);
+    if (sent && sent.base === base && sent.bucket >= bucket) return;
+    // Claimed before any await: a concurrent keeper pass cannot route the same bucket twice.
+    this.standupDueSent.set(workspaceId, { base, bucket });
+    this.tabEvents.retireKind(workspaceId, orchestratorTabId, STANDUP_DUE_KIND);
+    const routed = await this.tabEvents.route({
+      workspaceId,
+      tabId: orchestratorTabId,
+      kind: STANDUP_DUE_KIND,
+      text: buildStandupDueLine(workspaceId, now - base, lastPostedAt),
+      class: classifyWake(STANDUP_DUE_KIND),
+    });
+    log.info({ workspaceId, orchestratorTabId, bucketMin: Math.round(bucket / 60_000), delivered: routed.delivered, seq: routed.seq }, 'standup due line routed');
   }
 
   private async runOrchestratorPresence(): Promise<void> {
@@ -1668,6 +1751,7 @@ export class StatusManager {
         agentSessionId: entry.agentSessionId,
         compactingSince: entry.compactingSince,
         permissionRequest: entry.permissionRequest,
+        startupPrompt: entry.startupPrompt ?? null,
         lastEvent: entry.lastEvent,
         eventSeq: entry.eventSeq,
         turnEnd: entry.turnEnd ?? null,
@@ -1681,7 +1765,13 @@ export class StatusManager {
     entry: ITabStatusEntry,
     newState: TCliState,
     /** `nudge: null` keeps the human alert and sends the orchestrator nothing (a stop with no end line, L49). */
-    opts: { silent?: boolean; nudge?: { kind: TOrchestrationNudgeKind; detail: string } | null } = {},
+    opts: {
+      silent?: boolean;
+      /** `target`: the recipient the caller chose (a reportsTo tab's question, D28); otherwise the escalation target. */
+      nudge?: { kind: TOrchestrationNudgeKind; detail: string; target?: string } | null;
+      /** The dialog of a move to `startup-prompt` (D14); every other state clears it. */
+      startupPrompt?: IStartupPromptReading;
+    } = {},
   ): void {
     const prevState = entry.cliState;
     if (prevState === newState) {
@@ -1690,6 +1780,7 @@ export class StatusManager {
     }
     const prevBusySince = entry.busySince;
     entry.cliState = newState;
+    entry.startupPrompt = newState === 'startup-prompt' ? opts.startupPrompt ?? null : null;
     // The agent process is gone: its halt went with it.
     if (newState === 'inactive' && entry.turnError?.class === 'usage-limit') this.closeTurnErrorEpisode(entry, 'agent-exited');
     entry.readyForReviewAt = newState === 'ready-for-review' ? Date.now() : null;
@@ -1725,8 +1816,8 @@ export class StatusManager {
     if (newState === 'idle' || newState === 'ready-for-review') this.contextLifecycle.onIdle(tabId);
     const nudgeKind = opts.nudge === null ? null : nudgeKindForTransition(prevState, newState, !!opts.silent);
     if (nudgeKind) {
-      const nudge = opts.nudge && !opts.silent ? opts.nudge : { kind: nudgeKind, detail: undefined };
-      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail).catch((err) => {
+      const nudge: { kind: TOrchestrationNudgeKind; detail?: string; target?: string } = opts.nudge && !opts.silent ? opts.nudge : { kind: nudgeKind };
+      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail, undefined, nudge.target).catch((err) => {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }
@@ -1858,6 +1949,8 @@ export class StatusManager {
     kind: TOrchestrationNudgeKind,
     detail?: string,
     episode = `seq:${entry.lastEvent?.seq ?? 'none'}`,
+    /** A recipient the caller already chose and checked (D28); otherwise the escalation target. */
+    targetOverride?: string,
   ): Promise<boolean> {
     if (!isAgentPanelType(entry.panelType)) return false;
     // A tab being closed raises nothing: the close is deliberate (L38).
@@ -1867,7 +1960,7 @@ export class StatusManager {
     }
     const ws = await getWorkspaceByIdCached(entry.workspaceId);
     if (!ws) return false;
-    const targetTabId = this.escalationTarget(tabId, entry, ws);
+    const targetTabId = targetOverride ?? this.escalationTarget(tabId, entry, ws);
     if (!targetTabId) return false;
 
     const now = Date.now();
@@ -1967,6 +2060,14 @@ export class StatusManager {
     const current = this.standups.get(standup.workspaceId);
     if (current && current.at > standup.at) return;
     this.standups.set(standup.workspaceId, standup);
+    this.standupDueSent.delete(standup.workspaceId);
+    // A due line still held would now be false (story hfl2-10).
+    void getWorkspaceByIdCached(standup.workspaceId).then((ws) => {
+      const orchestratorTabId = ws?.orchestration?.orchestratorTabId;
+      if (orchestratorTabId) this.tabEvents.retireKind(standup.workspaceId, orchestratorTabId, STANDUP_DUE_KIND);
+    }).catch((err) => {
+      log.warn(`held standup due line not retired: ${err instanceof Error ? err.message : err}`);
+    });
     await addStandup(standup).catch((err) => {
       log.warn(`standup persist failed: ${err instanceof Error ? err.message : err}`);
     });
@@ -2595,46 +2696,76 @@ export class StatusManager {
   }
 
   /**
-   * The Claude/Grok readiness fallback (story 17): `inactive` for longer than
+   * The Claude/Grok readiness fallback (story 17): `inactive` (or `startup-prompt`) for longer than
    * READINESS_PROBE_AFTER_MS, the agent process running, and the pane showing an
-   * empty composer with no option list over it. A trust prompt or a first-run
-   * picker is not ready. Never inferred from a persisted `idle` (no process check).
+   * empty composer with no option list over it: `ready`. A trust or imports dialog
+   * is not ready: its kind (D14). A first-run picker or any other screen: `other`.
+   * No look at the pane (too early, no agent process): `unread`. Never inferred
+   * from a persisted `idle` (no process check).
    */
   private async checkAgentPaneReady(
     tabId: string,
     entry: ITabStatusEntry,
     now: number,
     checkAgentRunning: () => Promise<boolean>,
-  ): Promise<boolean> {
+  ): Promise<TPaneProbeReading> {
     // The clock runs only while the agent runs: a tab idling at a shell does not
     // age it, and a relaunch typed at the shell starts it again (review r1: a
     // stale clock probed a booting TUI at +700 ms). A launch through
     // markAgentLaunch is held off by the launch-stamp wait below.
     if (!(await checkAgentRunning())) {
       this.inactiveSeenAt.delete(tabId);
-      return false;
+      return 'unread';
     }
     const since = this.inactiveSeenAt.get(tabId);
     if (since === undefined) {
       this.inactiveSeenAt.set(tabId, now);
-      return false;
+      return 'unread';
     }
-    if (now - since < READINESS_PROBE_AFTER_MS) return false;
+    if (now - since < READINESS_PROBE_AFTER_MS) return 'unread';
     const launch = entry.lastResumeOrStartedAt;
-    if (launch !== undefined && now - launch < READINESS_PROBE_AFTER_MS) return false;
+    if (launch !== undefined && now - launch < READINESS_PROBE_AFTER_MS) return 'unread';
     // The pane at its own size: the marker check needs no width, and a resize
     // would pause a narrow viewer on every poll while a trust prompt waits.
     const content = await capturePaneContent(entry.tmuxSession, { escapes: true });
-    return !!content && paneShowsEmptyComposer(entry.panelType, content);
+    if (!content) return 'other';
+    if (paneShowsEmptyComposer(entry.panelType, content)) return 'ready';
+    return paneStartupPrompt(entry.panelType, content) ?? 'other';
   }
 
   /**
-   * After a probe's awaits: the tab is still this entry, still inactive, and no
+   * A probe that read the pane, in `inactive` or `startup-prompt` (D14): a startup dialog moves the tab to
+   * `startup-prompt` (or names the new dialog); any other screen moves a `startup-prompt` tab back to
+   * `inactive`. Silent, and no orchestrator nudge: the agent did not exit. True when the state changed.
+   */
+  private applyStartupPromptReading(tabId: string, entry: ITabStatusEntry, reading: TStartupPrompt | 'other', now: number): boolean {
+    if (reading === 'other') {
+      if (entry.cliState !== 'startup-prompt') return false;
+      hookLog.info({ tabId }, 'readiness: startup prompt gone — back to inactive');
+      this.applyCliState(tabId, entry, 'inactive', { silent: true, nudge: null });
+    } else {
+      if (entry.cliState === 'startup-prompt' && entry.startupPrompt?.kind === reading) return false;
+      hookLog.info({ tabId, startupPrompt: reading }, 'readiness: the agent waits at a startup prompt');
+      if (entry.cliState === 'startup-prompt') entry.startupPrompt = { kind: reading, since: now };
+      else this.applyCliState(tabId, entry, 'startup-prompt', { silent: true, nudge: null, startupPrompt: { kind: reading, since: now } });
+    }
+    this.persistToLayout(entry);
+    this.broadcastUpdate(tabId, entry);
+    return true;
+  }
+
+  /**
+   * After a probe's awaits: the tab is still this entry, still in the probed state, and no
    * event arrived meanwhile. A prompt-submit or notification in that window must
    * not be overwritten by the synthetic session start (a false turn end).
    */
+  private stillAt(tabId: string, entry: ITabStatusEntry, probedState: TCliState, seq: number | undefined): boolean {
+    return this.tabs.get(tabId) === entry && entry.cliState === probedState && entry.eventSeq === seq;
+  }
+
+  /** As {@link stillAt} for an `inactive` tab (the Codex TUI detector). */
   private stillInactiveAt(tabId: string, entry: ITabStatusEntry, seq: number | undefined): boolean {
-    return this.tabs.get(tabId) === entry && entry.cliState === 'inactive' && entry.eventSeq === seq;
+    return this.stillAt(tabId, entry, 'inactive', seq);
   }
 
   /** A hook or launch bound the session: the poll no longer owns it, and a write in flight does not reclaim it. */
@@ -2776,6 +2907,11 @@ export class StatusManager {
       liveRegisteredJobs,
       armedWatches,
     });
+    if (turnEnd.kind !== 'turn-marker') {
+      // One end line carries one marker (D28): a refused line opens nothing, and it is logged with its text.
+      const read = readTurnEnd(snapshot?.lastAssistantTail);
+      if (read?.kind === 'refused') log.warn({ tabId, line: read.line, reason: read.reason }, 'end line refused: it holds two turn markers, one of them NEEDS-DECISION, so it is no end line');
+    }
     // HANDOFF-READY answers a ROTATE; the check itself waits for the prompt (ADR-0036 §2).
     this.contextLifecycle.onTurnEnd(tabId, snapshot?.lastAssistantTail);
     // A replayed stop ended its turn when it happened, so the idle clocks start there.
@@ -2796,10 +2932,15 @@ export class StatusManager {
     }
     // Whatever its reportOn, a NEEDS-DECISION turn reaches the owner as a Mission Control item (ADR-0041). The item
     // opens before the nudge, so the nudge names it and the orchestrator never copies the question (review r1, R1).
+    // A tab with a reportsTo asks that tab, never the owner (D28, SO-6): only a tab with no reportsTo opens an item.
     let decision: INeedsDecisionResult = { note: '', mustReach: false, asker: null };
     const endLine = turnEnd.kind === 'turn-marker' ? turnEnd.lines.at(-1) : undefined;
     if (stopSeq !== undefined && endLine?.startsWith('NEEDS-DECISION:')) {
-      decision = await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at, previous?.at ?? entry.busySince ?? at);
+      const reportsTo = entry.reportsTo && entry.reportsTo !== tabId ? entry.reportsTo : null;
+      const routed = reportsTo ? await this.routeNeedsDecisionToReportsTo(tabId, entry, reportsTo, snapshot?.lastAssistantTail, endLine) : null;
+      // A question never vanishes (review r1, 1): with no live tab to take it, it opens today's owner item.
+      decision = routed ?? await this.openNeedsDecision(tabId, entry, snapshot?.lastAssistantTail, endLine, stopSeq, at,
+        previous?.at ?? entry.busySince ?? at, reportsTo ? `reports-to target unavailable: ${reportsTo} is gone or halted, and no live orchestrator can take it` : undefined);
       if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
     }
     if (turnEnd.kind === 'turn-marker') {
@@ -2829,18 +2970,23 @@ export class StatusManager {
       log.info({ tabId, marker: turnEnd.lines.at(-1), reportOn: entry.reportOn, filtered: this.reportOnFiltered }, 'turn-marker nudge withheld: the marker is outside the tab\'s reportOn');
     }
     const nudge = forwarded && turnEnd.kind === 'turn-marker'
-      ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}` }
+      ? { kind: 'turn-marker' as const, detail: `${turnEnd.lines.join('\n')}${decision.note}`, ...(decision.target ? { target: decision.target } : {}) }
       : null;
-    // The note reached a tab only if this nudge goes out to a target (review r1, finding 4).
-    const askerHeard = decision.asker?.ifUnheard && nudge !== null
-      && await this.hasEscalationTarget(tabId, entry);
+    const toTarget = decision.asker?.ifUnheard && nudge !== null
+      && (decision.target !== undefined || await this.hasEscalationTarget(tabId, entry));
     if (this.tabs.get(tabId) !== entry || entry.lastEvent?.name !== 'stop' || entry.lastEvent.seq !== stopSeq) return;
+    // A tab already ready-for-review that ends on the same marker again sends no second nudge: the repeat filter.
+    const repeat = entry.cliState === 'ready-for-review' && previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
+      && previous.marker?.join('\n') === turnEnd.lines.join('\n');
+    const sent = repeat ? null : nudge;
+    // The note reached a tab only if the nudge that survives the repeat filter goes out to a target (review r1,
+    // finding 4; #521): a held-back repeat carries no note, so the asker hears it itself.
+    const askerHeard = toTarget && sent !== null;
     if (entry.cliState !== 'ready-for-review') {
       this.applyCliState(tabId, entry, 'ready-for-review', { nudge });
       this.persistToLayout(entry);
-    } else if (nudge && !(previous?.kind === 'turn-marker' && turnEnd.kind === 'turn-marker'
-      && previous.marker?.join('\n') === turnEnd.lines.join('\n'))) {
-      this.nudgeOrchestrator(tabId, entry, nudge.kind, nudge.detail).catch((err) => {
+    } else if (sent) {
+      this.nudgeOrchestrator(tabId, entry, sent.kind, sent.detail, undefined, decision.target).catch((err) => {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }
@@ -2862,11 +3008,42 @@ export class StatusManager {
    */
   private tellAsker(tabId: string, entry: ITabStatusEntry, lineKey: string, notice: TNeedsDecisionAskerNotice): void {
     if (this.isRetired(tabId)) return;
-    const key = `${lineKey}:${notice.kind === 'item' ? 'item' : 'not-opened'}:${notice.itemId}`;
+    const key = `${lineKey}:${notice.kind}:${'itemId' in notice ? notice.itemId : ''}`;
     if (onceADay(needsDecisionAskerNotices(), key, Date.now()) !== null) return;
     void this.tabEvents.route({
       workspaceId: entry.workspaceId, tabId, kind: 'mission', text: needsDecisionAskerNotice(notice), class: classifyWake('mission'),
     }).catch((err) => log.warn(`NEEDS-DECISION notice to ${tabId} failed: ${err instanceof Error ? err.message : err}`));
+  }
+
+  /**
+   * A NEEDS-DECISION line of a tab with a reportsTo (D28): the question belongs to that tab, so no owner item opens and no
+   * owner push goes out. The recipient is the reportsTo while it is a live agent tab not halted by a usage limit, else a
+   * live, un-halted orchestrator; the nudge goes to it whatever the tab's reportOn. With neither, null: the caller opens
+   * today's owner item, so the question never vanishes (review r1, 1).
+   */
+  private async routeNeedsDecisionToReportsTo(
+    tabId: string, entry: ITabStatusEntry, reportsTo: string, tail: string | null | undefined, markerLine: string,
+  ): Promise<INeedsDecisionResult | null> {
+    const full = lastTurnLine(tail);
+    const line = full?.line.startsWith('NEEDS-DECISION:') ? full.line : markerLine;
+    const ws = await getWorkspaceByIdCached(entry.workspaceId);
+    const takes = (candidate: string | null | undefined): candidate is string =>
+      !!candidate && candidate !== tabId && this.isLiveAgentTab(candidate) && !this.isHaltedByUsageLimit(candidate);
+    const live = this.liveReportsTo(tabId, entry);
+    const orch = ws?.orchestration?.enabled ? ws.orchestration.orchestratorTabId : null;
+    const target = takes(live) ? live : takes(orch) ? orch : null;
+    if (!target) {
+      log.warn({ tabId, reportsTo, line }, 'NEEDS-DECISION of a tab with reportsTo: reports-to target unavailable and no live orchestrator; the owner item opens');
+      return null;
+    }
+    log.info({ tabId, reportsTo, target, line }, 'NEEDS-DECISION of a tab with reportsTo: sent to that tab, no owner item (D28)');
+    const by = target === reportsTo ? 'you' : `you, the orchestrator (${reportsTo} cannot take it)`;
+    return {
+      note: ` [no owner item: this tab reports to ${reportsTo}, so its NEEDS-DECISION is answered by ${by}, never sent to the owner (SO-6); answer it, or ask the owner on your own end line]`,
+      mustReach: true,
+      target,
+      asker: null,
+    };
   }
 
   /**
@@ -2876,11 +3053,14 @@ export class StatusManager {
    */
   private async openNeedsDecision(
     tabId: string, entry: ITabStatusEntry, tail: string | null | undefined, markerLine: string, stopSeq: number, stopAt: number,
-    turnStartedAt: number,
+    turnStartedAt: number, fallbackReason?: string,
   ): Promise<INeedsDecisionResult> {
     const full = lastTurnLine(tail);
     const { line, complete } = full?.line.startsWith('NEEDS-DECISION:') ? full : { line: markerLine, complete: false };
-    const stop = { workspaceId: entry.workspaceId, tabId, tabName: entry.tabName, line, lineComplete: complete, stopSeq, stopAt, turnStartedAt };
+    const stop = {
+      workspaceId: entry.workspaceId, tabId, tabName: entry.tabName, line, lineComplete: complete, stopSeq, stopAt, turnStartedAt,
+      ...(fallbackReason ? { fallbackReason } : {}),
+    };
     let outcome: TNeedsDecisionOutcome;
     try {
       outcome = await openNeedsDecisionItem(await needsDecisionDeps(), stop);
@@ -2891,6 +3071,14 @@ export class StatusManager {
     }
     if (!outcome.opened && outcome.reason === 'not-needs-decision') return { note: '', mustReach: false, asker: null };
     const lineKey = needsDecisionLineKey(entry.workspaceId, tabId, line);
+    // No `?`: the opener refused and logged it (D28). No push and no "open it yourself" note: the line asks nothing.
+    if (!outcome.opened && outcome.reason === 'no-question') {
+      return {
+        note: ' [no MC item: the NEEDS-DECISION line holds no question mark, so the server opened nothing and told no one]',
+        mustReach: false,
+        asker: { lineKey, notice: { kind: 'no-question' }, ifUnheard: true },
+      };
+    }
     const ws = await getWorkspaceByIdCached(entry.workspaceId);
     // The note rides the nudge to the escalation target; when that nudge does not go out, the asker hears it itself.
     const itemNotice = (state: 'opened' | 'already-open', itemId: string): INeedsDecisionResult['asker'] =>
@@ -3383,7 +3571,9 @@ export class StatusManager {
   }
 
   private persistToLayout(entry: ITabStatusEntry): void {
-    updateTabCliStatus(entry.tmuxSession, entry.cliState, entry.dismissedAt).catch(() => {});
+    // `startup-prompt` is runtime only (D14): the probe reads it again after a restart.
+    const persisted = entry.cliState === 'startup-prompt' ? 'inactive' : entry.cliState;
+    updateTabCliStatus(entry.tmuxSession, persisted, entry.dismissedAt).catch(() => {});
   }
 
   private broadcastUpdate(tabId: string, entry: ITabStatusEntry, exclude?: WebSocket): void {
@@ -3409,6 +3599,7 @@ export class StatusManager {
       agentSessionId: entry.agentSessionId,
       compactingSince: entry.compactingSince,
       permissionRequest: entry.permissionRequest,
+      startupPrompt: entry.startupPrompt ?? null,
       lastEvent: entry.lastEvent,
       eventSeq: entry.eventSeq,
     };

@@ -63,5 +63,7 @@
     }
   ],
   "recommendationWhy": "No owner session is active.",
-  "evidenceLinks": []
+  "evidenceLinks": [],
+  "followsUp": null,
+  "followedBy": null
 }

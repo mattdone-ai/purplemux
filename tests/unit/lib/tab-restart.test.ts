@@ -17,6 +17,7 @@ const tmux = vi.hoisted(() => ({
   killSession: vi.fn(),
   hasSession: vi.fn(async (_name: string) => false),
   hasSessionOrUnreachable: vi.fn(async (_name: string) => true),
+  probeRemoteKit: vi.fn(async (_name: string) => {}),
   createSession: vi.fn(async (name: string, _cols: number, _rows: number, _cwd?: string, identity?: { workspaceId: string; tabId: string }) => {
     // The real createSession hands the tab its token through ensureTabToken.
     if (identity) await (await import('@/lib/tab-token')).ensureTabToken(identity, name);
@@ -414,6 +415,46 @@ describe('restartTab (ADR-0028)', () => {
     // The identity is what makes createRemoteSession rewrite the prompt file and ship it: a remote restart
     // loads the standing orders active at the restart (ADR-0041; architect ruling on story 14 AC 2).
     expect(tmux.createSession).toHaveBeenCalledWith(session('tab-t'), 80, 24, '/srv/r', { workspaceId: WS, tabId: 'tab-t' });
+  });
+
+  // Story 12 review r1 finding 3 (measured): a restart kills the old session before its create runs, so a broken
+  // kit found only by the create would leave the tab dead. The restart probes the kit first.
+  it('a remote tab whose kit does not run is not restarted: nothing is killed, no event, and the error passes through', async () => {
+    const { RemoteKitBrokenError } = await import('@/lib/remote-kit');
+    const order: string[] = [];
+    tmux.hasSessionOrUnreachable.mockImplementationOnce(async () => { order.push('presence'); return true; });
+    tmux.probeRemoteKit.mockImplementationOnce(async () => {
+      order.push('probe');
+      throw new RemoteKitBrokenError('ai-server', "Error: Cannot find module './x.js'");
+    });
+    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    const events = await lifecycleEvents();
+    const { restartTab } = await import('@/lib/tab-restart');
+
+    await expect(restartTab(input())).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server' });
+    expect(order).toEqual(['presence', 'probe']);
+    expect(tmux.probeRemoteKit).toHaveBeenCalledWith(session('tab-t'));
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it('a local restart never probes a kit', async () => {
+    await writeLayout([claudeTab()]);
+    const { restartTab } = await import('@/lib/tab-restart');
+    expect((await restartTab(input())).body).toMatchObject({ ok: true });
+    expect(tmux.probeRemoteKit).not.toHaveBeenCalled();
+  });
+
+  it('a remote restart probes the kit before the kill', async () => {
+    const order: string[] = [];
+    tmux.probeRemoteKit.mockImplementationOnce(async () => { order.push('probe'); });
+    tmux.killSession.mockImplementation(async () => { order.push('kill'); return { ...REAP, reaper: 'remote', sessionGone: true }; });
+    tmux.hasSessionOrUnreachable.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    const { restartTab } = await import('@/lib/tab-restart');
+    expect((await restartTab(input())).body).toMatchObject({ ok: true });
+    expect(order).toEqual(['probe', 'kill']);
   });
 
   it('a remote host that does not answer kills nothing: 503 remote-host-unreachable', async () => {
