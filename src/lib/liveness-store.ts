@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { resolveLayoutDir } from '@/lib/layout-store';
 import { createLogger } from '@/lib/logger';
+import { isValidRemoteHostName } from '@/lib/remote-host';
 import type { IBackgroundJob, ILivenessProbe } from '@/types/liveness';
 
 const log = createLogger('liveness-store');
@@ -67,6 +68,7 @@ const isJob = (value: unknown): value is IBackgroundJob => {
     && Number.isSafeInteger(job.pid)
     && (job.pid as number) > 0
     && isFiniteNonnegative(job.registeredAt)
+    && (job.host === undefined || job.host === null || isValidRemoteHostName(job.host))
     && (job.label === undefined || typeof job.label === 'string')
     && (job.stderrFile === undefined || typeof job.stderrFile === 'string')
     && (job.exitCodeFile === undefined || typeof job.exitCodeFile === 'string')

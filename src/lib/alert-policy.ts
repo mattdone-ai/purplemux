@@ -133,6 +133,7 @@ const titleFor = (kind: TAlertKind): string => {
     case 'work-stalled': return 'Work Stalled';
     case 'bg-job-died': return 'Background Job Died';
     case 'bg-job-unknown': return 'Background Job Status Unknown';
+    case 'bg-host-unreachable': return 'Background Job Host Unreachable';
     case 'flag': return 'Flag Raised';
     case 'attention-opened': return 'Mission Control: answer needed';
     // A NEEDS-DECISION line no Mission Control item could take, and no orchestrator can act on (ADR-0041 §2).
@@ -154,6 +155,7 @@ const bodyFor = (source: IAlertSource): string => {
     case 'work-stalled':
     case 'bg-job-died':
     case 'bg-job-unknown':
+    case 'bg-host-unreachable':
       return source.detail?.slice(0, MAX_BODY) || source.tabName || source.tabId;
     case 'flag':
       return cutBody(source.detail || source.flag?.text || source.tabName || source.tabId);

@@ -112,6 +112,8 @@ export const WAKE_CLASS_TABLE: Readonly<Record<TWakeKind, TRule>> = {
   'model-drift': 'urgent',
   'bg-failed': byWaitingTab,
   'bg-exited-unknown': byWaitingTab,
+  // Goes to the orchestrator, never the tab on the host that is down (D63): the host stops that worker.
+  'bg-host-unreachable': 'urgent',
   'bg-died': byWaitingTab,
   'bg-completed': byWaitingTab,
   'ready-for-review': 'digest',

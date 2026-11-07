@@ -635,7 +635,13 @@ POST /api/cli/tabs/<tabId>/bg?workspaceId=WS
   Response: { "tabId", "workspaceId", "job" }
 
 GET /api/cli/tabs/<tabId>/bg?workspaceId=WS
-  Response: { "backgroundJobs": [{ "pid", "label", "alive", "registeredAt", "ageS" }] }
+  Response: { "backgroundJobs": [{ "pid", "label", "host"?, "alive", "state", "registeredAt", "ageS" }] }
+  host: the ssh alias the pid lives on, for a job registered from a remote tab (the
+  verified calling tab's host, else the target tab's); the pid and its files are read
+  there. state: alive | exited | unknown. alive is true only when the job is attested
+  running; unknown means its host has not answered and it is NOT known to have exited.
+  A host that fails 3 probes in a row sends one BACKGROUND JOB HOST UNREACHABLE nudge
+  to the reportsTo tab or orchestrator; the job stays watched.
 
 DELETE /api/cli/tabs/<tabId>/bg?workspaceId=WS[&pid=N]
   Stop watching (all for the tab, or one pid).

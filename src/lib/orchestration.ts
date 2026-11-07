@@ -144,6 +144,8 @@ export const buildNudgeMessage = (
       return `${NUDGE_PREFIX} ${who} BACKGROUND JOB FAILED: ${detail ?? 'a registered background pid exited nonzero'}. ${capture} — inspect stderr and artifacts, diagnose, then restart only when a bounded retry is justified. Repeated failures are systematic — stop restart-looping and escalate.`;
     case 'bg-exited-unknown':
       return `${NUDGE_PREFIX} ${who} BACKGROUND JOB EXITED with unknown status: ${detail ?? 'a registered background pid exited without a valid exit code'}. ${capture} — Inspect its artifacts and logs before deciding whether it succeeded or failed. Do not presume failure or restart blindly.`;
+    case 'bg-host-unreachable':
+      return `${NUDGE_PREFIX} ${who} BACKGROUND JOB HOST UNREACHABLE: ${detail ?? 'the host of a registered background pid does not answer'}. The job is NOT known to have exited and stays watched: its real exit is reported when the host answers. ${capture} — check the host (ssh, network, power) before you judge the job or its tab.`;
     case 'bg-died':
       return `${NUDGE_PREFIX} ${who} BACKGROUND JOB EXITED: ${detail ?? 'a legacy background-job notification did not record a reliable outcome'}. ${capture} — Inspect its artifacts and logs before deciding whether it succeeded or failed. Do not restart blindly.`;
     case 'model-drift':

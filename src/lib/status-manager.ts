@@ -66,6 +66,7 @@ import { readFleetConfig, valueOf } from '@/lib/fleet-config-store';
 import { enqueueNotice, onInboxHeld, withdrawNotice } from '@/lib/inbox-store';
 import type { IInboxItem } from '@/types/inbox';
 import { getLivenessManager } from '@/lib/liveness-manager';
+import { jobHoldsWork } from '@/lib/background-job-state';
 import { readLivenessEvidence } from '@/lib/liveness-store';
 import { getLeaseSweeper, setLeaseAgentStateSource, type ITabAgentState } from '@/lib/lease-sweeper';
 import { readLeaseEvidence } from '@/lib/lease-store';
@@ -1362,7 +1363,8 @@ export class StatusManager {
   // failure; these events are the freshness watcher that tells them apart.
   private async handleLivenessEvent(event: TLivenessEvent): Promise<void> {
     const src = 'probe' in event ? event.probe : event.job;
-    if ('job' in event) this.jobEventAt.set(src.tabId, Date.now());
+    // An unreachable host is no news from the job itself: the stall check must not wait on it.
+    if ('job' in event && event.kind !== 'bg-host-unreachable') this.jobEventAt.set(src.tabId, Date.now());
     // The close reaps the tab's registered jobs: their exit is the close, not a failure (L38).
     if (this.isRetired(src.tabId)) {
       log.info({ tabId: src.tabId, kind: event.kind }, 'liveness event dropped: its tab is being closed');
@@ -1370,6 +1372,11 @@ export class StatusManager {
     }
     const entry = this.tabs.get(src.tabId);
     const tabName = entry?.tabName ?? '';
+
+    if (event.kind === 'bg-host-unreachable') {
+      await this.reportUnreachableJobHost(event, tabName, entry);
+      return;
+    }
 
     let kind: TOrchestrationNudgeKind;
     let detail: string;
@@ -1415,6 +1422,33 @@ export class StatusManager {
       tabId: src.tabId,
       workspace: ws,
       workspaceId: src.workspaceId,
+      tabName,
+      providerId: toAlertProvider(entry?.agentProviderId),
+      agentSessionId: entry?.agentSessionId,
+      detail,
+    });
+  }
+
+  /**
+   * A remote job whose host failed the bounded probes (D63): its state is unknown, so it is never
+   * reported as an exit. The notice goes to the reportsTo tab or the orchestrator even for
+   * `--notify self`, since the registering tab runs on the host that does not answer, and it pages.
+   */
+  private async reportUnreachableJobHost(
+    event: Extract<TLivenessEvent, { kind: 'bg-host-unreachable' }>,
+    tabName: string,
+    entry: ITabStatusEntry | undefined,
+  ): Promise<void> {
+    const { job, host, failures, error } = event;
+    const label = job.label ? `"${job.label}" ` : '';
+    const detail = `${label}pid ${job.pid} on ${host}: the host did not answer ${failures} probes in a row (last: ${error}); the job's state is unknown`;
+    await this.nudgeLiveness(job.workspaceId, job.tabId, tabName, 'bg-host-unreachable', detail, undefined, `pid:${job.pid}:unreachable`);
+    const ws = await getWorkspaceByIdCached(job.workspaceId);
+    await this.dispatchAlert({
+      kind: 'bg-host-unreachable',
+      tabId: job.tabId,
+      workspace: ws,
+      workspaceId: job.workspaceId,
       tabName,
       providerId: toAlertProvider(entry?.agentProviderId),
       agentSessionId: entry?.agentSessionId,
@@ -1543,7 +1577,7 @@ export class StatusManager {
       for (const [tabId, tab] of this.tabs) {
         if (tab.workspaceId !== ws.id) continue;
         const { backgroundJobs } = await livenessManager.statusForTab(tabId);
-        if (backgroundJobs.some((job) => job.alive)) {
+        if (backgroundJobs.some(jobHoldsWork)) {
           watchedWorkActive = true;
           break;
         }
@@ -1665,7 +1699,7 @@ export class StatusManager {
               !reading.value.status.backgroundJobs.some((job) => job.pid === pid)
             ))) backgroundWorkIncomplete = true;
             return reading.value.status.backgroundJobs.some((job) => (
-              reading.value.registeredPids.has(job.pid) && job.alive
+              reading.value.registeredPids.has(job.pid) && jobHoldsWork(job)
             )) ? [reading.value.tabId] : [];
           });
         }
@@ -2334,7 +2368,7 @@ export class StatusManager {
 
   private async liveRegisteredJobs(tabId: string): Promise<number> {
     try {
-      return (await getLivenessManager().statusForTab(tabId)).backgroundJobs.filter((job) => job.alive).length;
+      return (await getLivenessManager().statusForTab(tabId)).backgroundJobs.filter(jobHoldsWork).length;
     } catch (err) {
       hookLog.debug({ tabId, err: String(err) }, 'registered job read failed');
       return 0;
@@ -2421,7 +2455,8 @@ export class StatusManager {
     if (phase === 'failed' && jobs && this.tabs.has(tabId)) {
       void jobs.then(async (taken) => {
         // Only a survivor of the reap is given back: a job the restart killed would report a death it caused.
-        const survivors = taken.filter((job) => getLivenessManager().isJobAlive(job));
+        const alive = await Promise.all(taken.map((job) => getLivenessManager().isJobAlive(job)));
+        const survivors = taken.filter((_job, i) => alive[i]);
         for (const job of survivors) await getLivenessManager().registerJob(job);
         if (survivors.length > 0) log.info({ tabId, restored: survivors.length }, 'restart failed: registered background jobs restored');
       }).catch((err) => {
@@ -2506,7 +2541,7 @@ export class StatusManager {
     entry.turnEnd = { ...record, longWaitSentSeq: seq };
     let jobs: Array<{ pid: number; label?: string | null }> = [];
     try {
-      jobs = (await getLivenessManager().statusForTab(tabId)).backgroundJobs.filter((job) => job.alive);
+      jobs = (await getLivenessManager().statusForTab(tabId)).backgroundJobs.filter(jobHoldsWork);
     } catch {
       jobs = [];
     }

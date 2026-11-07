@@ -112,7 +112,7 @@ describe('the wake-class table (AC 1)', () => {
     const pinned = new Set(['needs-input', 'off-scope', 'thrash', 'api-error', 'usage-limit', 'inactive', 'stalled', 'model-drift',
       'ready-for-review', 'turn-ended', 'idle-no-end-line', 'long-wait', 'stuck', 'probe-failed', 'mission', 'resume', 'watch',
       'deploy', 'note', 'red-main', 'rotate', 'turn-marker', 'bg-completed', 'bg-failed', 'bg-exited-unknown', 'bg-died',
-      'heartbeat', 'flag', 'alarm', 'tab-send', 'standing-order', 'curator-candidate', 'standup-due']);
+      'bg-host-unreachable', 'heartbeat', 'flag', 'alarm', 'tab-send', 'standing-order', 'curator-candidate', 'standup-due']);
     expect(new Set(Object.keys(WAKE_CLASS_TABLE))).toEqual(pinned);
     // Story hfl2-10: a reminder waits for the prompt; the router makes the digest due at once for it.
     expect(classifyWake('standup-due')).toBe('digest');

@@ -675,7 +675,7 @@ export const NotificationPanel = ({ onNavigated, className }: { onNavigated?: ()
                       <span className={cn(
                         'block h-1.5 w-1.5 shrink-0 rounded-full',
                         nudge.kind === 'needs-input' ? 'bg-ui-amber'
-                          : nudge.kind === 'stuck' || nudge.kind === 'inactive' || nudge.kind === 'stalled' || nudge.kind === 'probe-failed' || nudge.kind === 'bg-failed' || nudge.kind === 'bg-exited-unknown' || nudge.kind === 'bg-died' || nudge.kind === 'model-drift' ? 'bg-destructive'
+                          : nudge.kind === 'stuck' || nudge.kind === 'inactive' || nudge.kind === 'stalled' || nudge.kind === 'probe-failed' || nudge.kind === 'bg-failed' || nudge.kind === 'bg-exited-unknown' || nudge.kind === 'bg-host-unreachable' || nudge.kind === 'bg-died' || nudge.kind === 'model-drift' ? 'bg-destructive'
                           : 'bg-claude-active',
                       )} />
                       <span className="min-w-0 flex-1 truncate">{nudge.tabName || nudge.tabId}</span>

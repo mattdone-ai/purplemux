@@ -4,6 +4,7 @@ import {
 } from '@/lib/fleet-status';
 import { readComposer } from '@/lib/composer-readiness';
 import { readTabCap, wipOf } from '@/lib/tab-cap';
+import { jobHoldsWork } from '@/lib/background-job-state';
 import type { IMissionOpenItemOpener } from '@/lib/mission-control-store';
 import type {
   IFleetTabFacts, IFleetThresholds, IFleetUnattributed, IFleetView, IFleetWip, TComposerReading,
@@ -253,7 +254,7 @@ const realDeps = async (): Promise<IFleetDeps> => {
     serverFacts: (tabId) => getStatusManager().fleetFacts(tabId),
     watches: async () => (await readWatches()).watches,
     liveJobs: async (tabId) => (await getLivenessManager().statusForTab(tabId)).backgroundJobs
-      .filter((job) => job.alive)
+      .filter(jobHoldsWork)
       .map((job) => ({ pid: job.pid, ...(job.label ? { label: job.label } : {}) })),
     leases: () => listLeases(),
     openers: () => getMissionControlStore().openItemOpeners(),

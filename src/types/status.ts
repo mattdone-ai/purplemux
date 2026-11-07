@@ -225,7 +225,7 @@ export interface IStandupUpdateMessage {
   standup: IWorkspaceStandup;
 }
 
-export type TOrchestrationNudgeKind = 'needs-input' | 'ready-for-review' | 'turn-marker' | 'idle-no-end-line' | 'long-wait' | 'api-error' | 'usage-limit' | 'turn-ended' | 'inactive' | 'stuck' | 'heartbeat' | 'off-scope' | 'thrash' | 'stalled' | 'probe-failed' | 'bg-completed' | 'bg-failed' | 'bg-exited-unknown' | 'bg-died' | 'model-drift';
+export type TOrchestrationNudgeKind = 'needs-input' | 'ready-for-review' | 'turn-marker' | 'idle-no-end-line' | 'long-wait' | 'api-error' | 'usage-limit' | 'turn-ended' | 'inactive' | 'stuck' | 'heartbeat' | 'off-scope' | 'thrash' | 'stalled' | 'probe-failed' | 'bg-completed' | 'bg-failed' | 'bg-exited-unknown' | 'bg-host-unreachable' | 'bg-died' | 'model-drift';
 
 export interface IOrchestrationNudge {
   id: string;
@@ -245,7 +245,7 @@ export interface IOrchestrationNudgeMessage {
   nudge: IOrchestrationNudge;
 }
 
-export type TAlertKind = 'needs-input' | 'review' | 'standup-needs-human' | 'orchestrator-stalled' | 'orchestrator-missing' | 'work-stalled' | 'bg-job-died' | 'bg-job-unknown' | 'flag' | 'attention-opened' | 'needs-decision';
+export type TAlertKind = 'needs-input' | 'review' | 'standup-needs-human' | 'orchestrator-stalled' | 'orchestrator-missing' | 'work-stalled' | 'bg-job-died' | 'bg-job-unknown' | 'bg-host-unreachable' | 'flag' | 'attention-opened' | 'needs-decision';
 
 export type TAlertProviderId = 'claude' | 'codex' | 'grok';
 
