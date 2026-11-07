@@ -80,7 +80,7 @@ describe('the seed fleet file (story 14 AC 3)', () => {
 describe('seed SO-6 says exactly what the harness does with a NEEDS-DECISION line (confirm NIT 2, C8)', () => {
   it('is the architect\'s text, character for character', async () => {
     const { seed } = await lib();
-    expect(seed.find((o) => o.id === 'SO-6')?.text).toBe("Questions for the owner go to Mission Control, never only into chat. End the turn on one line: NEEDS-DECISION: [money|irreversible|scope|bookkeeping] <question> (a) <option> (b) <option>. The tag and the options are optional. The harness opens the Mission Control item from that line: do not open a second item for it. While you wait, repeat the same line without changes. If no item can open, the harness tells the orchestrator to open it; a workspace with no orchestrator gets a push to the owner's devices instead.");
+    expect(seed.find((o) => o.id === 'SO-6')?.text).toBe("Questions for the owner go to Mission Control, never only into chat. End the turn on one line: NEEDS-DECISION: [money|irreversible|scope|bookkeeping] <question> (a) <option> (b) <option>. The tag and the options are optional. The harness opens the Mission Control item from that line: do not open a second item for it. While you wait, repeat the same line without changes; a reworded line revises your open item. A different question opens its own item only with the marker: NEEDS-DECISION: [new] <question>. If no item can open, the harness tells the orchestrator to open it; a workspace with no orchestrator gets a push to the owner's devices instead.");
   });
 });
 

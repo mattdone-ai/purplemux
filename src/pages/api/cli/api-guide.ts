@@ -1830,6 +1830,17 @@ POST /api/cli/mission-control/events?workspaceId=WS
   while another item of that prefix is open returns 409 { "error": "an item for this
   NEEDS-DECISION line is already open: <id>", "code": "already-open", "current": <the open item> }.
   Do not open another: name the open item's id.
+  One item per question (story PM-2): while the tab has one open nd- item, a reworded
+  NEEDS-DECISION line revises that item (attention.updated, revision + 1); it opens no second item.
+  For 24 h after the owner's answer, the same line opens nothing, before and after the ack, and
+  the server sends the answer to the asker again. "The same line" ignores the class tag and
+  letter case. A reworded line opens nothing while the answer is not acknowledged. A genuinely
+  different question opens its own item with the marker [new]: NEEDS-DECISION: [new] [money]
+  <question>? (a) ... (b) ... ([new] and the class tag in either order). Repeat that line
+  unchanged while you wait. One [new] question per tab at a time: while the tab's [new] item
+  is open, or answered with its answer not yet acknowledged, a [new] line opens nothing and
+  changes nothing (it is held, and the orchestrator is told). A [new] line never revises an
+  item. Why one: a reworded repeat of a waiting [new] line would otherwise open another item.
 
   Update an attention item:
   purplemux mission events -w WS --json '{"events":[{"eventId":"evt-question-update-1","schemaVersion":1,"workspaceId":"WS","runId":"run-1","expectedRevision":1,"producerAt":1700000000002,"bindingGeneration":1,"type":"attention.updated","payload":{"itemId":"question-1","kind":"question","title":"Choose rollout","context":"Choose the production rollout strategy","storyIds":[],"options":[{"id":"gradual","label":"Gradual"}],"recommendation":"gradual","blockingScope":"story","canContinue":true}}]}'

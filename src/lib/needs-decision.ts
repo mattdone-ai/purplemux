@@ -8,6 +8,11 @@ import type { TAttentionClass } from '@/types/mission-control';
 
 const MARKER = 'NEEDS-DECISION:';
 const TAG = new RegExp(`^\\[(${ATTENTION_CLASSES.join('|')})\\]\\s*`, 'i');
+/**
+ * `[new]` (story PM-2, D50): the line asks a question other than the tab's open item, so it opens its own item instead
+ * of revising that one. It may stand before or after the class tag; it is never part of the question or its line key.
+ */
+const NEW_MARK = /^\[new\]\s*/i;
 // `(a) ... (b) ...` or `(1) ... (2) ...`, each mark at the start or after a space.
 const OPTION_MARK = /(?:^|\s)\(([a-d]|[1-4])\)\s+/g;
 const LETTERS = ['a', 'b', 'c', 'd'];
@@ -31,12 +36,52 @@ const clipAtWord = (text: string, max: number): string => {
 
 export const isNeedsDecisionLine = (line: string | undefined): line is string => !!line && line.trim().startsWith(MARKER);
 
+/** The text after the marker without its leading `[new]` and class tags, in either order, and whether `[new]` was there. */
+const splitHead = (line: string): { body: string; tag: RegExpExecArray | null; isNew: boolean } => {
+  let body = line.trim().slice(MARKER.length).trim();
+  let tag: RegExpExecArray | null = null;
+  let isNew = false;
+  for (let i = 0; i < 2; i += 1) {
+    const mark = NEW_MARK.exec(body);
+    if (mark && !isNew) {
+      isNew = true;
+      body = body.slice(mark[0].length).trim();
+      continue;
+    }
+    const found: RegExpExecArray | null = tag ? null : TAG.exec(body);
+    if (!found) break;
+    tag = found;
+    body = body.slice(found[0].length).trim();
+  }
+  return { body, tag, isNew };
+};
+
+/** Whether the line carries the `[new]` marker after `NEEDS-DECISION:` (story PM-2): it asks a new question. */
+export const needsDecisionIsNew = (line: string): boolean => isNeedsDecisionLine(line) && splitHead(line).isNew;
+
+/**
+ * The line without its `[new]` marker, the rest unchanged: the line key of `[new] Q` and of `Q` is one key, so a `[new]`
+ * line repeated while it waits finds its own item (story PM-2).
+ */
+export const withoutNewMark = (line: string): string => {
+  if (!isNeedsDecisionLine(line)) return line;
+  const trimmed = line.trim();
+  const rest = trimmed.slice(MARKER.length);
+  const lead = rest.length - rest.trimStart().length;
+  const head = rest.trimStart();
+  const direct = NEW_MARK.exec(head);
+  if (direct) return `${MARKER}${rest.slice(0, lead)}${head.slice(direct[0].length)}`;
+  const tag = TAG.exec(head);
+  const afterTag = tag ? NEW_MARK.exec(head.slice(tag[0].length)) : null;
+  if (tag && afterTag) return `${MARKER}${rest.slice(0, lead)}${tag[0]}${head.slice(tag[0].length + afterTag[0].length)}`;
+  return trimmed;
+};
+
 /** Whether the text after the marker asks something: it holds a question mark (D28 v2 addendum: no `?`, no item). */
 export const needsDecisionAsks = (line: string): boolean => /[?？]/.test(line.trim().slice(MARKER.length));
 
 /** The line without its marker and class tag, whitespace collapsed: the owner push's text (ADR-0041 §2). */
-export const needsDecisionText = (line: string): string =>
-  line.trim().slice(MARKER.length).trim().replace(TAG, '').replace(/\s+/g, ' ').trim();
+export const needsDecisionText = (line: string): string => splitHead(line).body.replace(/\s+/g, ' ').trim();
 
 /**
  * The owner push's detail (ADR-0041 §2 (ii)): `<tab name or id> · <workspace name or id>: <needsDecisionText>`. The push
@@ -62,9 +107,7 @@ const splitOptions = (body: string): { question: string; options: Array<{ id: st
 };
 
 export const parseNeedsDecisionLine = (line: string): INeedsDecisionLine => {
-  let body = line.trim().slice(MARKER.length).trim();
-  const tag = TAG.exec(body);
-  if (tag) body = body.slice(tag[0].length).trim();
+  const { body, tag } = splitHead(line);
   const { question, options } = splitOptions(body);
   return {
     class: tag ? (tag[1].toLowerCase() as TAttentionClass) : null,

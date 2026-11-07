@@ -54,7 +54,7 @@ export const SEED_FLEET_ORDERS: readonly IStandingOrder[] = [
   },
   {
     id: 'SO-6',
-    text: 'Questions for the owner go to Mission Control, never only into chat. End the turn on one line: NEEDS-DECISION: [money|irreversible|scope|bookkeeping] <question> (a) <option> (b) <option>. The tag and the options are optional. The harness opens the Mission Control item from that line: do not open a second item for it. While you wait, repeat the same line without changes. If no item can open, the harness tells the orchestrator to open it; a workspace with no orchestrator gets a push to the owner\'s devices instead.',
+    text: 'Questions for the owner go to Mission Control, never only into chat. End the turn on one line: NEEDS-DECISION: [money|irreversible|scope|bookkeeping] <question> (a) <option> (b) <option>. The tag and the options are optional. The harness opens the Mission Control item from that line: do not open a second item for it. While you wait, repeat the same line without changes; a reworded line revises your open item. A different question opens its own item only with the marker: NEEDS-DECISION: [new] <question>. If no item can open, the harness tells the orchestrator to open it; a workspace with no orchestrator gets a push to the owner\'s devices instead.',
     source: 'owner message ws-ldhziO/xYmU5FMQanqbAfEXg3Bnb (audit #249), 2026-10-27T05:17Z',
     scope: 'fleet',
     check: 'tests/unit/lib/needs-decision.test.ts, tests/unit/lib/status-manager-turn-end.test.ts',

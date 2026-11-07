@@ -2,9 +2,9 @@ import { alertOpenedAttention } from '@/lib/attention-alerts';
 import { MissionControlError } from '@/lib/mission-control-errors';
 import { resolveMissionTargetIdentity } from '@/lib/mission-control-runtime';
 import {
-  getMissionControlStore, type IMissionEventAuthority, type IMissionItemOpener, type TMissionSoProposalInput,
+  getMissionControlStore, type IMissionEventAuthority, type IMissionItemOpener, type IMissionNeedsDecisionLineInput, type TMissionSoProposalInput,
 } from '@/lib/mission-control-store';
-import { SO_PROPOSAL_ITEM_PREFIX, parseMissionEventBatch } from '@/lib/mission-control-validation';
+import { NEEDS_DECISION_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX, parseMissionEventBatch } from '@/lib/mission-control-validation';
 import { readQuestionMinVersion } from '@/lib/mission-question-config';
 import { getWorkspaceById } from '@/lib/workspace-store';
 
@@ -18,7 +18,11 @@ export const applyMissionEventBatch = async (
   workspaceId: string,
   rawEvents: unknown,
   opener: IMissionItemOpener | null,
-  options: { serverPrefix?: string; soProposals?: ReadonlyMap<string, TMissionSoProposalInput> } = {},
+  options: {
+    serverPrefix?: string;
+    soProposals?: ReadonlyMap<string, TMissionSoProposalInput>;
+    ndLines?: ReadonlyMap<string, IMissionNeedsDecisionLineInput>;
+  } = {},
 ) => {
   const questionMinVersion = await readQuestionMinVersion();
   const { events, lint } = parseMissionEventBatch(rawEvents, { questionMinVersion, serverPrefix: options.serverPrefix });
@@ -58,7 +62,9 @@ export const applyMissionEventBatch = async (
     (event.type === 'attention.updated' && unreplayed.has(event.eventId) ? [event.payload.itemId] : [])));
   // A proposal record rides only its own server producer's events (ADR-0041 §1 amendment D7).
   const soProposals = options.serverPrefix && options.soProposals ? options.soProposals : undefined;
-  const applied = store.applyEvents(events, authorities, { questionMinVersion, soProposals });
+  // A NEEDS-DECISION line record rides only the server opener's own events (story PM-2).
+  const ndLines = options.serverPrefix === NEEDS_DECISION_EVENT_PREFIX && options.ndLines ? options.ndLines : undefined;
+  const applied = store.applyEvents(events, authorities, { questionMinVersion, soProposals, ndLines });
   // An item that first becomes owner-visible alerts once (ADR-0032 channels), a server-opened one too; a replayed event never does.
   void alertOpenedAttention({ events: applied.events, fresh: unreplayed, openerTabId: opener?.tabId ?? null, previousStates });
   // An ask the owner must approve or decide, a server-opened NEEDS-DECISION one too, is matched against the standing

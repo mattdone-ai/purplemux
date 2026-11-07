@@ -65,7 +65,9 @@ import {
   autoAnswerSubmissionId,
   type IAutoAnswerRule,
 } from '@/lib/mission-control-auto-answer';
-import { FOLLOW_UP_EVENT_PREFIX, needsDecisionLinePrefix, SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX } from '@/lib/mission-control-validation';
+import {
+  FOLLOW_UP_EVENT_PREFIX, NEEDS_DECISION_EVENT_PREFIX, needsDecisionLinePrefix, SO_PROPOSAL_EVENT_PREFIX, SO_PROPOSAL_ITEM_PREFIX,
+} from '@/lib/mission-control-validation';
 
 const DEFAULT_DB_PATH = path.join(os.homedir(), '.purplemux', 'mission-control.sqlite');
 const SCHEMA_VERSION = 4;
@@ -423,6 +425,46 @@ const soProposalView = (row: ISoProposalRow | undefined): IMissionSoProposalView
 /** The record a server proposal item opens with (ADR-0041 §1 amendment D7): written in the item's transaction. */
 export type TMissionSoProposalInput = Pick<IMissionSoProposalRecord, 'proposerTabId' | 'text' | 'scope' | 'checkName' | 'cites'>;
 
+/**
+ * The line key a server NEEDS-DECISION event gives its item (story PM-2): written in the event's own transaction, so an
+ * item never holds a revision without the line that made it. `markedNew`: the line carried `[new]`.
+ */
+export interface IMissionNeedsDecisionLineInput {
+  tabId: string;
+  lineKey: string;
+  /** The question text's key: no marker, `[new]` or class tag, letter case folded (review r1 finding 2). */
+  textKey: string;
+  markedNew: boolean;
+}
+
+/** One `nd-` item of a tab as the NEEDS-DECISION opener reads it (story PM-2): its state, keys, answer and delivery. */
+export interface IMissionNeedsDecisionTabItem {
+  id: string;
+  state: TMissionItemState;
+  revision: number;
+  runId: string;
+  createdAt: number;
+  /** The question's current `decision`, for a notice that quotes what a revision replaced. */
+  decision: string;
+  /** Every line key the item took: its id's, each revision's, and any reservation or race record. */
+  keys: string[];
+  /** Every text key the item took (rows written before the column have none). */
+  textKeys: string[];
+  /** The opening line carried `[new]`: the revision-1 row, else a revision-0 reservation row (consult r2, r3). */
+  markedNew: boolean;
+  /** The server's NEEDS-DECISION opener opened it for this tab (opener row with a `system:needs-decision:` event). */
+  serverOpened: boolean;
+  /** The latest answer, or null. */
+  answer: {
+    id: string;
+    createdAt: number;
+    optionIds: string[];
+    optionLabels: string[];
+    text: string;
+    delivery: { state: string; reason: string | null; tabId: string | null } | null;
+  } | null;
+}
+
 /** A closed proposal's outcome: the step that decided it, with the answer and the order it names. */
 export interface IMissionSoProposalOutcome {
   state: Exclude<TSoProposalState, 'open'>;
@@ -585,7 +627,100 @@ export class MissionControlStore {
     this.ensureSuggestionTable();
     this.ensureSoProposalTable();
     this.ensureLinkTable();
+    this.ensureNeedsDecisionLineTable();
   }
+
+  /**
+   * The line keys of NEEDS-DECISION items (story PM-2): an unversioned side table like the openers, so a release from
+   * before it still opens the file. One row per item and line key: the opening line (revision 1), each revision's line,
+   * and revision 0 for a key the opener recorded outside an event (a reservation for an id it handed the orchestrator,
+   * or a line that met the item in a race). `text_key`: the question text's key, which an answered item matches too
+   * (PM-2 round 2). No foreign key, as for the openers.
+   */
+  private ensureNeedsDecisionLineTable = (): void => {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS mission_nd_lines (
+        item_id TEXT NOT NULL, line_key TEXT NOT NULL, text_key TEXT, workspace_id TEXT NOT NULL, tab_id TEXT NOT NULL,
+        revision INTEGER NOT NULL, marked_new INTEGER NOT NULL, at INTEGER NOT NULL,
+        PRIMARY KEY (item_id, line_key)
+      );
+      CREATE INDEX IF NOT EXISTS mission_nd_lines_tab_idx ON mission_nd_lines(workspace_id, tab_id, line_key);
+    `);
+    // A table made before `text_key` (PM-2 round 2) gains it; its old rows keep a null text key and match exactly only.
+    const columns = (this.database.prepare('PRAGMA table_info(mission_nd_lines)').all() as Array<{ name: string }>).map((c) => c.name);
+    if (!columns.includes('text_key')) this.database.exec('ALTER TABLE mission_nd_lines ADD COLUMN text_key TEXT');
+  };
+
+  /** Record a line key for an item outside an event (revision 0): a reservation, or a race record (story PM-2). */
+  recordNeedsDecisionLine = (
+    workspaceId: string, tabId: string, lineKey: string, textKey: string, itemId: string, markedNew: boolean, at: number,
+  ): void => {
+    this.database.prepare(`INSERT OR IGNORE INTO mission_nd_lines (item_id,line_key,text_key,workspace_id,tab_id,revision,marked_new,at)
+      VALUES (?,?,?,?,?,0,?,?)`).run(itemId, lineKey, textKey, workspaceId, tabId, Number(markedNew), at);
+  };
+
+  /**
+   * The tab's `nd-` items for the NEEDS-DECISION opener (story PM-2), oldest first: items with a line row of the tab
+   * (an existing item only: a reservation counts once its item exists), items the tab opened with an `nd-` id, and
+   * items of any opener whose id has the prefix `nd-<lineKey>`. Only items still candidate or open, or changed at or
+   * after `since` (an answer inside the window moves `updated_at` to at least the answer's time).
+   */
+  needsDecisionItemsOfTab = (workspaceId: string, tabId: string, lineKey: string, since: number): IMissionNeedsDecisionTabItem[] => {
+    const prefix = `nd-${lineKey}`;
+    const rows = this.database.prepare(`SELECT a.id, a.state, a.revision, a.run_id, a.created_at, a.question_json, a.answer_id
+      FROM attention_items a WHERE a.workspace_id = ? AND a.id IN (
+        SELECT item_id FROM mission_nd_lines WHERE workspace_id = ? AND tab_id = ?
+        UNION SELECT item_id FROM mission_item_openers INDEXED BY mission_item_openers_tab_idx
+          WHERE workspace_id = ? AND tab_id = ? AND substr(item_id, 1, 3) = 'nd-'
+        UNION SELECT id FROM attention_items WHERE workspace_id = ? AND substr(id, 1, length(?)) = ?)
+      AND (a.state IN ('candidate','open') OR a.updated_at >= ?)
+      ORDER BY a.created_at, a.id`).all(workspaceId, workspaceId, tabId, workspaceId, tabId, workspaceId, prefix, prefix, since) as Array<{
+        id: string; state: TMissionItemState; revision: number; run_id: string; created_at: number; question_json: string; answer_id: string | null;
+      }>;
+    const lineRows = this.database.prepare('SELECT line_key, text_key, revision, marked_new FROM mission_nd_lines WHERE item_id = ?');
+    const opener = this.database.prepare('SELECT tab_id, event_id FROM mission_item_openers WHERE item_id = ?');
+    const answerRow = this.database.prepare('SELECT * FROM answers WHERE item_id = ? ORDER BY created_at DESC, id DESC LIMIT 1');
+    const deliveryRow = this.database.prepare('SELECT * FROM deliveries WHERE answer_id = ?');
+    return rows.map((row) => {
+      const lines = lineRows.all(row.id) as Array<{ line_key: string; text_key: string | null; revision: number; marked_new: number }>;
+      const opening = lines.filter((line) => line.revision === 1);
+      const own = needsDecisionLinePrefix(row.id);
+      const keys = [...new Set([...(own ? [own.slice(3)] : []), ...lines.map((line) => line.line_key)])];
+      const openedBy = opener.get(row.id) as { tab_id: string; event_id: string } | undefined;
+      const question = parseJson<{ decision?: unknown; options?: Array<{ id?: unknown; label?: unknown }> }>(row.question_json) ?? {};
+      const answer = answerRow.get(row.id) as IAnswerRow | undefined;
+      const delivery = answer ? deliveryRow.get(answer.id) as IDeliveryRow | undefined : undefined;
+      const parsed = answer ? answerFromRow(answer) : null;
+      const labels = new Map((question.options ?? []).map((option) => [String(option.id ?? ''), String(option.label ?? '')]));
+      return {
+        id: row.id,
+        state: row.state,
+        revision: row.revision,
+        runId: row.run_id,
+        createdAt: row.created_at,
+        decision: String(question.decision ?? ''),
+        keys,
+        textKeys: [...new Set(lines.flatMap((line) => (line.text_key ? [line.text_key] : [])))],
+        // The opening row says: the revision-1 row, else the revision-0 rows, for an item the orchestrator opened from a
+        // handed id (consult r2). A revise row never counts: a `[new]` line never revises (consult r3). The revision-1 row
+        // replaces a revision-0 row of its key (writeNeedsDecisionLine), so a stale reservation never speaks for it.
+        markedNew: (opening.length ? opening : lines.filter((line) => line.revision === 0)).some((line) => line.marked_new === 1),
+        serverOpened: openedBy?.tab_id === tabId && openedBy.event_id.startsWith(NEEDS_DECISION_EVENT_PREFIX),
+        answer: parsed ? {
+          id: parsed.id,
+          createdAt: parsed.createdAt,
+          optionIds: parsed.optionIds,
+          optionLabels: parsed.optionIds.map((optionId) => labels.get(optionId) ?? optionId),
+          text: parsed.text,
+          delivery: delivery ? {
+            state: delivery.state,
+            reason: delivery.last_error,
+            tabId: parseJson<IMissionBinding>(delivery.binding_json)?.tabId ?? null,
+          } : null,
+        } : null,
+      };
+    });
+  };
 
   /**
    * A fleet standing-order proposal (ADR-0041 §1 amendment D7): an unversioned side table like the openers, written in
@@ -1271,7 +1406,11 @@ export class MissionControlStore {
   applyEvents = (
     events: TMissionProducerEvent[],
     resolvedBindings: ReadonlyMap<string, TMissionIdentity | IMissionEventAuthority | null> = new Map(),
-    options: { questionMinVersion?: 1 | 2; soProposals?: ReadonlyMap<string, TMissionSoProposalInput> } = {},
+    options: {
+      questionMinVersion?: 1 | 2;
+      soProposals?: ReadonlyMap<string, TMissionSoProposalInput>;
+      ndLines?: ReadonlyMap<string, IMissionNeedsDecisionLineInput>;
+    } = {},
   ): IMissionApplyEventsResult => {
     const transaction = this.database.transaction(() => {
       const committed: IMissionEvent[] = [];
@@ -1289,7 +1428,8 @@ export class MissionControlStore {
         const authority: IMissionEventAuthority = suppliedAuthority && 'resolvedIdentity' in suppliedAuthority
           ? suppliedAuthority
           : { resolvedIdentity: suppliedAuthority, configuredOrchestratorTabId: null };
-        committed.push(this.applyOneEvent(event, requestHash, authority, options.questionMinVersion ?? 1, options.soProposals?.get(event.eventId) ?? null));
+        committed.push(this.applyOneEvent(event, requestHash, authority, options.questionMinVersion ?? 1, options.soProposals?.get(event.eventId) ?? null,
+          options.ndLines?.get(event.eventId) ?? null));
       }
       const cursor = Number((this.database.prepare('SELECT COALESCE(MAX(seq), 0) AS cursor FROM events').get() as { cursor: number }).cursor);
       // A replay rebuilds the same answer from the stored link, so the asker reads it either way.
@@ -1318,6 +1458,7 @@ export class MissionControlStore {
     authority: IMissionEventAuthority,
     questionMinVersion: 1 | 2,
     soProposal: TMissionSoProposalInput | null = null,
+    ndLine: IMissionNeedsDecisionLineInput | null = null,
   ): IMissionEvent => {
     const now = Date.now();
     const resolvedIdentity = authority.resolvedIdentity;
@@ -1451,6 +1592,7 @@ export class MissionControlStore {
           (item_id,workspace_id,tab_id,identity,event_id,opened_at) VALUES (?,?,?,?,?,?)`)
           .run(itemId, event.workspaceId, authority.opener.tabId, authority.opener.identity, event.eventId, now);
       }
+      if (ndLine) this.writeNeedsDecisionLine(event.workspaceId, itemId, 1, ndLine, authority.opener?.tabId ?? null, now);
       if (soProposal) {
         this.database.prepare(`INSERT INTO mission_so_proposals
           (item_id,workspace_id,proposer_tab_id,text,scope,check_name,cites,state,answer_id,order_id,reason,created_at,decided_at)
@@ -1502,6 +1644,7 @@ export class MissionControlStore {
           humanReview ? toJson(humanReview) : null, candidateReason, now, item.id);
       this.database.prepare('INSERT OR REPLACE INTO mission_item_changes (item_id,workspace_id,revision,changes_json,at) VALUES (?,?,?,?,?)')
         .run(item.id, item.workspaceId, revision, toJson(changes), now);
+      if (ndLine) this.writeNeedsDecisionLine(event.workspaceId, item.id, revision, ndLine, this.needsDecisionTabOf(item.id), now);
       this.confirmBootstrap(run.id, now);
       return this.insertEvent(event, item.id, revision, now, requestHash,
         { ...this.attentionEventPayload(event.payload, state, candidateReason, humanReview), changes });
@@ -1750,6 +1893,30 @@ export class MissionControlStore {
     throw new MissionControlError(400, 'question-invalid', `1 question defect in 1 event: ${refusal.message}`, undefined,
       { defects: [{ eventId, itemId, ...refusal }] });
   };
+
+  /**
+   * The line row of a server NEEDS-DECISION event, in its transaction (story PM-2). Only an `nd-` item, and only for the
+   * tab that owns it: the opener of an open, the tab of the item's lines (or its opener) for a revision.
+   */
+  private writeNeedsDecisionLine = (
+    workspaceId: string, itemId: string, revision: number, line: IMissionNeedsDecisionLineInput, owner: string | null, now: number,
+  ): void => {
+    if (!needsDecisionLinePrefix(itemId)) invalidMissionRequest(`a NEEDS-DECISION line record needs an nd- item, not ${itemId}`);
+    if (owner !== line.tabId) invalidMissionRequest(`the NEEDS-DECISION line of ${line.tabId} cannot be recorded on ${itemId}: that item is not its own`);
+    // An event row replaces a revision-0 row of the same key (a reservation or a race record), so the row the item opens
+    // with carries the event line's `marked_new` (review r2 nit). A row of an earlier event (revision 1 or later) stays.
+    this.database.prepare(`INSERT INTO mission_nd_lines (item_id,line_key,text_key,workspace_id,tab_id,revision,marked_new,at)
+      VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT (item_id, line_key) DO UPDATE SET text_key = excluded.text_key, tab_id = excluded.tab_id,
+        revision = excluded.revision, marked_new = excluded.marked_new, at = excluded.at
+      WHERE mission_nd_lines.revision = 0`).run(itemId, line.lineKey, line.textKey, workspaceId, line.tabId, revision, Number(line.markedNew), now);
+  };
+
+  /** The tab an `nd-` item belongs to: the tab of its line rows, else its opener; null when neither is recorded. */
+  private needsDecisionTabOf = (itemId: string): string | null =>
+    (this.database.prepare('SELECT tab_id FROM mission_nd_lines WHERE item_id = ? ORDER BY revision DESC LIMIT 1').pluck().get(itemId) as string | undefined)
+      ?? (this.database.prepare('SELECT tab_id FROM mission_item_openers WHERE item_id = ?').pluck().get(itemId) as string | undefined)
+      ?? null;
 
   private stampHumanReview = (
     event: Extract<TMissionProducerEvent, { type: 'attention.opened' | 'attention.updated' }>,

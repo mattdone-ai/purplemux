@@ -272,6 +272,90 @@ describe('stop classification (ADR-0018)', () => {
       expect([...sentTo(paste, 'tmux-worker'), ...sentTo(p2, 'tmux-worker'), ...sentTo(p3, 'tmux-worker')]).toEqual([]);
     });
 
+    it('a revised item: the nudge names it, and the asker hears what its line replaced even though the nudge went out (PM-2, D50)', async () => {
+      const ITEM = 'nd-0123456789abcdef0123456789abcdef';
+      needsDecision.open.mockResolvedValueOnce({ opened: false, reason: 'revised', itemId: ITEM, revision: 3, replaced: 'Is the export in scope?' });
+      const { manager, paste } = await managerWithPaste();
+      const line = 'NEEDS-DECISION: Does the export belong to this epic?';
+      manager.registerTab('worker', worker('claude-code', await writeLines('claude/pm2-rev.jsonl', [claudeEnd(`Reworded.\n\n${line}`)])));
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
+      expect(sentTo(paste, 'tmux-root')).toEqual([
+        `[orchestrator-watchdog] worker worker (w1) ended: ${line} [MC item ${ITEM} revised for the owner by the server (revision 3): do not open another] — read with: purplemux tab result -w ws-1 worker`,
+      ]);
+      expect(sentTo(paste, 'tmux-worker')).toEqual([
+        `[needs-decision] [MC item ${ITEM} revised for the owner by the server: do not open another] Your line replaced the question "Is the export in scope?"; the owner no longer sees it. If yours is a different question, ask the replaced one again in its own item: end on NEEDS-DECISION: [new] <the replaced question, in new words>? (its old line stays item ${ITEM}'s).`,
+      ]);
+    });
+
+    it('an answered item: nothing opens, the nudge says relay the answer, and the asker gets the answer again (PM-2, D51)', async () => {
+      const ITEM = 'nd-00112233445566778899aabbccddeeff';
+      const answeredAt = Date.UTC(2026, 10, 6, 23, 35, 23);
+      needsDecision.open.mockResolvedValueOnce({
+        opened: false, reason: 'answered', itemId: ITEM, differs: false, question: 'Keep QA bank lines fixed?',
+        answer: { answeredAt, optionIds: ['b'], optionLabels: ['keep'], text: '', delivery: { state: 'acknowledged', reason: null, tabId: 'root' } },
+      });
+      const { manager, paste } = await managerWithPaste();
+      const line = 'NEEDS-DECISION: Keep QA bank lines fixed? (a) reload (b) keep';
+      manager.registerTab('worker', worker('claude-code', await writeLines('claude/pm2-ans.jsonl', [claudeEnd(`Waiting.\n\n${line}`)])));
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
+      expect(sentTo(paste, 'tmux-root')[0]).toContain(`${line} [MC item ${ITEM} already answered by the owner: no new item; relay the answer] — read with`);
+      expect(sentTo(paste, 'tmux-worker')).toEqual([
+        `[needs-decision] [MC item ${ITEM} answered by the owner at 2026-11-06T23:35:23.000Z: do not open another] The answer: (b) keep. It went to root (delivery acknowledged), which relays it. Act on this answer: this question opens no new item until 2026-11-07T23:35:23.000Z, with or without [new]. If something has changed since the answer, ask a new question that says what changed: end on NEEDS-DECISION: [new] <question>?`,
+      ]);
+      expect(pushes()).toEqual([]);
+      // A held delivery, and a line that differs: the note and the notice say so, and quote the answered question.
+      needsDecision.open.mockResolvedValueOnce({
+        opened: false, reason: 'answered', itemId: ITEM, differs: true, question: 'Keep QA bank lines fixed?',
+        answer: { answeredAt, optionIds: [], optionLabels: [], text: 'x'.repeat(250), delivery: { state: 'held', reason: 'bound-agent-not-live', tabId: 'root' } },
+      });
+      const { manager: m2, paste: p2 } = await managerWithPaste();
+      m2.registerTab('worker', worker('claude-code', await writeLines('claude/pm2-ans2.jsonl', [claudeEnd('Waiting.\n\nNEEDS-DECISION: Freeze QA lines? (a) yes (b) no')])));
+      m2.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(p2).toHaveBeenCalledTimes(2));
+      expect(sentTo(p2, 'tmux-root')[0]).toContain(`[MC item ${ITEM} already answered by the owner: no new item; delivery held: bound-agent-not-live]`);
+      const notice = sentTo(p2, 'tmux-worker')[0];
+      expect(notice).toContain('Your line differs from that item\'s question "Keep QA bank lines fixed?"; the owner answered that one.');
+      expect(notice).toContain(`(clipped; the whole answer is in item ${ITEM} and your orchestrator's relay). Delivery held: bound-agent-not-live.`);
+    });
+
+    it('a held [new] line: the note reaches the orchestrator whatever the reportOn, and the asker hears it too (PM-2 r2, ruling A)', async () => {
+      const P = 'nd-ffeeddccbbaa99887766554433221100';
+      needsDecision.open.mockResolvedValueOnce({
+        opened: false, reason: 'already-open', itemId: P, heldNew: true, newHeldBy: { itemId: P, answered: false, question: 'Pay the vendor today?' },
+      });
+      const { manager, paste } = await managerWithPaste();
+      const line = 'NEEDS-DECISION: [new] Which bank file wins? (a) BC (b) Kyriba';
+      manager.registerTab('worker', { ...worker('claude-code', await writeLines('claude/pm2-held.jsonl', [claudeEnd(`Next.\n\n${line}`)])), reportOn: ['DONE'] as TTurnMarkerName[] });
+      manager.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(paste).toHaveBeenCalledTimes(2));
+      expect(sentTo(paste, 'tmux-root')).toEqual([
+        `[orchestrator-watchdog] worker worker (w1) ended: ${line} [MC item ${P} already open for the owner: do not open another; this [new] line is held and is not in Mission Control: the tab's [new] question ${P} is still open] — read with: purplemux tab result -w ws-1 worker`,
+      ]);
+      expect(sentTo(paste, 'tmux-worker')).toEqual([
+        `[needs-decision] [MC item ${P} already open for the owner: do not open another] Your [new] line opened nothing and changed nothing. This tab's [new] question ${P} is still open ("Pay the vendor today?"), and a tab has one [new] question at a time. If your line rewords that question, end on that item's line unchanged. If it is a different question, it is not in Mission Control yet: end on it again with [new] after ${P} is answered and its answer acknowledged.`,
+      ]);
+      expect(manager.getReportOnFilteredCount()).toBe(0);
+      expect(pushes()).toEqual([]);
+      // Held until an answer is acknowledged: the answered note says so, and it too reaches the orchestrator.
+      const answeredAt = Date.UTC(2026, 10, 7, 1, 0, 0);
+      needsDecision.open.mockResolvedValueOnce({
+        opened: false, reason: 'answered', itemId: P, differs: true, question: 'Pay the vendor today?', heldNew: true,
+        newHeldBy: { itemId: P, answered: true, question: 'Pay the vendor today?' },
+        answer: { answeredAt, optionIds: ['a'], optionLabels: ['pay'], text: '', delivery: { state: 'submitted', reason: null, tabId: 'root' } },
+      });
+      const { manager: m2, paste: p2 } = await managerWithPaste();
+      m2.registerTab('worker', { ...worker('claude-code', await writeLines('claude/pm2-held2.jsonl', [claudeEnd(`Next.\n\n${line}`)])), reportOn: ['DONE'] as TTurnMarkerName[] });
+      m2.updateTabFromHook('tmux-worker', 'stop');
+      await waitFor(() => expect(p2).toHaveBeenCalledTimes(2));
+      expect(sentTo(p2, 'tmux-root')[0]).toContain(`${line} [MC item ${P} already answered by the owner: no new item; this [new] line is held until that answer is acknowledged; relay the answer] — read with`);
+      expect(sentTo(p2, 'tmux-worker')).toEqual([
+        `[needs-decision] [MC item ${P} answered by the owner at 2026-11-07T01:00:00.000Z: do not open another] Your [new] line opened nothing: the owner answered this tab's [new] question "Pay the vendor today?", and its answer is not yet acknowledged. The answer: (a) pay. It went to root (delivery submitted), which relays it. A different question cannot open yet: the owner answered this tab's [new] question ${P}, and the answer is not yet acknowledged. End on your [new] line again once it is (your orchestrator acknowledges it when it relays it).`,
+      ]);
+      expect(m2.getReportOnFilteredCount()).toBe(0);
+    });
+
     it('hands the opener the whole last line, not the marker line clipped at 300 chars (R2)', async () => {
       const { manager } = await managerWithPaste();
       const line = `NEEDS-DECISION: ${'which rule do we ship '.repeat(14)}? (a) base currency (b) transaction currency (c) defer`;
