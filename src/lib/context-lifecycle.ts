@@ -911,7 +911,8 @@ export class ContextLifecycle {
       return this.refuseRotation(seat, state, `checkpoint ${checkpoint.id} is not durable: ${message(err)}`);
     }
     state.checkpointId = checkpoint.id;
-    state.checkpointRefused = null;
+    // The refusal stands until the clear runs or the rotation ends: a stop later in the same pass (a host down at the
+    // restart) is the same stopped rotation, counted once, however many retries it takes.
     return checkpoint;
   }
 
@@ -1077,6 +1078,8 @@ export class ContextLifecycle {
   private async failed(seat: ISeatTab, state: ISeatState, reasons: string[]): Promise<void> {
     state.failures += 1;
     state.handoffRefusals += 1;
+    // A stop before the clear that became a failed check is that check now, not a refusal still standing.
+    state.checkpointRefused = null;
     if (state.failures >= 2) {
       state.phase = 'rotation-alarm';
       state.alarm = reasons.join('; ').slice(0, 500);

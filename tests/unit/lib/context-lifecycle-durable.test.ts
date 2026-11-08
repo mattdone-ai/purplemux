@@ -77,14 +77,17 @@ interface IWorld {
   crash: TCrash;
   placed: number;
   seq: number;
-  /** The next restart answers 503 remote-host-unreachable, before anything is killed. */
+  /** While true, every restart answers 503 remote-host-unreachable, before anything is killed; the test lifts it. */
   restartHostDown: boolean;
+  /** Restarts refused because the host was down. */
+  restartRefusals: number;
   storeFails: { put?: boolean; readBack?: 'missing' | 'tampered'; record?: boolean };
 }
 
 const world = (): IWorld => ({
   clock: { now: T0 }, store: new LedgerStore(':memory:'), session: 'sess-1', files: new Map(), facts: FACTS, atPrompt: true,
   jobLive: false, hostDown: false, clears: 0, typed: [], rotates: [], crash: 'none', placed: 0, seq: 0, storeFails: {}, restartHostDown: false,
+  restartRefusals: 0,
 });
 
 const SEAT: ISeatTab = { workspaceId: 'ws-a', tabId: 'tab-kit', tabName: 'kit', handoffPath: PATH, rotateAt: null, host: 'ai-server' };
@@ -145,7 +148,7 @@ const lifecycle = (w: IWorld, overrides: Partial<IContextLifecycleDeps>): Contex
   restart: async (): Promise<TRestartOutcome> => {
     if (w.crash === 'after-write') return never();
     if (w.restartHostDown) {
-      w.restartHostDown = false;
+      w.restartRefusals += 1;
       return restartRefusalOutcome('remote-host-unreachable', 'remote host ai-server did not answer over ssh (exit 255)');
     }
     w.clears += 1;
@@ -398,15 +401,21 @@ describe('review r1: the restart hop and the gap after the checkpoint (F2, F4, F
     await request(w, life);
     w.restartHostDown = true;
     await handoffReady(w, life, POINTS[0]);
+    // The host stays down until the test lifts it, so the retries the refusal schedules (retryMs, real time) refuse
+    // too, however slow the runner: the state below cannot race them (CI run 42455698496).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flush();
+    expect(w.restartRefusals).toBeGreaterThanOrEqual(1);
     expect(w.clears).toBe(0);
     expect(latest(w)?.status).toBe('written');
-    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'handoff-ready', failures: 0, handoffRefusals: 0, pendingMessage: null });
+    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'handoff-ready', failures: 0, handoffRefusals: 0, checkpointRefusals: 1, pendingMessage: null });
     expect(life.view(SEAT.tabId)?.checkpointRefused).toContain("the restart could not reach the seat's host: remote-host-unreachable");
     expect(w.rotates).toHaveLength(1);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    await flush();
+    w.restartHostDown = false;
+    await life.advance(SEAT.tabId);
     expect(w.clears).toBe(1);
     expect(latest(w)).toMatchObject({ status: 'cleared', checkpoint: { attempt: 1 } });
+    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'rotating', checkpointRefused: null, checkpointRefusals: 1 });
   });
 
   it('F2: the restart refusals map to outcomes: busy retries, a host or kit that did not answer waits, others fail', () => {
@@ -426,6 +435,25 @@ describe('review r1: the restart hop and the gap after the checkpoint (F2, F4, F
     expect(w.clears).toBe(0);
     expect(life.view(SEAT.tabId)).toMatchObject({ handoffRefusals: 1, checkpointRefused: null });
     expect(w.rotates.at(-1)).toBe(`HANDOFF CHECK FAILED: ${PATH}: size over 1048576 bytes (expected at most 12288, 12 KB). Fix the file, then end your turn with HANDOFF-READY.`);
+  });
+
+  it('a stop before the clear that turns into a failed check no longer names the stop', async () => {
+    const w = world();
+    let readable = false;
+    const life = server(w, {
+      readHandoff: async (file) => {
+        if (!readable) throw new SeatHostUnreachable('remote host ai-server did not answer over ssh (timed out)');
+        return w.files.get(file) ?? '';
+      },
+    });
+    await request(w, life);
+    await handoffReady(w, life, POINTS[0]);
+    expect(life.view(SEAT.tabId)?.checkpointRefused).toContain('could not be read');
+    readable = true;
+    w.files.set(PATH, 'not a handoff');
+    await life.advance(SEAT.tabId);
+    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'rotate-requested', handoffRefusals: 1, checkpointRefusals: 1, checkpointRefused: null });
+    expect(life.holdReason(SEAT.tabId)).not.toContain('stopped before the clear');
   });
 
   it('F6: a turn that starts and ends while the checkpoint is written stops the clear; the stale file is checked again', async () => {

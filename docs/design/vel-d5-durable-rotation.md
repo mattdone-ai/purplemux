@@ -240,3 +240,13 @@ mutation listed was killed: the named test file failed.
 | M47 | F1: a first message from another tab's row is typed | durable (a row left by a tab closed while no server ran) |
 | M48 | N3: a failed `git status` counts 0 | `rotation-checkpoint.test.ts` (a corrupt index, real git) |
 | M49 | N3: an unmeasured count reads "unknown" | `rotation-checkpoint.test.ts` (N3) |
+| M50 | a durable checkpoint clears the standing refusal (each retry counted again) | durable F2 (`checkpointRefusals: 1`) |
+| M51 | a failed check keeps naming the stop | durable (a stop before the clear that turns into a failed check) |
+
+**After the merge (bugfix/d5-f2-deterministic).** CI run 42455698496 failed the F2 test once. The cause was the
+test, not the code. The test asserted the state between a host-down restart refusal and the retry that the refusal
+schedules (`retryMs` 1, real time), and its fake reset the host-down flag after one refusal. On a slow runner the
+retry ran first. A 5 ms stall before the assertion reproduces it 3 of 3. Two changes fix it:
+- The host now stays down until the test lifts it.
+- The deterministic test showed a real counting defect, now fixed (M50, M51): each such retry counted one more
+  checkpoint refusal.
