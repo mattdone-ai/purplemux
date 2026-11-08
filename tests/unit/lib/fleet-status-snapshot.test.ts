@@ -239,6 +239,25 @@ describe('readComposer', () => {
   });
 });
 
+describe('the pool would-refuse counter on the fleet view (vel-D4 review r1 F1)', () => {
+  const counter = { mode: 'shadow' as const, total: 2, since: new Date(NOW - 60 * MIN).toISOString(), byHost: { 'ai-lan': { total: 2, byRefusal: { overloaded: 2 } } }, last: null };
+
+  it('carries the counter when it is read', async () => {
+    expect((await buildFleetView({ ...deps, poolWouldRefuse: async () => counter }, NOW)).pool).toEqual(counter);
+  });
+
+  it('a counter that cannot be read is left out and named; the rows still render', async () => {
+    const view = await buildFleetView({ ...deps, poolWouldRefuse: async () => { throw new Error('fleet-config.json unreadable'); } }, NOW);
+    expect(view.pool).toBeUndefined();
+    expect(view.errors).toContainEqual({ scope: 'pool', error: 'fleet-config.json unreadable' });
+    expect(view.rows.length).toBeGreaterThan(0);
+  });
+
+  it('no counter dep (an older caller) carries no pool field, never 0', async () => {
+    expect(await buildFleetView(deps, NOW)).not.toHaveProperty('pool');
+  });
+});
+
 describe('rotation coverage in the fleet view (vel-D5 AC6)', () => {
   const seat = (key: string, attrs: Record<string, number | string | null>) => ({
     workspaceId: 'ws-1', itemKey: key, itemType: 'seat' as const, openedAt: 0, closedAt: null, state: 'watching', stateSince: 0, waitReason: null,

@@ -1,3 +1,4 @@
+import type { IPoolWouldRefuseView } from '@/types/pool';
 import type { TPanelType } from '@/types/terminal';
 import type { IClientTabStatusEntry } from '@/types/status';
 
@@ -101,6 +102,8 @@ export interface IFleetView {
   errors: Array<{ scope: string; error: string; workspaceId?: string }>;
   /** Per workspace id (ADR-0027); absent from a server older than it, or when the cap could not be read. */
   wip?: Record<string, IFleetWip>;
+  /** The pool's shadow-mode would-refuse counter (vel-D4 review r1 F1); absent when it could not be read. */
+  pool?: IPoolWouldRefuseView;
   /** Rotation coverage (vel-D5): workers that rotate, rotations and refusals, wait-to-rotate; absent when unread. */
   rotation?: import('@/types/rotation-checkpoint').IRotationCoverage;
 }

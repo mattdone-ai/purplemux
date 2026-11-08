@@ -1,6 +1,38 @@
-export type TPoolKind = 'gate' | 'build' | 'tab';
+export type TPoolJobKind = 'gate' | 'build' | 'mutation' | 'browser' | 'test-service';
+export type TPoolKind = TPoolJobKind | 'tab';
 
-export const POOL_KINDS: readonly TPoolKind[] = ['gate', 'build', 'tab'];
+export const POOL_JOB_KINDS: readonly TPoolJobKind[] = ['gate', 'build', 'mutation', 'browser', 'test-service'];
+export const POOL_KINDS: readonly TPoolKind[] = [...POOL_JOB_KINDS, 'tab'];
+
+/**
+ * Who a reservation serves (vel-D4). `product`: application repair and candidate
+ * validation, first. `harness`: harness and optional jobs, held to a bounded
+ * share. `control-plane`: a coordinator tab on this host's reserve; never queued.
+ */
+export type TPoolClass = 'product' | 'harness' | 'control-plane';
+
+export const POOL_CLASSES: readonly TPoolClass[] = ['product', 'harness', 'control-plane'];
+
+export interface IPoolUse {
+  threads: number;
+  memBytes: number;
+}
+
+/** A host's one budget (vel-D4): the reserve comes off the top; every kind shares the rest. */
+export interface IPoolBudgetView {
+  threads: number;
+  memBytes: number;
+  reserveThreads: number;
+  reserveMemBytes: number;
+  workerThreads: number;
+  workerMemBytes: number;
+  /** min(load1, load5) plus unseen work above this refuses new work. */
+  maxLoad: number;
+  harnessSharePct: number;
+  used: Record<TPoolClass, IPoolUse>;
+  /** Worker budget not reserved by product or harness work. */
+  free: IPoolUse;
+}
 
 export interface IPoolDisk {
   path: string;
@@ -83,9 +115,15 @@ export interface IPoolHostView {
   metrics: IPoolMetrics | null;
   /** Load per thread over the 1-minute average; null when unknown. */
   loadPerThread: number | null;
+  /**
+   * Per kind: `used` leases (plus agent tabs for `tab`); `cap` the envelopes of the kind the worker budget holds
+   * alone (or `pool.slots.<host>.<kind>`); `free` how many more fit the shared budget now.
+   */
   slots: Record<TPoolKind, IPoolSlotUse>;
-  /** Agent tabs whose tmux runs on this host (from the layouts). */
+  /** Agent tabs whose tmux runs on this host (from the layouts), the orchestrator tabs among them included. */
   agentTabs: number;
+  /** Null for an unknown host: its budget is not known, never zero. */
+  budget: IPoolBudgetView | null;
 }
 
 export interface IPoolTotals {
@@ -99,13 +137,75 @@ export interface IPoolTotals {
   unknownHosts: number;
 }
 
+export interface IPoolQueueEntry {
+  ticket: string;
+  kind: TPoolKind;
+  class: TPoolClass;
+  /** 1-based, in admission order. */
+  position: number;
+  envelope: { threads: number; memGb: number };
+  /** The hosts the ticket may run on; empty while none of them is placeable. */
+  hosts: string[];
+  holder: string;
+  queuedAt: string;
+  expiresAt: string | null;
+}
+
+/**
+ * `pool.mode` (vel-D4 review r1): `shadow`, the default, admits work the budget, the measured memory or the
+ * sustained load would refuse, and logs it; `enforce` refuses it. Every other check refuses in both modes.
+ */
+export type TPoolMode = 'shadow' | 'enforce';
+
+/** The admission checks that shadow mode logs and admits instead of refusing. */
+export type TPoolShadowedRefusal = 'no-budget' | 'no-memory' | 'overloaded';
+
+/** One admission that enforce mode would have refused, with the figures `max-load` is tuned from. */
+export interface IPoolWouldRefuse {
+  host: string;
+  kind: TPoolKind;
+  class: TPoolClass;
+  refusals: TPoolShadowedRefusal[];
+  /** min(load1, load5) of the read. */
+  minLoad: number;
+  /** Threads of the leases and tab starts the read cannot show yet. */
+  pendingThreads: number;
+  envelope: IPoolEnvelopeView;
+  maxLoad: number;
+  memFreeBytes: number;
+  workerUsed: IPoolUse;
+  workerThreads: number;
+  workerMemBytes: number;
+  /** The agent tabs the ledger counts on the host, from the layouts. */
+  agentTabs: { worker: number; controlPlane: number };
+  detail: string;
+}
+
+/** The would-refuse counter since the server started (the fleet view and the pool view carry it). */
+export interface IPoolWouldRefuseView {
+  mode: TPoolMode;
+  total: number;
+  since: string;
+  byHost: Record<string, { total: number; byRefusal: Partial<Record<TPoolShadowedRefusal, number>> }>;
+  /** The last log line, so a reader sees the figures without the server log. */
+  last: { at: string; line: string } | null;
+}
+
 export interface IPoolView {
   at: string;
   hosts: IPoolHostView[];
   totals: IPoolTotals;
+  queue: IPoolQueueEntry[];
+  wouldRefuse: IPoolWouldRefuseView;
 }
 
-export type TPoolRefusalReason = 'no-known-host' | 'no-free-slot' | 'no-memory' | 'disk-full';
+/**
+ * `no-budget`: the shared worker budget (threads or memory) is reserved; `harness-share`: harness work holds its
+ * share; `no-memory`: measured free memory; `overloaded`: sustained load; `queued-ahead`: an earlier ticket waits
+ * for the host; `too-large`: no allowed host's budget could ever hold the envelope (never queued).
+ */
+export type TPoolRefusalReason =
+  | 'no-known-host' | 'no-free-slot' | 'no-memory' | 'disk-full' | 'no-budget' | 'harness-share' | 'overloaded' | 'queued-ahead' | 'too-large';
 
 export interface IPoolPlacementRequest {
   kind: TPoolKind;
@@ -115,11 +215,22 @@ export interface IPoolPlacementRequest {
   panelType?: string;
   /** kind tab only: a tab role (ADR-0040); any role places on this host. */
   role?: string;
+  /** Threads the work keeps busy at its peak; the kind's envelope when absent. */
+  threads?: number;
+  /** `product` when absent; `control-plane` is a tab class only. */
+  class?: TPoolClass;
+  /** Only this host: a create whose --cwd is missing on the host the pool chose first. */
+  localOnly?: boolean;
+}
+
+export interface IPoolEnvelopeView {
+  threads: number;
+  memGb: number;
 }
 
 export type TPoolPlacement =
-  | { ok: true; host: string; local: boolean; reason: string }
-  | { ok: false; refusal: TPoolRefusalReason; reason: string };
+  | { ok: true; host: string; local: boolean; reason: string; envelope: IPoolEnvelopeView | null; wouldRefuse?: IPoolWouldRefuse }
+  | { ok: false; refusal: TPoolRefusalReason; reason: string; queueable: boolean };
 
 export interface IPoolAcquireResult {
   host: string;
@@ -130,4 +241,28 @@ export interface IPoolAcquireResult {
   reason: string;
   /** The gate-host container to pin for a remote gate (fleet config `pool.gate-host.<host>`), else null. */
   gateHost: string | null;
+  class: TPoolClass;
+  /** What the slot reserves; a launcher that supports limits passes it on (systemd-run, docker --cpus --memory). */
+  envelope: IPoolEnvelopeView;
+  /** Shadow mode admitted what enforce mode would refuse (logged and counted). */
+  wouldRefuse?: IPoolWouldRefuse;
+  /** Set when the caller asked for class control-plane and is not the workspace's enabled orchestrator tab. */
+  downgrade?: string;
+}
+
+/** A queued request (vel-D4): re-ask with `ticket` before `expiresAt` to keep the place. */
+export interface IPoolQueuedResult {
+  queued: true;
+  ticket: string;
+  kind: TPoolKind;
+  class: TPoolClass;
+  position: number;
+  of: number;
+  reason: string;
+  refusal: TPoolRefusalReason;
+  expiresAt: string | null;
+  retryAfterSeconds: number;
+  envelope: IPoolEnvelopeView;
+  /** Set when the caller asked for class control-plane and is not the workspace's enabled orchestrator tab. */
+  downgrade?: string;
 }

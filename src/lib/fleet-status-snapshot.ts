@@ -10,6 +10,7 @@ import type {
   IFleetTabFacts, IFleetThresholds, IFleetUnattributed, IFleetView, IFleetWip, TComposerReading,
 } from '@/types/fleet-status';
 import type { ILease } from '@/types/lease';
+import type { IPoolWouldRefuseView } from '@/types/pool';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
 import type { ILedgerItem } from '@/types/ledger';
@@ -39,6 +40,8 @@ export interface IFleetDeps {
   mtime: (file: string) => Promise<number | null>;
   config: (key: string) => Promise<string | null>;
   providerId: (tab: ITab) => string | null;
+  /** The pool's would-refuse counter; absent: the view carries none. */
+  poolWouldRefuse?: () => Promise<IPoolWouldRefuseView>;
   /**
    * The seat items of a workspace (ADR-0036), open and closed, for the rotation coverage (vel-D5 AC6); throws when
    * the ledger holds more than it answers, so a total is never silently partial. Absent: no section.
@@ -112,13 +115,15 @@ const composerSince = (tab: ITab, status: IClientTabStatusEntry, reading: TCompo
 
 export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promise<IFleetView> => {
   const errors: IFleetView['errors'] = [];
-  const [workspaces, thresholds, watches, leases, openers] = await Promise.all([
+  const [workspaces, thresholds, watches, leases, openers, pool] = await Promise.all([
     deps.workspaces(),
     readThresholds(deps.config),
     settle(deps.watches),
     settle(deps.leases),
     settle(async () => deps.openers()),
+    deps.poolWouldRefuse ? settle(deps.poolWouldRefuse) : Promise.resolve(null),
   ]);
+  if (pool && !pool.ok) errors.push({ scope: 'pool', error: pool.error });
   // Each workspace's cap: its own key wins over the fleet key (story 17 AC 8).
   const tabCap = await settle(async () =>
     new Map(await Promise.all(workspaces.map(async (w) => [w.id, (await readTabCap(deps.config, w.id)).cap] as const))));
@@ -238,6 +243,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
     unattributed,
     errors,
     ...(wip ? { wip } : {}),
+    ...(pool?.ok ? { pool: pool.value } : {}),
     ...(rotation ? { rotation } : {}),
   };
 };
@@ -284,6 +290,7 @@ const realDeps = async (): Promise<IFleetDeps> => {
     mtime: async (file) => (await fs.stat(file)).mtimeMs,
     config: async (key) => valueOf(await fleetConfig, key)?.value ?? null,
     providerId: (tab) => getProviderByPanelType(tab.panelType)?.id ?? null,
+    poolWouldRefuse: async () => (await import('@/lib/pool-service')).readPoolWouldRefuse(),
     seatItems: async (workspaceId) => {
       const { getLedgerStore } = await import('@/lib/ledger-store');
       const read = getLedgerStore().items(workspaceId, { type: 'seat', limit: SEAT_ITEMS_LIMIT }, Date.now());

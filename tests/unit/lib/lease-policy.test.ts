@@ -26,6 +26,7 @@ describe('lease kind policy table (architecture.md "Lease kinds")', () => {
       deploy: [30 * M, 2 * H, false, false, true],
       epic: [null, 7 * D, false, false, false],
       pool: [60 * M, D, false, false, false],
+      'pool-queue': [2 * M, D, false, false, false],
       num: [14 * D, 30 * D, true, true, false],
     });
     expect([OTHER_KIND.defaultTtlSeconds, OTHER_KIND.maxTtlSeconds, OTHER_KIND.survivesTab]).toEqual([30 * M, D, false]);
@@ -49,8 +50,8 @@ describe('parseLeaseName', () => {
     ['num:nomupay/treasury-api:rfc:0001', 'must be <owner>/<repo>:<adr|migration>:<nnnn>'],
     ['epic:a/b', 'must be an epic slug'],
     [`epic:${'a'.repeat(101)}`, 'must be an epic slug'],
-    ['pool:ai-lan/review-1', 'must be <host>/<gate|build|tab>-<n>'],
-    ['pool:ai-lan/gate-1000', 'must be <host>/<gate|build|tab>-<n>'],
+    ['pool:ai-lan/review-1', 'must be <host>/<gate|build|mutation|browser|test-service|tab>-<n>'],
+    ['pool:ai-lan/gate-1000', 'must be <host>/<gate|build|mutation|browser|test-service|tab>-<n>'],
   ])('refuses %j with a named rule', (raw, message) => {
     expect(() => parseLeaseName(raw)).toThrow(LeasePolicyError);
     expect(() => parseLeaseName(raw)).toThrow(message);

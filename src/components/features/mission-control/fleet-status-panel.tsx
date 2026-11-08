@@ -156,6 +156,29 @@ const WipLine = ({ view, workspace }: { view: IFleetView; workspace: string | nu
   );
 };
 
+const POOL_MODE_LABEL: Record<string, string> = {
+  shadow: 'Pool shadow mode',
+  enforce: 'Pool enforce mode',
+};
+
+/**
+ * The pool's would-refuse counter (vel-D4 review r1): the starts and jobs shadow mode admitted that enforce mode
+ * would have refused, since the server started. Absent (an older server, or an unread counter): no line, never 0.
+ */
+const PoolLine = ({ view }: { view: IFleetView }) => {
+  if (!view.pool) return null;
+  const p = view.pool;
+  const label = Object.hasOwn(POOL_MODE_LABEL, p.mode) ? POOL_MODE_LABEL[p.mode] : 'Pool mode not known';
+  return (
+    <p className="flex flex-wrap gap-x-3 text-muted-foreground" data-pool-would-refuse={p.total} data-pool-mode={p.mode}>
+      <span>{label}: {p.total} admitted that enforce would refuse, since the server started</span>
+      {Object.entries(p.byHost).map(([host, c]) => (
+        <span key={host} className="tabular-nums" data-pool-host={host}>{host} {c.total}</span>
+      ))}
+    </p>
+  );
+};
+
 export interface IFleetFilter {
   showAll: boolean;
   workspace: string | null;
@@ -180,6 +203,7 @@ const FleetView = ({ view, filter, onFilter }: { view: IFleetView; filter: IFlee
     <div className="space-y-2 text-xs" data-fleet-view="" data-state={view.rows.length === 0 ? 'empty' : 'populated'}>
       <p className="text-muted-foreground" data-thresholds="">{thresholdsText(view)}</p>
       <WipLine view={view} workspace={workspace} />
+      <PoolLine view={view} />
       {view.errors.map((e) => (
         <p key={`${e.scope}:${e.error}`} className="text-destructive" data-state="partial-error">Could not read {e.scope}: {e.error}</p>
       ))}

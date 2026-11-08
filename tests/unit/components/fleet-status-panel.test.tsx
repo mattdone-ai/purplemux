@@ -184,6 +184,26 @@ describe('fleet status panel', () => {
     expect(renderToStaticMarkup(<>{boundary.render()}</>)).toContain('Fleet status failed to render: Invalid time value');
   });
 
+  describe('the pool would-refuse counter (vel-D4 review r1)', () => {
+    const pool = {
+      mode: 'shadow' as const, total: 3, since: '2026-10-16T11:00:00.000Z', last: null,
+      byHost: { mdserver1: { total: 2, byRefusal: { overloaded: 2 } }, 'ai-lan': { total: 1, byRefusal: { 'no-budget': 1 } } },
+    };
+
+    it('shows the mode label, the total and each host', () => {
+      const html = render(ok(view({ pool })));
+      expect(html).toContain('data-pool-would-refuse="3"');
+      expect(html).toContain('Pool shadow mode: 3 admitted that enforce would refuse, since the server started');
+      expect(html).toMatch(/data-pool-host="mdserver1"[^>]*>mdserver1 2</);
+      expect(html).toMatch(/data-pool-host="ai-lan"[^>]*>ai-lan 1</);
+    });
+
+    it('an unknown mode token is never shown raw; absent pool renders no line, never 0', () => {
+      expect(render(ok(view({ pool: { ...pool, mode: 'turbo' as never } })))).toContain('Pool mode not known: 3');
+      expect(render(ok(view()))).not.toContain('data-pool-would-refuse');
+    });
+  });
+
   describe('WIP per workspace (ADR-0027)', () => {
     const rows = [row(), row({ workspaceId: 'ws-2', workspaceName: 'Billing', tabId: 'tab-z' })];
 

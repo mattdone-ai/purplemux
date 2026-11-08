@@ -10,11 +10,15 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   try {
     const body = bodyOf(req);
     const result = await acquirePoolSlot(
-      { kind: body.kind, memGb: body.memGb, ttlSeconds: body.ttlSeconds, panelType: body.panelType, role: body.role },
+      {
+        kind: body.kind, memGb: body.memGb, threads: body.threads, ttlSeconds: body.ttlSeconds, panelType: body.panelType, role: body.role,
+        class: body.class, queue: body.queue, ticket: body.ticket,
+      },
       holderOf(caller),
       leaseAuthority,
     );
-    return res.status(200).json(result);
+    // A queued request (vel-D4) is accepted, not admitted: the caller re-asks with its ticket.
+    return res.status('queued' in result ? 202 : 200).json(result);
   } catch (err) {
     return sendPoolError(res, err);
   }

@@ -18,6 +18,7 @@ import { LEDGER_WAIT_REASONS } from '@/lib/ledger';
 import { leaseAuthority } from '@/lib/lease-http';
 import { STANDUP_DUE_CONFIG_KEY, parseStandupDueMinutes } from '@/lib/standup';
 import { createLogger } from '@/lib/logger';
+import { POOL_MODE_KEY, isPoolMode, isPoolNumberKey, poolNumberRefusal } from '@/lib/pool';
 import type { IFleetConfigChange, IFleetConfigSetter, IFleetConfigState, IFleetConfigValue } from '@/types/fleet-config';
 import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, callbackUrlRefusal, isValidBareHostName, isValidRemoteHostName, parseCallbackAllowHosts } from '@/lib/remote-host';
 
@@ -52,7 +53,7 @@ const setterOf = (caller: ICaller): IFleetConfigSetter => ({
  */
 export const ADMIN_ONLY_KEYS = /^(remote|tabs|attention|alerts|mission|pool|curator|standup)\./;
 
-const POOL_SLOTS_KEY = /^pool\.slots\.[a-z0-9._-]+\.(gate|build|tab)$/;
+const POOL_SLOTS_KEY = /^pool\.slots\.[a-z0-9._-]+\.(gate|build|mutation|browser|test-service|tab)$/;
 const POOL_ALIAS_KEY = /^pool\.(fallback|gate-host)\.[A-Za-z0-9._-]+$/;
 
 const TAB_CAP_KEYS = /^tabs\.cap-per-workspace(\.[A-Za-z0-9_-]+)?$/;
@@ -67,9 +68,21 @@ const checkTabCapValue = (key: string, value: string): void => {
   }
 };
 
-/** The pool's keys (ADR-0039): slot caps are whole numbers 0..64; a fallback or gate host is an ssh alias. */
+/**
+ * The pool's keys (ADR-0039, vel-D4): slot count caps are whole numbers 0..64; a fallback or gate host is an ssh
+ * alias; the budget, envelope and share keys are numbers in their ranges (`poolNumberRefusal`).
+ */
 const checkPoolValue = (key: string, value: string): void => {
   if (!key.startsWith('pool.')) return;
+  if (key === POOL_MODE_KEY) {
+    if (!isPoolMode(value.trim())) throw new FleetConfigError('config-invalid', `${key} must be shadow or enforce, got ${JSON.stringify(value)}`);
+    return;
+  }
+  if (isPoolNumberKey(key)) {
+    const refusal = poolNumberRefusal(key, value);
+    if (refusal) throw new FleetConfigError('config-invalid', refusal);
+    return;
+  }
   if (POOL_SLOTS_KEY.test(key)) {
     if (!/^\d{1,2}$/.test(value) || Number(value) > 64) throw new FleetConfigError('config-invalid', `${key} must be a whole number 0..64, got ${JSON.stringify(value)}`);
     return;
@@ -78,7 +91,8 @@ const checkPoolValue = (key: string, value: string): void => {
     if (!isValidRemoteHostName(value)) throw new FleetConfigError('config-invalid', `${key} must be an ssh alias, got ${JSON.stringify(value)}`);
     return;
   }
-  throw new FleetConfigError('config-invalid', `${key} is not a pool key: pool.slots.<host>.<gate|build|tab>, pool.fallback.<alias> or pool.gate-host.<host>`);
+  throw new FleetConfigError('config-invalid', `${key} is not a pool key: pool.slots.<host>.<kind>, pool.fallback.<alias>, pool.gate-host.<host>, `
+    + 'pool.budget.<host>.<threads|mem-gb|reserve-threads|reserve-mem-gb|max-load>, pool.envelope.<kind>.<threads|mem-gb>, pool.harness-share-pct or pool.mode');
 };
 
 /** Values the remote keys must hold, checked at write time so a bad one never reaches a create. */

@@ -115,9 +115,10 @@ to an exit code through one table:
      7  not found (ledger, ADR-0033)             ledger-experiment-not-found                —
      1  unexpected error (ledger, ADR-0033)      ledger-store-failed                        investigate
      2  usage error (pool, ADR-0039)             pool-invalid                               fix the command
-     3  refused by state (pool, ADR-0039)        pool-full, pool-unreadable                 after the state changes, or a local
-                                                                                            slot; never for a gate.no-local-
-                                                                                            fallback repository (ADR-0039 §6)
+     3  refused by state (pool, ADR-0039)        pool-full, pool-unreadable,                after the state changes, or a local
+                                                 pool-queued, pool-ticket-gone              slot; never for a gate.no-local-
+                                                                                            fallback repository (ADR-0039 §6);
+                                                                                            pool-queued: re-run with --ticket
      6  no answer (pool, ADR-0039)               pool-timeout                               fall back to a local slot, log it;
                                                                                             never for a gate.no-local-
                                                                                             fallback repository (ADR-0039 §6)
@@ -188,8 +189,15 @@ what, so treat it as a refusal.
 
 ## Pool (ADR-0039)
 
-One scheduler places gates, builds and agent tabs on this host and the remote.hosts hosts from
-live headroom. This host is read through host-metrics on every call; each remote host by one ssh
+One scheduler places gates, builds, mutation runs, browsers, test services and agent tabs on this
+host and the remote.hosts hosts (vel-D4: one shared budget per host, docs/design/vel-d4-shared-budget.md).
+Each known host has one budget: threads and memory (fleet config pool.budget.<host>.*, else the
+read), less a control-plane reserve (default max(2, 25 % of threads) and max(4 GiB, 15 % of
+memory)). Every kind reserves its envelope (pool.envelope.<kind>.*; defaults gate, build and
+mutation 8 threads / 8 GiB, browser, test-service and tab 2 threads / 4 GiB) from the same worker
+budget for the life of its lease; agent tabs from the layouts reserve the tab envelope, and each
+workspace's enabled orchestrator tab draws on the reserve. Measured: mdserver1 32 threads / 91 GiB
+(8 threads / 14 GiB reserved, 24 / 77 for workers); ai-server 64 / 373 GiB (16 / 56, 48 / 317). This host is read through host-metrics on every call; each remote host by one ssh
 read (\`sh -s\`, 5 s hard timeout, then pool.fallback.<alias> once) every 30 s. A failed read
 makes the host unknown for 30 s: it shows no figures, never 0, takes nothing new, and keeps its
 leases. A read older than 90 s is unknown too. A host that answered only through its fallback
@@ -199,44 +207,72 @@ alias shows its figures and "via", but "placeable" is false and "reason" says
 GET /api/cli/pool   (any valid scope)
   \`purplemux pool show [--json]\`. The board's pool section reads the same model.
   Response: { "at", "totals": { "threads", "memTotalBytes", "memAvailableBytes", "knownHosts",
-  "unknownHosts", "slots": { "gate"|"build"|"tab": { "used", "cap", "free" } } }, "hosts": [{   (totals' "free"
+  "unknownHosts", "slots": { <kind>: { "used", "cap", "free" } } }, "hosts": [{   (totals' "free"
   counts placeable hosts only; "used" and "cap" count every known host)
   "host", "local", "state": "known"|"unknown", "placeable", "readAt", "via", "reason", "loadPerThread",
-  "agentTabs", "slots", "metrics": null | { "threads", "load1", "load5", "memTotalBytes",
+  "agentTabs", "slots", "budget": null | { "threads", "memBytes", "reserveThreads", "reserveMemBytes",
+  "workerThreads", "workerMemBytes", "maxLoad", "harnessSharePct", "used": { "product"|"harness"|
+  "control-plane": { "threads", "memBytes" } }, "free": { "threads", "memBytes" } }, "metrics": null | { "threads", "load1", "load5", "memTotalBytes",
   "memAvailableBytes", "disks": [{ "path", "usedPct", "freeBytes" }], "gpus": null | [{ "index",
   "name", "utilPct", "memUsedMiB", "memTotalMiB" }], "sccacheSweep": null | { "state":
   "active"|"stopped"|"failed"|"not-installed", "failed", "timer": { "loadState", "activeState",
   "unitFileState", "result" }, "service": null | { ...the same } } } }] }. "stopped" is an
   installed timer that is stopped or disabled; null is not read. Totals count known hosts only.
-  A tab slot in use is an agent tab on that host (from the layouts) or a tab-kind lease.
+  A kind's "used" counts its leases (and, for tab, the agent tabs on the host); "cap" is how many of
+  its envelopes the worker budget holds alone (or pool.slots.<host>.<kind>); "free" is how many more
+  fit the shared budget now. "queue": [{ "ticket", "kind", "class", "position", "envelope":
+  { "threads", "memGb" }, "hosts", "holder", "queuedAt", "expiresAt" }] in admission order.
   503 pool-unreadable (exit 3) when the fleet config or the lease store cannot be read.
 
 POST /api/cli/pool/acquire   (a tab token, or the admin token)
-  Body: { "kind": "gate"|"build"|"tab", "memGb"?: 0..1024, "ttlSeconds"?: n,
-          "panelType"?: "claude-code", "role"?: "evaluator" }   (panelType and role: kind tab only)
-  \`purplemux pool acquire --kind K [--mem GB] [--ttl 60m] [--panel-type T] [--role R]\`.
-  Placement: unknown and fallback-only hosts are skipped. Gates and builds need a free slot, / under 85% and
-  memGb + 4 GiB free; they go to the lowest load per thread (load1 plus 8 threads for each gate
-  or build leased within 60 s of the read), then the most free memory. The pool never refuses a
-  tab: tab admission is the WIP cap (ADR-0027). Only a claude-code tab with no role may leave this
-  host (codex-cli and grok-cli cannot run remote, ADR-0022 §13; a coordinator is never remote,
-  §20); it goes to the placeable host with a free tab slot, the memory and the most free memory,
-  else here. Every other tab is placed here. A tie stays on this host. Memory leased within 60 s of a read counts against the host.
+  Body: { "kind": "gate"|"build"|"mutation"|"browser"|"test-service"|"tab", "memGb"?: 0..1024,
+          "threads"?: 1..4096, "ttlSeconds"?: n, "class"?: "product"|"harness"|"control-plane",
+          "queue"?: true, "ticket"?: "pool-queue:<kind>-<n>",
+          "panelType"?: "claude-code", "role"?: "evaluator" }   (panelType, role, control-plane: kind tab only)
+  \`purplemux pool acquire --kind K [--mem GB] [--threads N] [--class C] [--queue [--wait S] | --ticket T]
+  [--ttl 60m] [--panel-type T] [--role R]\`.
+  Admission (vel-D4): the envelope is the kind's, raised by memGb and set by threads. Unknown and
+  fallback-only hosts are skipped. A host takes the work only when every check passes: / under 85 %
+  (jobs only); the pool.slots count cap if set; the envelope fits the worker budget left by every
+  held lease (all ages: the ledger never reads measured use); a harness job fits its share
+  (pool.harness-share-pct, default 25 % of the worker budget); measured free memory, less the
+  leases taken within 60 s of the read, keeps 4 GiB after the envelope; min(load1, load5) plus the
+  unseen leases' threads plus the envelope stays at or under max-load (default the host's threads);
+  and no earlier ticket that could run there (its envelope fits the host's worker budget and, for
+  harness, its share) waits for that host. Tab starts this server created within 60 s count as
+  unseen in the measured checks. In pool.mode shadow (the default) the budget, measured-memory and
+  sustained-load checks admit and log instead of refusing; the answer then carries "wouldRefuse". Jobs go to the lowest projected load per thread, then
+  the most free memory; tabs to the most free memory. A tie stays on this host. Only a claude-code
+  tab with no role may leave this host (codex-cli and grok-cli cannot run remote, ADR-0022 §13; a
+  coordinator is never remote, §20). A control-plane tab runs here on the reserve: never queued or
+  refused, and its reason states the reserve use. Class control-plane is honoured only for the
+  workspace's enabled orchestrator tab, resolved from the caller's identity; any other caller runs
+  as product and the answer carries "downgrade" with the reason. A non-agent tab type is refused (no envelope).
   The slot is a lease "pool:<host>/<kind>-<n>" on the lease store (ADR-0011): the lowest free n,
-  held by the caller's tab, default TTL 60m, at most 24h, note "pool mem=<GB>". It ends with
-  \`pool release\`, its TTL, or its holder tab (the lease sweeper). Placement and the slot number
-  are taken inside the lease lock: two callers never get one slot.
+  held by the caller's tab, default TTL 60m, at most 24h, note "pool mem=<GB> threads=<N>
+  class=<C>". It ends with \`pool release\`, its TTL, or its holder tab (the lease sweeper).
+  Placement and the slot number are taken inside the lease lock: two callers never get one slot.
   Response: { "host", "local", "slot": "gate-1", "lease": "pool:ai-lan/gate-1", "expiresAt",
-  "reason", "gateHost": null | "<pool.gate-host.<host>>" }
-  Errors (gate and build only): 409 pool-full { "refusal": "no-known-host"|"no-free-slot"|"no-memory"|"disk-full" }
-  (exit 3); 400 pool-invalid (exit 2); 400 lease-policy (a TTL over 24h, exit 2); 403
+  "reason", "gateHost": null | "<pool.gate-host.<host>>", "class", "envelope": { "threads",
+  "memGb" } }. A launcher that supports limits passes the envelope on (systemd-run --scope -p
+  CPUQuota= -p MemoryMax=, docker --cpus --memory).
+  Queue: with "queue": true a request that fits nowhere is 202 { "queued": true, "ticket", "kind",
+  "class", "position", "of", "reason", "refusal", "expiresAt", "retryAfterSeconds", "envelope" }.
+  The ticket is a lease "pool-queue:<kind>-<n>" (TTL 120 s) held by the caller. Re-ask with
+  "ticket" within its TTL to keep the place (renewed at half its TTL); the admitted ticket becomes
+  the slot in one transaction. Order: product, and harness under its share, by arrival; harness at
+  its share last. \`pool release pool-queue:<kind>-<n>\` gives a place up.
+  Errors: 409 pool-full { "refusal": "no-known-host"|"no-free-slot"|"no-budget"|"harness-share"|
+  "no-memory"|"overloaded"|"disk-full"|"queued-ahead"|"too-large" } with the measured and expected
+  figures per host (exit 3; too-large never queues); 409 pool-ticket-gone (the ticket expired or was
+  released, exit 3); 400 pool-invalid (exit 2); 400 lease-policy (a TTL over 24h, exit 2); 403
   caller-unresolved (no tab, exit 3).
   Client rule: the CLI waits 2 s. No answer exits 6 (pool-timeout); the caller does what it does
   without the pool and logs it: a lane uses its local slots, but a repository in
   gate.no-local-fallback never runs here (below). A lease a late answer took expires at its TTL.
   A gate passes --ttl of at least its gate timeout, or renews the lease while it runs.
 
-POST /api/cli/pool/release   Body: { "lease": "pool:<host>/<kind>-<n>" }
+POST /api/cli/pool/release   Body: { "lease": "pool:<host>/<kind>-<n>" | "pool-queue:<kind>-<n>" }
   \`purplemux pool release LEASE\`. The holder only (409 lease-held-by-other, exit 3); 404
   lease-not-found (exit 7); a name that is not a pool slot is 400 pool-invalid.
   Response: { "released": <lease view> }
@@ -359,11 +395,18 @@ POST /api/cli/tabs
   PMUX_TAB_ID, PMUX_WORKSPACE_ID, PMUX_URL (this server) and its own tab token, never the
   workspace token. A remote claude-code tab's hooks, transcript and CLI reach this server, so
   status, result, send, close and the watchdog work as for a local tab; status serves "host".
-  "host": "auto" asks the pool (ADR-0039): only a claude-code tab with no role may go to a known
-  remote host (the most free memory; a tie stays here), then passes the same checks as an
-  explicit host. Every other tab, a pool refusal, no pool answer in 2 s, or a "cwd" missing on
-  the chosen host creates the tab here. The answer adds "placement": { "host", "local",
-  "reason", "fallback" }; "fallback" is true when the pool's own answer was not used.
+  "host": "auto" asks the pool (ADR-0039, vel-D4): only a claude-code tab with no role may go to a
+  known remote host (the most free memory; a tie stays here), then passes the same checks as an
+  explicit host. An agent tab takes a tab lease (300 s) for its envelope until it is in its
+  layout. A start that fits no host is 202 { "code": "pool-queued", "ticket", "position", "of",
+  "reason", ... } and creates nothing: re-POST with "queueTicket" to keep the place (\`tab create
+  --host auto\` waits and re-asks for you). A pool refusal is 409 pool-full. "poolClass":
+  "control-plane" runs the tab here on the reserve, never queued. A "cwd" missing on the chosen
+  host gives that start back and asks this host alone. Only a first ask with no "queueTicket"
+  that the pool does not answer in 2 s creates the tab here without the budget; a late answer is
+  given back. Every other pool failure is an answer and creates nothing: 409 pool-ticket-gone,
+  409 pool-full, 400 pool-invalid, 503 pool-timeout (a re-ask), 503 pool-unreadable. The answer adds "placement": { "host", "local", "reason", "fallback",
+  "envelope" }; "fallback" is true when the pool's first answer was not used.
   "cwd" is the tab's start directory, an absolute path that must exist on the tab's host,
   else 400 { "code": "cwd-missing" } (exit 2).
   "reportsTo" names a live tab of the SAME workspace that receives this tab's watchdog nudges
@@ -930,11 +973,39 @@ Keys in use:
                integer 1..200 when written (else 400 config-invalid). A stored value that is invalid
                anyway serves the fleet cap with capSource "workspace-config-invalid" and "capReason",
                and is logged. Admin token only, as above.
-  pool.slots.<host>.<gate|build|tab>
-               A pool host's slot cap for the kind (ADR-0039), a whole number 0..64 (0: none there);
+  pool.slots.<host>.<gate|build|mutation|browser|test-service|tab>
+               A pool host's count cap for the kind (ADR-0039), a whole number 0..64 (0: none there);
                <host> is the lower-case pool host (this host's name or a remote.hosts alias).
-               Unset means threads / 8 for gate and build, total memory / 8 GiB for tab. Read
-               on every pool read. Admin token only.
+               Unset means no count cap: the shared budget alone admits (vel-D4). Read on every
+               pool read. Admin token only.
+  pool.budget.<host>.threads
+  pool.budget.<host>.mem-gb
+  pool.budget.<host>.reserve-threads
+  pool.budget.<host>.reserve-mem-gb
+  pool.budget.<host>.max-load
+               A pool host's one budget (vel-D4): threads 1..4096 and memory 1..65536 GiB (unset:
+               the read), the control-plane reserve (unset: max(2, 25 % of threads) threads and
+               max(4, 15 % of memory) GiB), and the sustained load that refuses new work (unset: the
+               host's threads, a placeholder: tune it from the shadow would-refuse log before
+               pool.mode=enforce). An invalid stored value keeps the default. Admin token only.
+  pool.envelope.<kind>.threads
+  pool.envelope.<kind>.mem-gb
+               What one job or tab of the kind reserves (vel-D4): threads 1..4096 and 0..4096 GiB.
+               Unset: gate, build and mutation 8 threads / 8 GiB; browser, test-service and tab 2
+               threads / 4 GiB. A request's memGb raises the memory, its threads sets the threads.
+               Admin token only.
+  pool.harness-share-pct
+               The share of each worker budget harness work may hold (vel-D4), a whole percent
+               0..100. Unset means 25. Admin token only.
+  pool.mode
+               shadow or enforce (vel-D4 review r1), checked when written. Unset, and a stored
+               value that is neither, mean shadow: the budget (no-budget), measured-memory
+               (no-memory) and sustained-load (overloaded) checks admit the work, log one
+               "pool would-refuse (shadow, admitted):" line with min_load, pending_threads,
+               envelope, max_load, memory and agent_tabs, and count it ("wouldRefuse" on GET
+               /api/cli/pool and "pool" on the fleet view). enforce refuses them. Every other
+               check refuses in both modes. Go-live runs shadow for a day, tunes
+               pool.budget.<host>.max-load from the log, then sets enforce. Admin token only.
   pool.fallback.<alias>
                The ssh alias the pool read tries once when <alias> fails (the tailnet alias
                behind a LAN alias, e.g. ai-server behind ai-lan). Unset means one try. Admin

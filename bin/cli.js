@@ -208,6 +208,8 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'pool-full': EXIT.CONFLICT,
   'pool-unreadable': EXIT.CONFLICT,
   'pool-timeout': EXIT.UNREACHABLE,
+  'pool-queued': EXIT.CONFLICT,
+  'pool-ticket-gone': EXIT.CONFLICT,
   'curator-task-invalid': EXIT.USAGE,
   'curator-workspace-invalid': EXIT.USAGE,
   'curator-gate-refused': EXIT.CONFLICT,
@@ -235,7 +237,9 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'tab-busy': 'the tab is mid-turn — retry when it is idle, or restart with --interrupt to abandon the turn',
   'restart-not-confirmed': 'a process or the session outlived the reap; nothing was relaunched — inspect the tab before a retry',
   'pool-timeout': 'the pool did not answer in 2 s — do what you do without the pool and log it (a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here); a lease the late answer took expires at its TTL',
-  'pool-full': 'no host has a free slot, the memory or the disk — wait for a release; a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here',
+  'pool-full': 'no host has the budget, the memory or the disk — wait for a release, or ask with --queue; a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here',
+  'pool-queued': 'the request still waits in the pool queue — re-run with --ticket TICKET within 120 s to keep the place, or with a longer --wait; do not start the work without the pool',
+  'pool-ticket-gone': 'the ticket expired or was released — ask again without --ticket (the place is lost)',
 }));
 
 const exitFor = (code) => (code && Object.hasOwn(CODE_EXIT, code) ? CODE_EXIT[code] : EXIT.UNEXPECTED);
@@ -1753,7 +1757,11 @@ const cmdLease = async (args) => {
 
 // ---- pool (ADR-0039) ----
 
-const POOL_USAGE = 'usage: pool show [--json] | acquire --kind gate|build|tab [--mem GB] [--ttl 60m] [--panel-type T] [--role R] | release LEASE';
+const POOL_KINDS = ['gate', 'build', 'mutation', 'browser', 'test-service', 'tab'];
+const POOL_CLASSES = ['product', 'harness', 'control-plane'];
+const POOL_USAGE = 'usage: pool show [--json] | acquire --kind gate|build|mutation|browser|test-service|tab [--mem GB] [--threads N] [--class product|harness|control-plane] [--queue [--wait SECONDS] | --ticket TICKET] [--ttl 60m] [--panel-type T] [--role R] | release LEASE|TICKET';
+// vel-D4: a queued request waits here, re-asking with its ticket, up to --wait seconds (default 15 min).
+const POOL_QUEUE_WAIT_DEFAULT_S = 900;
 // The client rule: no answer in 2 s exits 6 (pool-timeout), and the caller falls back to its local slots and logs it.
 const POOL_ACQUIRE_TIMEOUT_MS = 2000;
 
@@ -1792,9 +1800,49 @@ const GIB = 1024 ** 3;
 const gib = (bytes) => (bytes === null || bytes === undefined ? '-' : `${(bytes / GIB).toFixed(1)}`);
 const slotText = (s) => `${s.used}/${s.cap}`;
 
+const queueWaitOf = (args) => {
+  const raw = flagValue(args, '--wait');
+  if (raw === null) {
+    if (args.includes('--wait')) die('--wait needs whole seconds (0: answer at once)');
+    return POOL_QUEUE_WAIT_DEFAULT_S;
+  }
+  if (!/^\d{1,6}$/.test(raw)) die(`--wait must be whole seconds, got "${raw}"`);
+  return Number(raw);
+};
+
+/**
+ * A queued answer pauses the caller and re-asks with its ticket (vel-D4). It prints one line when the
+ * position or the reason changes, never on every ask, and ends with `pool-queued` (exit 3) and the ticket
+ * on stdout when the wait runs out.
+ */
+const waitInQueue = async (first, ask, waitSeconds) => {
+  const deadline = Date.now() + waitSeconds * 1000;
+  let answer = first;
+  let last = '';
+  while (answer && answer.queued === true) {
+    const line = `queued: ${answer.ticket} position ${answer.position} of ${answer.of} — ${answer.reason}`;
+    if (line !== last) process.stderr.write(`${line}\n`);
+    last = line;
+    const retry = Number(answer.retryAfterSeconds);
+    const pauseMs = Math.max(50, (Number.isFinite(retry) && retry >= 0 ? retry : 10) * 1000);
+    if (Date.now() + pauseMs > deadline) {
+      out(answer);
+      fail('pool-queued', `${answer.ticket} still waits at position ${answer.position} of ${answer.of} after ${waitSeconds} s`, answer);
+    }
+    await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    answer = await ask(answer.ticket);
+  }
+  return answer;
+};
+
 const printPool = (view) => {
   const t = view.totals;
-  process.stdout.write(`pool ${t.knownHosts} known, ${t.unknownHosts} unknown: ${t.threads} threads, ${gib(t.memAvailableBytes)}/${gib(t.memTotalBytes)} GiB free, gate ${slotText(t.slots.gate)} build ${slotText(t.slots.build)} tab ${slotText(t.slots.tab)}\n`);
+  process.stdout.write(`pool ${t.knownHosts} known, ${t.unknownHosts} unknown: ${t.threads} threads, ${gib(t.memAvailableBytes)}/${gib(t.memTotalBytes)} GiB free, gate ${slotText(t.slots.gate)} build ${slotText(t.slots.build)} tab ${slotText(t.slots.tab)}${view.queue?.length ? `, ${view.queue.length} queued` : ''}\n`);
+  const w = view.wouldRefuse;
+  if (w) {
+    const hosts = Object.entries(w.byHost).map(([host, c]) => `${host} ${c.total}`).join(', ');
+    process.stdout.write(`mode ${w.mode === 'enforce' ? 'enforce' : 'shadow'}: ${w.total} admitted that enforce would refuse since ${w.since}${hosts ? ` (${hosts})` : ''}\n`);
+  }
   for (const h of view.hosts) {
     const name = `${h.host}${h.local ? ' (this host)' : ''}`;
     if (!h.metrics) {
@@ -1807,6 +1855,15 @@ const printPool = (view) => {
     const sweep = m.sccacheSweep ? ` sccache-sweep ${m.sccacheSweep.state}` : '';
     const notPlaceable = h.placeable === false ? `; not placeable: ${h.reason}` : '';
     process.stdout.write(`  ${name}: ${m.threads} threads, load ${m.load1}/${m.load5} (${h.loadPerThread}/thread), ${gib(m.memAvailableBytes)}/${gib(m.memTotalBytes)} GiB free, ${disks}${gpu}${sweep}; gate ${slotText(h.slots.gate)} build ${slotText(h.slots.build)} tab ${slotText(h.slots.tab)}${h.via && h.via !== h.host ? ` via ${h.via}` : ''}${notPlaceable}\n`);
+    const b = h.budget;
+    if (b) {
+      const workers = { threads: b.used.product.threads + b.used.harness.threads, memBytes: b.used.product.memBytes + b.used.harness.memBytes };
+      const cp = b.used['control-plane'];
+      process.stdout.write(`    budget: workers ${workers.threads}/${b.workerThreads} threads, ${gib(workers.memBytes)}/${gib(b.workerMemBytes)} GiB (harness ${b.used.harness.threads} threads, share ${b.harnessSharePct}%); control-plane reserve ${cp.threads}/${b.reserveThreads} threads, ${gib(cp.memBytes)}/${gib(b.reserveMemBytes)} GiB; max load ${b.maxLoad}\n`);
+    }
+  }
+  for (const q of view.queue ?? []) {
+    process.stdout.write(`  queued ${q.position}: ${q.ticket} ${q.class} ${q.envelope.threads} threads ${q.envelope.memGb} GiB, hosts ${q.hosts.join(',') || 'none placeable'}, holder ${q.holder}, since ${q.queuedAt}\n`);
   }
 };
 
@@ -1822,8 +1879,24 @@ const cmdPool = async (args) => {
     }
     case 'acquire': {
       const kind = flagValue(rest, '--kind');
-      if (!['gate', 'build', 'tab'].includes(kind)) die(`--kind must be gate, build or tab — ${POOL_USAGE}`);
+      if (!POOL_KINDS.includes(kind)) die(`--kind must be gate, build, mutation, browser, test-service or tab — ${POOL_USAGE}`);
       const data = { kind };
+      const threads = flagValue(rest, '--threads');
+      if (threads !== null || rest.includes('--threads')) {
+        if (!/^\d{1,4}$/.test(threads ?? '') || Number(threads) < 1) die(`--threads must be a whole number 1..4096, got "${threads ?? ''}"`);
+        data.threads = Number(threads);
+      }
+      const cls = flagValue(rest, '--class');
+      if (cls !== null || rest.includes('--class')) {
+        if (!POOL_CLASSES.includes(cls)) die(`--class must be product, harness or control-plane — ${POOL_USAGE}`);
+        data.class = cls;
+      }
+      const ticket = flagValue(rest, '--ticket');
+      if (rest.includes('--ticket') && !ticket) die(`--ticket needs the ticket a queued answer printed (pool-queue:<kind>-<n>) — ${POOL_USAGE}`);
+      if (ticket) data.ticket = ticket;
+      if (rest.includes('--queue')) data.queue = true;
+      if (rest.includes('--wait') && !data.queue && !ticket) die('--wait goes with --queue or --ticket');
+      const wait = queueWaitOf(rest);
       const mem = flagValue(rest, '--mem');
       if (mem !== null) {
         if (!/^\d+(\.\d+)?$/.test(mem)) die(`--mem must be a number of GiB, got "${mem}"`);
@@ -1840,11 +1913,12 @@ const cmdPool = async (args) => {
       const role = flagValue(rest, '--role');
       if (role !== null) data.role = role;
       requireEnv();
-      return out(await poolRequest('POST', '/api/cli/pool/acquire', data));
+      const first = await poolRequest('POST', '/api/cli/pool/acquire', data);
+      return out(await waitInQueue(first, (t) => poolRequest('POST', '/api/cli/pool/acquire', { ...data, ticket: t }), wait));
     }
     case 'release': {
       const lease = rest.find((a) => !a.startsWith('-'));
-      if (!lease) die(`release needs a LEASE (pool:<host>/<kind>-<n>) — ${POOL_USAGE}`);
+      if (!lease) die(`release needs a LEASE (pool:<host>/<kind>-<n>) or a TICKET (pool-queue:<kind>-<n>) — ${POOL_USAGE}`);
       requireEnv();
       const { body } = await api('POST', '/api/cli/pool/release', { lease });
       return out(body);
@@ -1883,7 +1957,14 @@ const cmdTabCreate = async (args) => {
   // A seat (ADR-0036): rotate from this handoff file at the context threshold; the path is resolved against the cwd.
   const handoff = flagValue(args, '--handoff');
   const rotateAt = flagValue(args, '--rotate-at');
+  // vel-D4: --host auto only. The pool class, a ticket a queued answer printed, and how long to wait in the queue.
+  const poolClass = flagValue(args, '--class');
+  const queueTicket = flagValue(args, '--ticket');
   if (!wsId) die('--workspace is required');
+  if ((args.includes('--class') || args.includes('--ticket') || args.includes('--wait')) && host !== 'auto') die('--class, --ticket and --wait go with --host auto');
+  if (args.includes('--class') && !POOL_CLASSES.includes(poolClass)) die('--class must be product, harness or control-plane');
+  if (args.includes('--ticket') && !queueTicket) die('--ticket needs the ticket a queued answer printed (pool-queue:tab-<n>)');
+  const queueWait = host === 'auto' ? queueWaitOf(args) : 0;
   if (args.includes('--handoff') && !handoff) die('--handoff needs the path of the seat\'s handoff file');
   if (args.includes('--rotate-at') && !rotateAt) die('--rotate-at needs a token count (50000..900000) or off');
   if (args.includes('--role') && !role) die('--role needs a role name (evaluator)');
@@ -1899,7 +1980,7 @@ const cmdTabCreate = async (args) => {
   if (overCap && reason === null) die('--over-cap needs --reason TEXT');
   if (!overCap && args.includes('--reason')) die('--reason goes with --over-cap');
   if (overCap && (reason.trim().length === 0 || reason.length > OVER_CAP_REASON_MAX)) die(`--reason needs 1..${OVER_CAP_REASON_MAX} characters`);
-  const { body } = await api('POST', '/api/cli/tabs', {
+  const createBody = {
     workspaceId: wsId,
     ...(name ? { name } : {}),
     ...(panelType ? { panelType } : {}),
@@ -1917,8 +1998,12 @@ const cmdTabCreate = async (args) => {
     ...(handoff ? { handoff: path.resolve(handoff) } : {}),
     ...(rotateAt ? { rotateAt } : {}),
     ...(overCap ? { overCap: { reason } } : {}),
-  });
-  out(body);
+    ...(poolClass ? { poolClass } : {}),
+    ...(queueTicket ? { queueTicket } : {}),
+  };
+  const { body } = await api('POST', '/api/cli/tabs', createBody);
+  const ask = async (ticket) => (await api('POST', '/api/cli/tabs', { ...createBody, queueTicket: ticket })).body;
+  out(await waitInQueue(body, ask, queueWait));
 };
 
 /**
@@ -3352,10 +3437,19 @@ Commands:
                                            fleet config remote.hosts. terminal and claude-code only; exit 2
                                            otherwise, exit 6 when HOST does not answer. The pane's purplemux
                                            reaches this server through PMUX_URL with the tab's own token.
-                                           --host auto: the pool places it (ADR-0039): a claude-code tab with no
-                                           role may go to the known host with the most free memory; every other
-                                           tab, and any pool refusal, no answer in 2 s or a --cwd missing there,
-                                           stays here. The answer's "placement" says where and why
+                                           --host auto: the pool places it (ADR-0039, vel-D4): a claude-code tab
+                                           with no role may go to the known host with the most free memory; every
+                                           other tab runs here. A start that fits no host's budget QUEUES: the
+                                           CLI prints "queued: TICKET position N of M — reason" when it changes
+                                           and re-asks until the start is admitted or --wait SECONDS (default
+                                           900; 0 answers at once) runs out (exit 3 pool-queued, the ticket on
+                                           stdout; re-run with --ticket TICKET within 120 s to keep the place).
+                                           A pool refusal is exit 3 pool-full. --class control-plane runs a
+                                           coordinator here on the reserve, never queued, but only when the caller
+                                           is the workspace's enabled orchestrator tab; any other caller runs as
+                                           product ("downgrade" says why). Only a first ask the pool does not
+                                           answer in 2 s creates the tab here; every other pool error creates
+                                           nothing. The answer's "placement" says where and why
              [--cwd DIR]                   Start the tab in DIR, an absolute directory that must exist on the
                                            tab's host (cwd-missing, exit 2). A remote worker works in its own
                                            checkout or worktree on that host
@@ -3619,16 +3713,23 @@ Commands:
   curator message -w WS ID [--json]        One owner message by its history id (a standing-order candidate
                                            names the id, never the text); a tab reads its own workspace's
   pool show [--json]                       The compute pool (ADR-0039): per host threads, load, free memory, disk,
-                                           GPU and slots used/cap; an unknown host shows no figures, never 0
-  pool acquire --kind gate|build|tab [--mem GB] [--ttl 60m] [--panel-type T] [--role R]
-                                           Place the work and take a slot lease: prints {host, local, slot, lease,
-                                           expiresAt, reason, gateHost}. Gates and builds go by load per thread,
-                                           then memory; tabs by memory and never refused. Exit 3 pool-full; exit 6
-                                           when no answer comes in 2 s: do what you do without the pool and log it
-                                           (gate.no-local-fallback repositories never run here). A gate passes --ttl
-                                           of at least its gate timeout
-  pool release LEASE                       Release a slot you hold (pool:<host>/<kind>-<n>); a slot also ends
-                                           with its TTL (default 60m, at most 24h) or its holder tab
+                                           GPU, kind counts, the one budget (workers, harness share, control-plane
+                                           reserve) and the queue; an unknown host shows no figures, never 0
+  pool acquire --kind K [--mem GB] [--threads N] [--class product|harness] [--queue [--wait S] | --ticket T]
+             [--ttl 60m] [--panel-type T] [--role R]
+                                           K: gate, build, mutation, browser, test-service or tab. Admit the work on
+                                           the shared host budget (vel-D4) and take a slot lease: prints {host,
+                                           local, slot, lease, expiresAt, reason, gateHost, class, envelope}. Jobs
+                                           go by load per thread, then memory; tabs by memory. Harness work holds at
+                                           most its share. Exit 3 pool-full with the measured and expected figures;
+                                           --queue waits in the queue instead (as tab create --host auto), exit 3
+                                           pool-queued when --wait runs out. Exit 6 when no answer comes in 2 s:
+                                           do what you do without the pool and log it (gate.no-local-fallback
+                                           repositories never run here). A gate passes --ttl of at least its gate
+                                           timeout. Pass the envelope to systemd-run or docker where you can
+  pool release LEASE|TICKET                Release a slot you hold (pool:<host>/<kind>-<n>) or give up a queue place
+                                           (pool-queue:<kind>-<n>); a slot also ends with its TTL (default 60m, at
+                                           most 24h) or its holder tab
   inbox list -w WS [--all]                 Server notices (notes, watches, deploys, Mission Control) queued or held
                                            for WS's tabs; --all adds delivered and dropped (kept 7 days)
   inbox retry ID                           Re-queue a held notice once (the target workspace, the note's sender, or admin).

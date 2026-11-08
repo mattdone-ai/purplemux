@@ -478,24 +478,43 @@ export const acquireLease = async (
  * Acquire a lease whose name is chosen from the state inside the lock (a pool
  * slot: the placement and the free slot number are read and taken in one
  * transaction, so two callers can never take the same slot). `choose` throws
- * to refuse; nothing is written then.
+ * to refuse; nothing is written then. `name: null` writes nothing and returns
+ * no lease. `release` names leases of the same holder that leave in the same
+ * transaction (a pool ticket that becomes its slot).
  */
+export type TChosenLease<T> =
+  | { name: string; ttlSeconds?: number; note?: string; release?: readonly string[]; value: T }
+  | { name: null; value: T };
+
 export const acquireChosenLease = async <T>(
   holder: ILeaseHolder,
   authority: ILeaseAuthority,
-  choose: (state: ILeaseState, now: number) => { name: string; ttlSeconds?: number; note?: string; value: T },
-): Promise<{ lease: ILease; value: T }> => {
+  choose: (state: ILeaseState, now: number) => TChosenLease<T>,
+): Promise<{ lease: ILease | null; value: T }> => {
   requireHolder(holder);
   const now = authority.now();
+  let unwritten: { lease: null; value: T } | null = null;
   const result = await transact(now, (state) => {
     const chosen = choose(state, now);
+    if (chosen.name === null) {
+      unwritten = { lease: null, value: chosen.value };
+      return null;
+    }
     const { name, kind, resource } = parseLeaseName(chosen.name);
     if (policyFor(kind).orchestratorOnly) throw new LeaseError('forbidden', `${kind} leases cannot be chosen by placement`);
     const ttlSeconds = resolveTtl(kind, chosen.ttlSeconds, holder);
-    const r = acquireInState(state, { name, kind, resource, holder, ttlSeconds, epic: null, note: resolveNote(chosen.note) }, now);
-    return { state: r.state, value: { lease: r.lease, value: chosen.value }, effects: [{ type: 'acquired', lease: r.lease, outcome: r.outcome }] };
+    let next = state;
+    const effects: TLeaseEffect[] = [];
+    for (const gone of chosen.release ?? []) {
+      const r = releaseInState(next, gone, holder, now);
+      next = r.state;
+      effects.push({ type: 'released', lease: r.lease, reason: 'released', by: holder });
+    }
+    const r = acquireInState(next, { name, kind, resource, holder, ttlSeconds, epic: null, note: resolveNote(chosen.note) }, now);
+    effects.push({ type: 'acquired', lease: r.lease, outcome: r.outcome });
+    return { state: r.state, value: { lease: r.lease as ILease | null, value: chosen.value }, effects };
   });
-  return result.value!;
+  return unwritten ?? result.value!;
 };
 
 export const renewLease = async (

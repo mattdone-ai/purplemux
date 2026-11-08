@@ -37,7 +37,7 @@ A second defect sat in front of the CLI. The installed entry point, `bin/purplem
 | 7 | not found (ledger, ADR-0033) | `ledger-experiment-not-found` | — |
 | 1 | unexpected error (ledger, ADR-0033) | `ledger-store-failed` (unmapped) | investigate |
 | 2 | usage error (pool, ADR-0039) | `pool-invalid` | fix the command |
-| 3 | refused by state (pool, ADR-0039) | `pool-full`: no host has a free slot, the memory or the disk; `pool-unreadable` | after the state changes, or fall back to a local slot; never for a `gate.no-local-fallback` repository (ADR-0039 §6) |
+| 3 | refused by state (pool, ADR-0039, vel-D4) | `pool-full`: no host has the budget, the memory or the disk (the refusal names the measured and expected figures); `pool-unreadable`; `pool-queued`: the request still waits in the pool queue when `--wait` ran out (the ticket is on stdout); `pool-ticket-gone`: the ticket expired or was released | after the state changes, or re-run with `--ticket` to keep a queued place; never a local run for a `gate.no-local-fallback` repository (ADR-0039 §6) |
 | 6 | no answer (pool, ADR-0039) | `pool-timeout`: `pool acquire` had no answer in 2 s | fall back to a local slot and log it; never for a `gate.no-local-fallback` repository (ADR-0039 §6) |
 | 2 | usage error (curator, ADR-0038) | `curator-task-invalid`, `curator-workspace-invalid` | fix the command |
 | 3 | refused by state (curator, ADR-0038) | `curator-gate-refused`: promote below the 95% lower bound, before 72 h and 30 labelled shadow rows of the live prompt, or without the spot check; `curator-refused`: a standing spot check, an import id not in the queue; `curator-unavailable` | after the state changes |

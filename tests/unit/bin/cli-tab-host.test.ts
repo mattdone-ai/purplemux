@@ -20,9 +20,11 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
   let requests: IRequest[] = [];
   let tokens: Array<string | undefined> = [];
   let reply: { status: number; body: unknown } = { status: 201, body: {} };
+  let replies: Array<{ status: number; body: unknown }> = [];
 
   beforeEach(async () => {
     requests = [];
+    replies = [];
     tokens = [];
     home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-cli-host-'));
     server = http.createServer((req, res) => {
@@ -31,8 +33,9 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
       req.on('end', () => {
         requests.push({ method: req.method ?? '', url: req.url ?? '', body: raw ? JSON.parse(raw) : null });
         tokens.push(req.headers['x-pmux-token'] as string | undefined);
-        res.writeHead(reply.status, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(reply.body));
+        const r = replies.shift() ?? reply;
+        res.writeHead(r.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(r.body));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -70,6 +73,52 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
     expect(result.code).toBe(0);
     expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'auto' });
     expect(JSON.parse(result.stdout)).toMatchObject({ placement: { host: 'ai-lan' } });
+  });
+
+  const queuedTab = (position: number) => ({
+    status: 202,
+    body: {
+      code: 'pool-queued', queued: true, ticket: 'pool-queue:tab-3', kind: 'tab', class: 'product', position, of: 3, refusal: 'no-budget',
+      reason: `queued: position ${position} of 3; mdserver1: budget threads 24/24 used, needs 2`, expiresAt: null, retryAfterSeconds: 0.05, envelope: { threads: 2, memGb: 4 },
+    },
+  });
+
+  it('a queued --host auto start waits, re-asks with its ticket, prints a line only when the position changes, and creates when admitted (vel-D4)', async () => {
+    replies = [queuedTab(2), queuedTab(2), queuedTab(1)];
+    reply = { status: 201, body: { tabId: 'tab-new', host: 'ai-lan' } };
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'auto', '--class', 'harness']);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ tabId: 'tab-new' });
+    expect(requests.map((r) => (r.body as { queueTicket?: string }).queueTicket ?? null)).toEqual([null, 'pool-queue:tab-3', 'pool-queue:tab-3', 'pool-queue:tab-3']);
+    expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'auto', poolClass: 'harness' });
+    expect(result.stderr.trim().split('\n')).toEqual([
+      'queued: pool-queue:tab-3 position 2 of 3 — queued: position 2 of 3; mdserver1: budget threads 24/24 used, needs 2',
+      'queued: pool-queue:tab-3 position 1 of 3 — queued: position 1 of 3; mdserver1: budget threads 24/24 used, needs 2',
+    ]);
+  });
+
+  it('--wait 0 answers at once: exit 3 pool-queued with the ticket on stdout; --ticket resumes the place', async () => {
+    reply = queuedTab(2);
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'auto', '--wait', '0']);
+    expect(result.code).toBe(3);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ticket: 'pool-queue:tab-3', position: 2 });
+    expect(result.stderr).toContain('pool-queued');
+    expect(result.stderr).toContain('re-run with --ticket TICKET');
+    reply = { status: 201, body: { tabId: 'tab-new' } };
+    await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'auto', '--ticket', 'pool-queue:tab-3']);
+    expect(requests.at(-1)?.body).toMatchObject({ queueTicket: 'pool-queue:tab-3' });
+  });
+
+  it.each([
+    [['--class', 'urgent', '--host', 'auto'], '--class must be'],
+    [['--class', 'harness'], 'go with --host auto'],
+    [['--ticket', 'pool-queue:tab-1', '--host', 'ai-server'], 'go with --host auto'],
+    [['--host', 'auto', '--wait', 'soon'], '--wait must be whole seconds'],
+  ])('%j is a usage error and sends nothing', async (extra, message) => {
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', ...extra]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain(message);
+    expect(requests).toEqual([]);
   });
 
   it('sends --cwd with the create', async () => {

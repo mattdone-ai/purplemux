@@ -12,6 +12,7 @@ import { IDLE_NUDGE_CONFIG_KEY, WAIT_BACKSTOP_CONFIG_KEY } from '@/lib/turn-end'
 import { ROTATE_AT_CONFIG_KEY } from '@/lib/context-lifecycle';
 import { CURATOR_KEYS } from '@/lib/curator-service';
 import { STANDUP_DUE_CONFIG_KEY } from '@/lib/standup';
+import { POOL_BUDGET_FIELDS, POOL_BUDGET_KEY_PREFIX, POOL_ENVELOPE_KEY_PREFIX, POOL_HARNESS_SHARE_KEY, POOL_MODE_KEY } from '@/lib/pool';
 
 vi.mock('@/lib/workspace-token', () => ({ resolveCliScope: () => ({ type: 'admin' }) }));
 
@@ -26,7 +27,12 @@ const SERVER_KEYS = [
   REMOTE_CALLBACK_ALLOW_HOSTS_KEY,
   TAB_CAP_KEY,
   `${TAB_CAP_KEY}.<workspaceId>`,
-  'pool.slots.<host>.<gate|build|tab>',
+  'pool.slots.<host>.<gate|build|mutation|browser|test-service|tab>',
+  ...POOL_BUDGET_FIELDS.map((field) => `${POOL_BUDGET_KEY_PREFIX}<host>.${field}`),
+  `${POOL_ENVELOPE_KEY_PREFIX}<kind>.threads`,
+  `${POOL_ENVELOPE_KEY_PREFIX}<kind>.mem-gb`,
+  POOL_HARNESS_SHARE_KEY,
+  POOL_MODE_KEY,
   'pool.fallback.<alias>',
   'pool.gate-host.<host>',
   ...Object.values(FLOW_CONFIG_KEYS),

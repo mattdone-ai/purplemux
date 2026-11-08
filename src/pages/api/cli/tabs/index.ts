@@ -28,7 +28,13 @@ import { RemoteKitBrokenError } from '@/lib/remote-kit';
 import { WipCapError, admitAgentCreate, auditOverCap } from '@/lib/tab-cap';
 import { checkEvaluatorBrowser, checkTabRole } from '@/lib/tab-role';
 import { AUTO_HOST, resolveAutoHost, type IAutoPlacement } from '@/lib/pool-tab-placement';
-import { placeOnPool } from '@/lib/pool-service';
+import { releaseTabStart, startTabOnPool } from '@/lib/pool-service';
+import { sendPoolError } from '@/lib/pool-http';
+import { recordTabStart } from '@/lib/pool-runtime';
+import { resolveCaller } from '@/lib/caller';
+import { leaseAuthority } from '@/lib/lease-http';
+import { holderFromCaller } from '@/lib/lease-store';
+import type { ILeaseHolder } from '@/types/lease';
 import { checkSeatOptions } from '@/lib/context-lifecycle';
 import type { TRotateAt } from '@/types/context-lifecycle';
 
@@ -60,6 +66,12 @@ const checkRemoteHost = async (host: unknown, panelType: TPanelType): Promise<TR
     return { ok: false, status: 400, body: { error: `host is not a registered remote host; set fleet config remote.hosts (ADR-0022)`, code: 'remote-host-invalid', host: typeof host === 'string' ? host : null, registered } };
   }
   return { ok: true, host };
+};
+
+/** Who holds a `--host auto` start's lease or ticket: the calling tab, the admin token, or nobody (no queue then). */
+const tabStartHolder = async (req: NextApiRequest, workspaceId: string): Promise<ILeaseHolder> => {
+  const caller = await resolveCaller(req).catch(() => null);
+  return caller ? holderFromCaller(caller) : { workspaceId, tabId: null, tabName: null, verified: false, admin: false };
 };
 
 type TCwdCheck = { ok: true } | { ok: false; status: number; body: Record<string, unknown> };
@@ -184,7 +196,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   if (req.method === 'POST') {
-    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, reportOn, host, cwd, role, previewUrl, pgService, overCap, handoff, rotateAt } = req.body as {
+    const { workspaceId, name, panelType, model, reasoning, launch, scope, reportsTo, reportOn, host, cwd, role, previewUrl, pgService, overCap, handoff, rotateAt, poolClass, queueTicket } = req.body as {
       workspaceId?: string;
       name?: string;
       panelType?: string;
@@ -202,6 +214,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       overCap?: unknown;
       handoff?: unknown;
       rotateAt?: unknown;
+      poolClass?: unknown;
+      queueTicket?: unknown;
     };
     if (!workspaceId) {
       return res.status(400).json({ error: 'workspaceId is required' });
@@ -249,162 +263,182 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     let autoPlacement: IAutoPlacement | null = null;
     let requestedHost: unknown = host;
     let cwdCheckedOnHost = false;
+    let startLease: string | null = null;
+    let startHolder: ILeaseHolder | null = null;
     if (host === AUTO_HOST) {
       if (cwd !== undefined && !isCwdShape(cwd)) {
         const refused = CWD_SHAPE_REFUSAL(cwd);
         if (!refused.ok) return res.status(refused.status).json(refused.body);
       }
+      const holder = await tabStartHolder(req, workspaceId);
+      startHolder = holder;
       const auto = await resolveAutoHost(
-        { panelType: resolvedType, role: roleCheck.role ?? undefined, cwd: isCwdShape(cwd) ? cwd : undefined },
-        { place: placeOnPool, cwdOnHost: remoteDirExists, localName: originName },
+        { panelType: resolvedType, role: roleCheck.role ?? undefined, cwd: isCwdShape(cwd) ? cwd : undefined, class: poolClass, ticket: queueTicket },
+        {
+          start: (input) => startTabOnPool(input, holder, leaseAuthority),
+          release: (lease) => releaseTabStart(lease, holder, leaseAuthority),
+          cwdOnHost: remoteDirExists,
+          localName: originName,
+        },
       );
+      // vel-D4: a start that fits no host waits in the pool's queue; nothing is created and nothing falls back here.
+      if (auto.kind === 'queued') return res.status(202).json({ code: 'pool-queued', ...auto.queued });
+      if (auto.kind === 'refused') return res.status(409).json({ code: 'pool-full', refusal: auto.refusal, error: auto.reason });
+      if (auto.kind === 'failed') return sendPoolError(res, auto.error);
       autoPlacement = auto.placement;
       requestedHost = auto.host;
       cwdCheckedOnHost = !!auto.cwdChecked;
+      startLease = auto.lease;
     }
-    if (requestedHost !== undefined) {
-      const checked = await checkRemoteHost(requestedHost, resolvedType);
-      if (!checked.ok) return res.status(checked.status).json(checked.body);
-      remoteHost = checked.host;
-    }
-    if (cwd !== undefined && !cwdCheckedOnHost) {
-      const checkedCwd = await checkCwd(cwd, remoteHost);
-      if (!checkedCwd.ok) return res.status(checkedCwd.status).json(checkedCwd.body);
-    }
-    const availability = await checkAgentAvailabilityForPanelType(resolvedType);
-    if (!availability.ok) {
-      return res.status(availability.status).json(toAgentAvailabilityError(availability));
-    }
-    if (model !== undefined && !isValidModelName(model)) {
-      return res.status(400).json({ error: 'Invalid model' });
-    }
-    // Each engine has its own effort vocabulary; validate against the one the
-    // tab will actually launch so a typo fails here, not silently at runtime.
-    if (reasoning !== undefined) {
-      if (!isValidReasoningForPanelType(resolvedType, reasoning)) {
-        return res.status(400).json({ error: reasoningErrorForPanelType(resolvedType) });
-      }
-    }
-    const wipCheck = await admitAgentCreate(req, workspaceId, resolvedType, overCap);
-    if (!wipCheck.ok) return res.status(wipCheck.status).json(wipCheck.body);
-    const { admission } = wipCheck;
-
-    // Agent tabs launch their CLI by default (mirrors UI tab creation) —
-    // a bare shell made `tab send` briefs land in bash, not the agent.
-    const shouldLaunch = launch !== false && isAgentPanelType(resolvedType);
-    const agentLaunchConfig = agentLaunchConfigFromOptions(model, reasoning);
-    const command = shouldLaunch
-      ? await buildFreshLaunchCommand(workspaceId, { panelType: resolvedType, host: remoteHost, agentLaunchConfig, role: roleCheck.role, previewOrigin: roleCheck.previewOrigin, pgService: roleCheck.pgService })
-      : undefined;
-
     try {
-      const tab = await addTabToPane(workspaceId, paneId, name, typeof cwd === 'string' ? cwd : ws.directories[0], resolvedType, command, {
-        scope: scope as string[] | undefined,
-        agentLaunchConfig,
-        reportsTo: typeof reportsTo === 'string' ? reportsTo : undefined,
-        reportOn: reportOnChecked.markers ?? undefined,
-        host: remoteHost,
-        role: roleCheck.role,
-        previewOrigin: roleCheck.previewOrigin,
-        pgService: roleCheck.pgService,
-        admit: admission?.admit,
-        ...seat.options,
-      });
-      if (!tab) return res.status(500).json({ error: 'Failed to create tab' });
-      const wip = admission?.wip() ?? null;
-      if (wip && admission?.passedCap() && wipCheck.overCapReason !== null && wipCheck.caller) {
-        await auditOverCap({ workspaceId, tabId: tab.id, wip, reason: wipCheck.overCapReason, caller: wipCheck.caller });
+      if (requestedHost !== undefined) {
+        const checked = await checkRemoteHost(requestedHost, resolvedType);
+        if (!checked.ok) return res.status(checked.status).json(checked.body);
+        remoteHost = checked.host;
       }
+      if (cwd !== undefined && !cwdCheckedOnHost) {
+        const checkedCwd = await checkCwd(cwd, remoteHost);
+        if (!checkedCwd.ok) return res.status(checkedCwd.status).json(checkedCwd.body);
+      }
+      const availability = await checkAgentAvailabilityForPanelType(resolvedType);
+      if (!availability.ok) {
+        return res.status(availability.status).json(toAgentAvailabilityError(availability));
+      }
+      if (model !== undefined && !isValidModelName(model)) {
+        return res.status(400).json({ error: 'Invalid model' });
+      }
+      // Each engine has its own effort vocabulary; validate against the one the
+      // tab will actually launch so a typo fails here, not silently at runtime.
+      if (reasoning !== undefined) {
+        if (!isValidReasoningForPanelType(resolvedType, reasoning)) {
+          return res.status(400).json({ error: reasoningErrorForPanelType(resolvedType) });
+        }
+      }
+      const wipCheck = await admitAgentCreate(req, workspaceId, resolvedType, overCap);
+      if (!wipCheck.ok) return res.status(wipCheck.status).json(wipCheck.body);
+      const { admission } = wipCheck;
 
-      if (tab.panelType !== 'web-browser') {
-        const provider = getProviderByPanelType(tab.panelType);
-        getStatusManager().registerTab(tab.id, {
-          cliState: 'inactive',
-          workspaceId,
-          tabName: tab.name,
-          tmuxSession: tab.sessionName,
-          panelType: tab.panelType,
-          agentProviderId: provider?.id,
-          agentSessionId: provider?.readSessionId(tab) ?? null,
-          reportsTo: tab.reportsTo ?? null,
-          reportOn: tab.reportOn ?? null,
-          handoffPath: tab.handoffPath ?? null,
-          rotateAt: tab.rotateAt ?? null,
-          host: tab.host ?? null,
-          lastEvent: null,
-          eventSeq: 0,
+      // Agent tabs launch their CLI by default (mirrors UI tab creation) —
+      // a bare shell made `tab send` briefs land in bash, not the agent.
+      const shouldLaunch = launch !== false && isAgentPanelType(resolvedType);
+      const agentLaunchConfig = agentLaunchConfigFromOptions(model, reasoning);
+      const command = shouldLaunch
+        ? await buildFreshLaunchCommand(workspaceId, { panelType: resolvedType, host: remoteHost, agentLaunchConfig, role: roleCheck.role, previewOrigin: roleCheck.previewOrigin, pgService: roleCheck.pgService })
+        : undefined;
+
+      try {
+        const tab = await addTabToPane(workspaceId, paneId, name, typeof cwd === 'string' ? cwd : ws.directories[0], resolvedType, command, {
+          scope: scope as string[] | undefined,
+          agentLaunchConfig,
+          reportsTo: typeof reportsTo === 'string' ? reportsTo : undefined,
+          reportOn: reportOnChecked.markers ?? undefined,
+          host: remoteHost,
+          role: roleCheck.role,
+          previewOrigin: roleCheck.previewOrigin,
+          pgService: roleCheck.pgService,
+          admit: admission?.admit,
+          ...seat.options,
         });
-        if (tab.handoffPath) getStatusManager().registerSeat(tab.id);
-        if (command) getStatusManager().markAgentLaunch(tab.id);
-      }
+        if (!tab) return res.status(500).json({ error: 'Failed to create tab' });
+        // The new tab is in its layout (the ledger) but not yet in the host read (review r1 F6).
+        if (autoPlacement?.envelope) recordTabStart(autoPlacement.host, autoPlacement.envelope);
+        const wip = admission?.wip() ?? null;
+        if (wip && admission?.passedCap() && wipCheck.overCapReason !== null && wipCheck.caller) {
+          await auditOverCap({ workspaceId, tabId: tab.id, wip, reason: wipCheck.overCapReason, caller: wipCheck.caller });
+        }
 
-      let codexLaunchState: 'active' | 'held' | undefined;
-      if (shouldLaunch && resolvedType === 'codex-cli') {
-        const launched = await launchCodexManaged(workspaceId, tab.id);
-        if (!launched.ok && launched.step === 'prepare') {
-          return res.status(500).json({
-            error: 'Failed to prepare Codex launch',
-            reason: launched.reason,
-            tabId: tab.id,
-            launchState: 'held',
-            ...(wip ? { wip } : {}),
+        if (tab.panelType !== 'web-browser') {
+          const provider = getProviderByPanelType(tab.panelType);
+          getStatusManager().registerTab(tab.id, {
+            cliState: 'inactive',
+            workspaceId,
+            tabName: tab.name,
+            tmuxSession: tab.sessionName,
+            panelType: tab.panelType,
+            agentProviderId: provider?.id,
+            agentSessionId: provider?.readSessionId(tab) ?? null,
+            reportsTo: tab.reportsTo ?? null,
+            reportOn: tab.reportOn ?? null,
+            handoffPath: tab.handoffPath ?? null,
+            rotateAt: tab.rotateAt ?? null,
+            host: tab.host ?? null,
+            lastEvent: null,
+            eventSeq: 0,
           });
+          if (tab.handoffPath) getStatusManager().registerSeat(tab.id);
+          if (command) getStatusManager().markAgentLaunch(tab.id);
         }
-        if (!launched.ok && launched.step === 'submit') {
-          return res.status(500).json({
-            error: 'Failed to submit Codex launch',
-            reason: launched.reason,
-            tabId: tab.id,
-            generation: launched.generation,
-            launchState: launched.phase,
-            ...(wip ? { wip } : {}),
-          });
-        }
-        if (!launched.ok) {
-          return res.status(503).json({
-            error: 'Codex launch was not confirmed',
-            reason: launched.reason,
-            tabId: tab.id,
-            generation: launched.generation,
-            launchState: launched.phase,
-            ...(wip ? { wip } : {}),
-          });
-        }
-        codexLaunchState = 'active';
-      }
 
-      return res.status(201).json({
-        tabId: tab.id,
-        workspaceId,
-        paneId,
-        sessionName: tab.sessionName,
-        name: tab.name,
-        panelType: tab.panelType,
-        agentProviderId: null,
-        agentSessionId: null,
-        agentLaunchConfig: tab.agentLaunchConfig,
-        launched: !!command || codexLaunchState === 'active',
-        ...(tab.reportsTo ? { reportsTo: tab.reportsTo } : {}),
-        ...(tab.reportOn ? { reportOn: tab.reportOn } : {}),
-        ...(codexLaunchState ? { launchState: codexLaunchState } : {}),
-        ...(tab.host ? { host: tab.host } : {}),
-        ...(tab.role ? { role: tab.role } : {}),
-        ...(tab.previewOrigin ? { previewOrigin: tab.previewOrigin } : {}),
-        ...(tab.pgService ? { pgService: tab.pgService } : {}),
-        ...(tab.handoffPath ? { handoffPath: tab.handoffPath } : {}),
-        ...(tab.rotateAt !== undefined ? { rotateAt: tab.rotateAt } : {}),
-        ...(wip ? { wip } : {}),
-        ...(autoPlacement ? { placement: autoPlacement } : {}),
-      });
-    } catch (err) {
-      if (err instanceof WipCapError) return res.status(409).json(err.body);
-      if (err instanceof RemoteHostError) {
-        return res.status(503).json(remoteHostUnreachableBody(err));
+        let codexLaunchState: 'active' | 'held' | undefined;
+        if (shouldLaunch && resolvedType === 'codex-cli') {
+          const launched = await launchCodexManaged(workspaceId, tab.id);
+          if (!launched.ok && launched.step === 'prepare') {
+            return res.status(500).json({
+              error: 'Failed to prepare Codex launch',
+              reason: launched.reason,
+              tabId: tab.id,
+              launchState: 'held',
+              ...(wip ? { wip } : {}),
+            });
+          }
+          if (!launched.ok && launched.step === 'submit') {
+            return res.status(500).json({
+              error: 'Failed to submit Codex launch',
+              reason: launched.reason,
+              tabId: tab.id,
+              generation: launched.generation,
+              launchState: launched.phase,
+              ...(wip ? { wip } : {}),
+            });
+          }
+          if (!launched.ok) {
+            return res.status(503).json({
+              error: 'Codex launch was not confirmed',
+              reason: launched.reason,
+              tabId: tab.id,
+              generation: launched.generation,
+              launchState: launched.phase,
+              ...(wip ? { wip } : {}),
+            });
+          }
+          codexLaunchState = 'active';
+        }
+
+        return res.status(201).json({
+          tabId: tab.id,
+          workspaceId,
+          paneId,
+          sessionName: tab.sessionName,
+          name: tab.name,
+          panelType: tab.panelType,
+          agentProviderId: null,
+          agentSessionId: null,
+          agentLaunchConfig: tab.agentLaunchConfig,
+          launched: !!command || codexLaunchState === 'active',
+          ...(tab.reportsTo ? { reportsTo: tab.reportsTo } : {}),
+          ...(tab.reportOn ? { reportOn: tab.reportOn } : {}),
+          ...(codexLaunchState ? { launchState: codexLaunchState } : {}),
+          ...(tab.host ? { host: tab.host } : {}),
+          ...(tab.role ? { role: tab.role } : {}),
+          ...(tab.previewOrigin ? { previewOrigin: tab.previewOrigin } : {}),
+          ...(tab.pgService ? { pgService: tab.pgService } : {}),
+          ...(tab.handoffPath ? { handoffPath: tab.handoffPath } : {}),
+          ...(tab.rotateAt !== undefined ? { rotateAt: tab.rotateAt } : {}),
+          ...(wip ? { wip } : {}),
+          ...(autoPlacement ? { placement: autoPlacement } : {}),
+        });
+      } catch (err) {
+        if (err instanceof WipCapError) return res.status(409).json(err.body);
+        if (err instanceof RemoteHostError) {
+          return res.status(503).json(remoteHostUnreachableBody(err));
+        }
+        if (err instanceof RemoteKitBrokenError) return res.status(502).json(remoteKitBrokenBody(err));
+        const msg = err instanceof Error ? err.message : 'unknown error';
+        log.error(`create tab failed: ${msg}`);
+        return res.status(500).json({ error: msg });
       }
-      if (err instanceof RemoteKitBrokenError) return res.status(502).json(remoteKitBrokenBody(err));
-      const msg = err instanceof Error ? err.message : 'unknown error';
-      log.error(`create tab failed: ${msg}`);
-      return res.status(500).json({ error: msg });
+    } finally {
+      if (startHolder) await releaseTabStart(startLease, startHolder, leaseAuthority);
     }
   }
 
