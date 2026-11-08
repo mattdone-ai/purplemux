@@ -102,7 +102,8 @@ export interface INeedsDecisionDeps {
   now: () => number;
   orchestratorTabId: (workspaceId: string) => Promise<string | null>;
   openRuns: (workspaceId: string) => IMissionOpenRunBinding[];
-  itemsOpenedByTab: (workspaceId: string, tabId: string, since: number) => string[];
+  /** Items the tab itself opened since `since`; the server's own NEEDS-DECISION items of the tab never count. */
+  itemsAskedByTab: (workspaceId: string, tabId: string, since: number) => string[];
   /** Still-open items (candidate or open) whose id starts with the prefix, whoever opened them (confirm C3). */
   openItemsWithIdPrefix: (workspaceId: string, prefix: string) => string[];
   /** The item's state, or null when no item has that id. */
@@ -295,8 +296,9 @@ const decide = async (
   const exactAnswered = mine.filter((item) => answeredInWindow(item, now)
     && (item.keys.includes(lineKey) || item.textKeys.includes(textKey))).at(-1);
   if (exactAnswered) return withNewHold(answeredOutcome(exactAnswered, false), newHeldBy);
-  const serverOwn = new Set(mine.filter((item) => item.serverOpened).map((item) => item.id));
-  const asked = deps.itemsOpenedByTab(stop.workspaceId, stop.tabId, stop.turnStartedAt).filter((id) => !serverOwn.has(id));
+  // The server's item of the previous stop opened at or after this turn's start: the store leaves it out by its event
+  // id, not by the answer window, so an answer older than 24 h never turns it into the tab's own ask.
+  const asked = deps.itemsAskedByTab(stop.workspaceId, stop.tabId, stop.turnStartedAt);
   if (asked.length) return { opened: false, reason: 'asked-this-turn', itemId: asked[0] };
   if (marked) {
     // Round 2 ruling A: a `[new]` line never revises, and a second `[new]` question waits for the first.
@@ -569,7 +571,7 @@ export const needsDecisionDeps = async (): Promise<INeedsDecisionDeps> => {
     now: () => Date.now(),
     orchestratorTabId: async (workspaceId) => (await getWorkspaceById(workspaceId))?.orchestration?.orchestratorTabId ?? null,
     openRuns: (workspaceId) => getMissionControlStore().listOpenRunBindings(workspaceId),
-    itemsOpenedByTab: (workspaceId, tabId, since) => getMissionControlStore().itemsOpenedByTab(workspaceId, tabId, since),
+    itemsAskedByTab: (workspaceId, tabId, since) => getMissionControlStore().itemsAskedByTab(workspaceId, tabId, since),
     openItemsWithIdPrefix: (workspaceId, prefix) => getMissionControlStore().openItemsWithIdPrefix(workspaceId, prefix),
     itemState: (itemId) => getMissionControlStore().itemStates([itemId]).get(itemId) ?? null,
     itemsOfTab: (workspaceId, tabId, lineKey, since) => getMissionControlStore().needsDecisionItemsOfTab(workspaceId, tabId, lineKey, since),

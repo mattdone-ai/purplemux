@@ -174,7 +174,7 @@ describe('the proposal item (D7 rule 4; test 2)', () => {
     expect(item.context).toMatch(/Largest prompt section after the add: \d+ bytes of 8192/);
     expect(item.context.split('\n').at(-1)).toBe('Yes files the order exactly as quoted. No, text alone, or no answer in 72 h files nothing.');
     // No opener row: a NEEDS-DECISION line of the SM in the same turn still opens its own item (§2 reads this table).
-    expect(store.itemsOpenedByTab('ws-sm', 'tab-sm', 0)).toEqual([]);
+    expect(store.itemsAskedByTab('ws-sm', 'tab-sm', 0)).toEqual([]);
     // The owner's attention-opened push runs for a server-opened item as for any other.
     expect(attention.alert).toHaveBeenCalledTimes(1);
     expect(attention.alert.mock.calls[0][0]).toMatchObject({ openerTabId: null });

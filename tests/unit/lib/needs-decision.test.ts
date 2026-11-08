@@ -580,11 +580,20 @@ describe('one item per question (story PM-2, D50 and D51)', () => {
     };
     store.applyEvents([start], new Map([[start.eventId, ORCH]]));
   };
+  // One fixed clock for the store, the opener and the turn bounds: `Date` is faked from T0, and each stop comes 1 s
+  // after the one before. A real clock put the previous stop's item inside or outside the turn by the millisecond.
+  const T0 = Date.UTC(2026, 10, 8);
+  let previousStopAt = new Map<string, number>();
   /** One stop of the tab on its own turn: the turn began at the previous stop, as the status manager passes it. */
   const ask = async (line: string, extra: Partial<INeedsDecisionStop> = {}, deps?: Awaited<ReturnType<typeof needsDecisionDeps>>) => {
     seq += 1;
+    const tabId = extra.tabId ?? 'tab-w';
+    const turnStartedAt = previousStopAt.get(tabId) ?? T0;
+    vi.setSystemTime(Date.now() + 1_000);
+    const stopAt = Date.now();
+    previousStopAt.set(tabId, stopAt);
     return openNeedsDecisionItem(deps ?? await needsDecisionDeps(), {
-      workspaceId: 'ws-a', tabId: 'tab-w', tabName: 'hfl-pm2', line, stopSeq: seq, stopAt: 1_000 * seq, turnStartedAt: Date.now() - 1, ...extra,
+      workspaceId: 'ws-a', tabId, tabName: 'hfl-pm2', line, stopSeq: seq, stopAt, turnStartedAt, ...extra,
     });
   };
   const items = () => store.snapshot([], 'ws-a').items;
@@ -624,6 +633,9 @@ describe('one item per question (story PM-2, D50 and D51)', () => {
   const PLAIN_NEW = 'end on NEEDS-DECISION: [new] <question>?';
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    previousStopAt = new Map();
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmux-nd-pm2-'));
     store = new MissionControlStore(path.join(dir, 'mission-control.sqlite'));
     live.store = store;
@@ -633,6 +645,7 @@ describe('one item per question (story PM-2, D50 and D51)', () => {
     startRun();
   });
   afterEach(() => {
+    vi.useRealTimers();
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -776,7 +789,10 @@ describe('one item per question (story PM-2, D50 and D51)', () => {
         humanReview: { humanNeed: 'decision', humanReason: 'r', handling: 'h', reviewerTabId: 'tab-orch' },
       },
     }], { tabId: 'tab-orch', identity: 'launch' });
-    expect(tabItem(handedId)).toMatchObject({ markedNew: true, serverOpened: false });
+    expect(tabItem(handedId)).toMatchObject({ markedNew: true });
+    // The orchestrator's own open, not the server's: it is the orchestrator's ask, never tab-w's.
+    expect(store.itemsAskedByTab('ws-a', 'tab-orch', 0)).toEqual([handedId]);
+    expect(store.itemsAskedByTab('ws-a', 'tab-w', 0)).toEqual([]);
     expect(await ask(Q2R)).toMatchObject({ opened: false, reason: 'already-open', itemId: handedId, heldNew: true });
     expect(items()).toHaveLength(1);
     expect(items()[0].revision).toBe(1);
@@ -1077,6 +1093,28 @@ describe('one item per question (story PM-2, D50 and D51)', () => {
     // The other tab's open item is not tab-w's: a later line of tab-w opens its own item, the other stays at revision 1.
     expect(await ask(REWORD, { turnStartedAt: Date.now() + 10 })).toMatchObject({ opened: true });
     expect(items().find((item) => item.id === (other as { itemId: string }).itemId)?.revision).toBe(1);
+  });
+
+  it('the server\'s item of the previous stop is never the tab\'s own ask: not inside the turn, not past the answer window', async () => {
+    const first = idOf(await ask(LINE));
+    const given = answer(first);
+    ack(first, given.id);
+    // The store tells the two openers apart by the event id, for any `since`, state or age.
+    expect(store.itemsAskedByTab('ws-a', 'tab-w', 0)).toEqual([]);
+    const { applyMissionEventBatch } = await import('@/lib/mission-control-events');
+    await applyMissionEventBatch('ws-a', [{
+      eventId: 'tab-ask-own', schemaVersion: 1, workspaceId: 'ws-a', runId: 'run-a', expectedRevision: 0, producerAt: 2, bindingGeneration: 1,
+      type: 'attention.opened', payload: {
+        itemId: 'ask-own', ...buildNeedsDecisionQuestion({ workspaceId: 'ws-a', tabId: 'tab-w', tabName: 'w', line: 'NEEDS-DECISION: own ask?' }),
+        humanReview: { humanNeed: 'decision', humanReason: 'r', handling: 'h', reviewerTabId: 'tab-orch' },
+      },
+    }], { tabId: 'tab-w', identity: 'session' });
+    expect(store.itemsAskedByTab('ws-a', 'tab-w', 0)).toEqual(['ask-own']);
+    expect(store.itemsAskedByTab('ws-a', 'tab-w', Date.now() + 1)).toEqual([]);
+    // The next stop's turn began at the stop that opened `first`, and the tab asked `ask-own` in it. Past the answer
+    // window, `first` has left the tab's windowed items: the tab's own ask still counts, the server's item never does.
+    const later = { ...(await needsDecisionDeps()), now: () => given.createdAt + NEEDS_DECISION_ANSWER_WINDOW_MS + 1 };
+    expect(await ask(LINE, {}, later)).toEqual({ opened: false, reason: 'asked-this-turn', itemId: 'ask-own' });
   });
 
   it('only the server opener records a line, only on an nd- item of the tab that owns it (AC 3)', async () => {

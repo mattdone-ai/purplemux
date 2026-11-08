@@ -452,8 +452,6 @@ export interface IMissionNeedsDecisionTabItem {
   textKeys: string[];
   /** The opening line carried `[new]`: the revision-1 row, else a revision-0 reservation row (consult r2, r3). */
   markedNew: boolean;
-  /** The server's NEEDS-DECISION opener opened it for this tab (opener row with a `system:needs-decision:` event). */
-  serverOpened: boolean;
   /** The latest answer, or null. */
   answer: {
     id: string;
@@ -678,7 +676,6 @@ export class MissionControlStore {
         id: string; state: TMissionItemState; revision: number; run_id: string; created_at: number; question_json: string; answer_id: string | null;
       }>;
     const lineRows = this.database.prepare('SELECT line_key, text_key, revision, marked_new FROM mission_nd_lines WHERE item_id = ?');
-    const opener = this.database.prepare('SELECT tab_id, event_id FROM mission_item_openers WHERE item_id = ?');
     const answerRow = this.database.prepare('SELECT * FROM answers WHERE item_id = ? ORDER BY created_at DESC, id DESC LIMIT 1');
     const deliveryRow = this.database.prepare('SELECT * FROM deliveries WHERE answer_id = ?');
     return rows.map((row) => {
@@ -686,7 +683,6 @@ export class MissionControlStore {
       const opening = lines.filter((line) => line.revision === 1);
       const own = needsDecisionLinePrefix(row.id);
       const keys = [...new Set([...(own ? [own.slice(3)] : []), ...lines.map((line) => line.line_key)])];
-      const openedBy = opener.get(row.id) as { tab_id: string; event_id: string } | undefined;
       const question = parseJson<{ decision?: unknown; options?: Array<{ id?: unknown; label?: unknown }> }>(row.question_json) ?? {};
       const answer = answerRow.get(row.id) as IAnswerRow | undefined;
       const delivery = answer ? deliveryRow.get(answer.id) as IDeliveryRow | undefined : undefined;
@@ -705,7 +701,6 @@ export class MissionControlStore {
         // handed id (consult r2). A revise row never counts: a `[new]` line never revises (consult r3). The revision-1 row
         // replaces a revision-0 row of its key (writeNeedsDecisionLine), so a stale reservation never speaks for it.
         markedNew: (opening.length ? opening : lines.filter((line) => line.revision === 0)).some((line) => line.marked_new === 1),
-        serverOpened: openedBy?.tab_id === tabId && openedBy.event_id.startsWith(NEEDS_DECISION_EVENT_PREFIX),
         answer: parsed ? {
           id: parsed.id,
           createdAt: parsed.createdAt,
@@ -1279,10 +1274,15 @@ export class MissionControlStore {
     this.database.prepare('SELECT created_at FROM answers WHERE workspace_id = ? AND created_at >= ? ORDER BY created_at')
       .pluck().all(workspaceId, since) as number[];
 
-  /** Items the tab opened at or after `since`, any state: a NEEDS-DECISION turn that already asked opens none (ADR-0041). */
-  itemsOpenedByTab = (workspaceId: string, tabId: string, since: number): string[] =>
+  /**
+   * Items the tab itself opened at or after `since`, any state: a NEEDS-DECISION turn that already asked opens none
+   * (ADR-0041). An item the server opened from the tab's own end line never counts, whatever its age or state: the
+   * previous stop's item opens at or after the turn's start, and only its event id tells it apart.
+   */
+  itemsAskedByTab = (workspaceId: string, tabId: string, since: number): string[] =>
     (this.database.prepare(`SELECT item_id FROM mission_item_openers INDEXED BY mission_item_openers_tab_idx
-      WHERE workspace_id = ? AND tab_id = ? AND opened_at >= ? ORDER BY opened_at, item_id`).all(workspaceId, tabId, since) as Array<{ item_id: string }>)
+      WHERE workspace_id = ? AND tab_id = ? AND opened_at >= ? AND substr(event_id, 1, length(?)) <> ?
+      ORDER BY opened_at, item_id`).all(workspaceId, tabId, since, NEEDS_DECISION_EVENT_PREFIX, NEEDS_DECISION_EVENT_PREFIX) as Array<{ item_id: string }>)
       .map((row) => row.item_id);
 
   /** Still-open items (candidate or open) whose id starts with the prefix, whoever opened them (ADR-0041 §2). */
