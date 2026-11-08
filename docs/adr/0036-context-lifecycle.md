@@ -159,6 +159,10 @@ Option 2.
    difference and asks for reconciliation before the resume command. Both say what the checkpoint does not restore.
    The fleet view (`rotation`) reports the covered workers, the rotations, the refusals and the wait-to-rotate time.
    Its totals include closed seats. A counter that no seat item wrote is `null`, which means not measured.
+   `checkpointRefusals` counts one per rotation attempt that stopped before the clear, not one per refusal event.
+   One attempt may hit a store failure, then a host down at the restart, then retries; it counts once. A clear, a
+   timeout or a failed check ends the attempt. The seat item's `checkpointRefused` names only the current cause of
+   the stop, and it is cleared as soon as that cause is gone.
    Review round 1 adds these rules:
    - A row is live only for its own tab id. Closing a tab abandons its unfinished rows.
    - A `written` or `cleared` row that has not moved for 40 min is finished, never resumed. The 40 min is the 30

@@ -242,6 +242,11 @@ mutation listed was killed: the named test file failed.
 | M49 | N3: an unmeasured count reads "unknown" | `rotation-checkpoint.test.ts` (N3) |
 | M50 | a durable checkpoint clears the standing refusal (each retry counted again) | durable F2 (`checkpointRefusals: 1`) |
 | M51 | a failed check keeps naming the stop | durable (a stop before the clear that turns into a failed check) |
+| M52 | pm48 N1: a durable checkpoint keeps naming the old stop | durable (the face is clear at once; busy shows, never the old) |
+| M53 | pm48 N1: a busy restart does not name its cause | durable (store recovers, then a busy restart) |
+| M54 | pm48 N1: the count gate reads the face again | durable (store recovers, then a host down: still one) |
+| M55 | pm48 N1: a counted stop is not read back after a restart | durable (a counted stop is read back) |
+| M56 | pm48 N1: the clear does not end the counted attempt | durable (busy, then the clear: `refusalCounted: false`) |
 
 **After the merge (bugfix/d5-f2-deterministic).** CI run 42455698496 failed the F2 test once. The cause was the
 test, not the code. The test asserted the state between a host-down restart refusal and the retry that the refusal

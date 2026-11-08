@@ -81,13 +81,15 @@ interface IWorld {
   restartHostDown: boolean;
   /** Restarts refused because the host was down. */
   restartRefusals: number;
+  /** While true, every restart answers tab-busy (a turn on its way); the test lifts it. */
+  restartBusy: boolean;
   storeFails: { put?: boolean; readBack?: 'missing' | 'tampered'; record?: boolean };
 }
 
 const world = (): IWorld => ({
   clock: { now: T0 }, store: new LedgerStore(':memory:'), session: 'sess-1', files: new Map(), facts: FACTS, atPrompt: true,
   jobLive: false, hostDown: false, clears: 0, typed: [], rotates: [], crash: 'none', placed: 0, seq: 0, storeFails: {}, restartHostDown: false,
-  restartRefusals: 0,
+  restartRefusals: 0, restartBusy: false,
 });
 
 const SEAT: ISeatTab = { workspaceId: 'ws-a', tabId: 'tab-kit', tabName: 'kit', handoffPath: PATH, rotateAt: null, host: 'ai-server' };
@@ -147,6 +149,7 @@ const lifecycle = (w: IWorld, overrides: Partial<IContextLifecycleDeps>): Contex
   },
   restart: async (): Promise<TRestartOutcome> => {
     if (w.crash === 'after-write') return never();
+    if (w.restartBusy) return restartRefusalOutcome('tab-busy', 'the tab is mid-turn; restart it with --interrupt to abandon the turn');
     if (w.restartHostDown) {
       w.restartRefusals += 1;
       return restartRefusalOutcome('remote-host-unreachable', 'remote host ai-server did not answer over ssh (exit 255)');
@@ -391,6 +394,84 @@ describe('review r1: a checkpoint row belongs to one tab and one live rotation (
     expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'watching', handoffUndeliveredAt: w.clock.now });
     expect({ clears: w.clears, typed: w.typed.length }).toEqual({ clears: 0, typed: 0 });
     expect(seatItem(w)?.attrs.handoffUndeliveredAt).toBe(w.clock.now);
+  });
+});
+
+describe('review pm48 N1: the face names the current stop; the count is one per stopped attempt', () => {
+  const STORE_FULL = 'is not durable: SQLITE_FULL';
+
+  /** A store failure stops the rotation, then the store recovers and the checkpoint writes. */
+  const storeFailsThenRecovers = async (w: IWorld, life: ContextLifecycle) => {
+    await request(w, life);
+    w.storeFails = { put: true };
+    await handoffReady(w, life, POINTS[0]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flush();
+    expect(life.view(SEAT.tabId)).toMatchObject({ checkpointRefusals: 1, refusalCounted: true });
+    expect(life.holdReason(SEAT.tabId)).toContain(STORE_FULL);
+    w.storeFails = {};
+  };
+
+  it('a store failure that recovers, then a busy restart: the busy reason shows, never the old one; counted once', async () => {
+    const w = world();
+    const life = server(w);
+    await storeFailsThenRecovers(w, life);
+    w.restartBusy = true;
+    await life.advance(SEAT.tabId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flush();
+    expect(w.clears).toBe(0);
+    expect(life.holdReason(SEAT.tabId)).toContain('the restart waits for the seat: tab-busy');
+    expect(life.holdReason(SEAT.tabId)).not.toContain(STORE_FULL);
+    expect(seatItem(w)?.attrs.checkpointRefused).toContain('the restart waits for the seat: tab-busy');
+    expect(life.view(SEAT.tabId)?.checkpointRefusals).toBe(1);
+    w.restartBusy = false;
+    await life.advance(SEAT.tabId);
+    expect(w.clears).toBe(1);
+    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'rotating', checkpointRefused: null, checkpointRefusals: 1, refusalCounted: false });
+    expect(seatItem(w)?.attrs).toMatchObject({ checkpointRefused: null, checkpointRefusals: 1 });
+  });
+
+  it('a store failure that recovers, then a host down at the restart: the host reason shows; still one stopped attempt', async () => {
+    const w = world();
+    const life = server(w);
+    await storeFailsThenRecovers(w, life);
+    w.restartHostDown = true;
+    await life.advance(SEAT.tabId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flush();
+    expect(life.holdReason(SEAT.tabId)).toContain("the restart could not reach the seat's host");
+    expect(life.holdReason(SEAT.tabId)).not.toContain(STORE_FULL);
+    expect(life.view(SEAT.tabId)?.checkpointRefusals).toBe(1);
+  });
+
+  it('the checkpoint writes after a refusal: the face is clear at once, before any later stop', async () => {
+    const w = world();
+    let afterWrite: string | null | undefined;
+    const life: ContextLifecycle = server(w, {
+      restart: async () => {
+        afterWrite = life.view(SEAT.tabId)?.checkpointRefused;
+        w.clears += 1;
+        w.session = null;
+        return { ok: true };
+      },
+    });
+    await storeFailsThenRecovers(w, life);
+    await life.advance(SEAT.tabId);
+    expect(afterWrite).toBeNull();
+    expect(w.clears).toBe(1);
+  });
+
+  it('a counted stop is read back after a server restart, so it is not counted twice', async () => {
+    const w = world();
+    let life = server(w);
+    await request(w, life);
+    w.storeFails = { put: true };
+    await handoffReady(w, life, POINTS[0]);
+    expect(seatItem(w)?.attrs).toMatchObject({ checkpointRefusals: 1, checkpointRefusalCounted: true });
+    life = server(w);
+    life.register(SEAT.tabId);
+    expect(life.view(SEAT.tabId)).toMatchObject({ checkpointRefusals: 1, refusalCounted: true });
   });
 });
 

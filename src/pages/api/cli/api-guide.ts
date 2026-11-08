@@ -1773,7 +1773,11 @@ new submission after HANDOFF-READY, asks ROTATE again with a new request time: t
 only as of the seat's last turn. While a rotation is owed or under way the seat's digests are held.
 Pass: the server first writes a durable checkpoint (vel-D5: git worktree, branch, head and base from
 the tab's host, the handoff's fields, key seat:<ws>:<tab-name>#<attempt>) to the ledger file and reads
-it back; a write that fails stops the rotation before the clear (seat item attr checkpointRefused).
+it back; a write that fails stops the rotation before the clear. The seat item attr checkpointRefused
+names the current cause of the stop: a failed write, a host that did not answer, or a busy restart.
+It is cleared once the cause is gone. checkpointRefusals counts one per rotation attempt that stopped
+before the clear, not one per refusal event: a store failure and then a host down in the same attempt
+count once.
 Then the tab restarts --clear under the same id (ADR-0028: leases, watches, probes, notes and
 reportsTo stay; a seat waiting only on watches restarts with interrupt, decided inside the restart
 lock) and its first message, typed once a session newer than the restart is idle at its prompt, is
@@ -2156,6 +2160,12 @@ Agents use the CLI routes above; this list says what a human can do to your coor
 GET  /api/mission-control/coordination   gains "deploys": { ok, items: [{ id, reason, createdAt,
   restartAt, phase: "pending"|"past", by, recipients: { total, delivered, queued, held, dropped } }] }
   | { ok: false, error } — the deploy announcements of the last 24 h, newest first.
+GET  /api/mission-control/coordination   "fleet": { ok, view } carries view.rotation (vel-D5): workers,
+  covered, coverage, rotations, handoffRefusals, checkpointRefusals (one per rotation attempt that
+  stopped before the clear, never one per refusal event), rotationTimeouts, waitToRotateTotalMs,
+  waitToRotateMeanMs and seats[] (each open seat's phase, counts, checkpointRefused: the current
+  cause of a stop, and waitingMs). Totals include closed seats. A null total was never written: it was
+  not measured.
 POST /api/mission-control/notes          { toWorkspace? | toEpic?, subject, body } → { note }
   A note from "human" (its fromLabel): admission "human", to the target workspace's orchestrator;
   toEpic resolves at send time to the live epic holder's workspace (none: 400 note-target-missing).

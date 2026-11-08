@@ -248,8 +248,13 @@ interface ISeatState {
   retries: number;
   /** The rotation's checkpoint (vel-D5): written and read back before the clear, keyed by task and attempt. */
   checkpointId: string | null;
-  /** Why the rotation stopped before the clear; null once a checkpoint is durable or the rotation ends. */
+  /**
+   * Why the rotation is stopped before the clear now: the current cause, replaced by the next one and cleared once
+   * it is gone (review pm48 N1). Null while nothing stops it.
+   */
   checkpointRefused: string | null;
+  /** This rotation attempt already counted its stop: `checkpointRefusals` is one per attempt that stopped, not per event. */
+  refusalCounted: boolean;
   /** The worktree compared with the checkpoint at resume; computed once per rotation. */
   resumeCheck: IResumeCheck | null;
   checkpointMismatch: string | null;
@@ -322,6 +327,7 @@ export class ContextLifecycle {
       handoffUndeliveredAt: state.handoffUndeliveredAt,
       checkpointId: state.checkpointId,
       checkpointRefused: state.checkpointRefused,
+      checkpointRefusalCounted: state.refusalCounted,
       checkpointMismatch: state.checkpointMismatch,
       handoffRefusals: state.handoffRefusals,
       checkpointRefusals: state.checkpointRefusals,
@@ -435,6 +441,7 @@ export class ContextLifecycle {
       retries: 0,
       checkpointId: str(a.checkpointId),
       checkpointRefused: null,
+      refusalCounted: a.checkpointRefusalCounted === true,
       resumeCheck: null,
       checkpointMismatch: str(a.checkpointMismatch),
       handoffRefusals: num(a.handoffRefusals) ?? 0,
@@ -740,6 +747,7 @@ export class ContextLifecycle {
     state.deadline = null;
     state.rotationDueAt = null;
     state.checkpointRefused = null;
+    state.refusalCounted = false;
     if (state.checkpointId) this.markCheckpoint(seat, state.checkpointId, ['written'], 'abandoned');
     if (state.failures >= 2) {
       state.phase = 'rotation-alarm';
@@ -856,7 +864,8 @@ export class ContextLifecycle {
       this.release(seat, state);
       if (outcome.busy) {
         // A turn started, or the stop's acknowledgement is still in flight: the check runs again shortly, and its
-        // checkpoint is the same attempt, written again.
+        // checkpoint is the same attempt, written again. The face names this cause; it is no counted stop.
+        state.checkpointRefused = `the restart waits for the seat: ${outcome.error}`;
         this.write(seat, state, 'state');
         this.retrySoon(seat, state);
         return;
@@ -911,8 +920,9 @@ export class ContextLifecycle {
       return this.refuseRotation(seat, state, `checkpoint ${checkpoint.id} is not durable: ${message(err)}`);
     }
     state.checkpointId = checkpoint.id;
-    // The refusal stands until the clear runs or the rotation ends: a stop later in the same pass (a host down at the
-    // restart) is the same stopped rotation, counted once, however many retries it takes.
+    // The cause of an earlier stop is gone, so the face stops naming it. The attempt stays counted: a later stop in it
+    // (a host down at the restart) is the same stopped rotation, counted once, however many retries it takes.
+    state.checkpointRefused = null;
     return checkpoint;
   }
 
@@ -921,7 +931,10 @@ export class ContextLifecycle {
    * seat item, in the log and in the stale-digest flag, and the step is tried again; the rotation deadline bounds it.
    */
   private refuseRotation(seat: ISeatTab, state: ISeatState, reason: string): null {
-    if (state.checkpointRefused === null) state.checkpointRefusals += 1;
+    if (!state.refusalCounted) {
+      state.checkpointRefusals += 1;
+      state.refusalCounted = true;
+    }
     state.checkpointRefused = reason;
     this.write(seat, state, 'clear');
     log.error({ tabId: seat.tabId, reason }, 'rotation stopped before the clear: no durable checkpoint');
@@ -948,6 +961,7 @@ export class ContextLifecycle {
     state.alarm = null;
     state.retries = 0;
     state.checkpointRefused = null;
+    state.refusalCounted = false;
     state.resumeCheck = null;
     if (state.rotationDueAt !== null) {
       state.lastWaitToRotateMs = Math.max(0, now - state.rotationDueAt);
@@ -1078,8 +1092,10 @@ export class ContextLifecycle {
   private async failed(seat: ISeatTab, state: ISeatState, reasons: string[]): Promise<void> {
     state.failures += 1;
     state.handoffRefusals += 1;
-    // A stop before the clear that became a failed check is that check now, not a refusal still standing.
+    // A stop before the clear that became a failed check is that check now, not a refusal still standing; the next
+    // HANDOFF-READY is a new attempt.
     state.checkpointRefused = null;
+    state.refusalCounted = false;
     if (state.failures >= 2) {
       state.phase = 'rotation-alarm';
       state.alarm = reasons.join('; ').slice(0, 500);
