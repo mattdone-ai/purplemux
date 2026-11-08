@@ -197,6 +197,13 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'ledger-experiment-closed': EXIT.CONFLICT,
   'ledger-experiment-extended': EXIT.CONFLICT,
   'ledger-experiment-not-found': EXIT.NOT_FOUND,
+  'event-invalid': EXIT.USAGE,
+  'event-scope-invalid': EXIT.USAGE,
+  'event-refused': EXIT.CONFLICT,
+  'event-out-of-scope': EXIT.CONFLICT,
+  'event-stale': EXIT.CONFLICT,
+  'event-no-recipient': EXIT.NOT_READY,
+  'event-check-unavailable': EXIT.CONFLICT,
   'pool-invalid': EXIT.USAGE,
   'pool-full': EXIT.CONFLICT,
   'pool-unreadable': EXIT.CONFLICT,
@@ -1585,6 +1592,81 @@ const cmdNote = async (args) => {
     }
     default:
       die(NOTE_USAGE);
+  }
+};
+
+// Typed worker events (ADR-0043): the server checks the evidence, then delivers the event as a note.
+const EVENT_TYPES = ['review-ready', 'landed', 'blocked-on'];
+const EVENT_USAGE = 'usage: event send --type review-ready|landed|blocked-on --to-epic SLUG (--json PAYLOAD | -f FILE | -f -)'
+  + ' | event scope set --tab TAB --epic SLUG [--story KEY] [--depends-on A,B] [--attempt N]'
+  + ' | event scope list | event scope clear --tab TAB';
+
+const cmdEventScope = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  switch (sub) {
+    case 'set': {
+      const tabId = flagValue(rest, '--tab');
+      const epic = flagValue(rest, '--epic');
+      if (!tabId || !epic) die(`--tab and --epic are required — ${EVENT_USAGE}`);
+      const data = { tabId, epic };
+      const story = flagValue(rest, '--story');
+      if (story !== null) data.story = story;
+      const dependsOn = flagValue(rest, '--depends-on');
+      if (dependsOn !== null) data.dependsOn = dependsOn.split(',').map((slug) => slug.trim()).filter(Boolean);
+      const attempt = flagValue(rest, '--attempt');
+      if (attempt !== null) {
+        if (!/^[1-9][0-9]{0,6}$/.test(attempt)) die(`--attempt must be a whole number of at least 1 — ${EVENT_USAGE}`);
+        data.attempt = Number(attempt);
+      }
+      requireEnv();
+      const { body } = await api('PUT', '/api/cli/worker-events/scope', data);
+      return out(body);
+    }
+    case 'list': {
+      requireEnv();
+      const { body } = await api('GET', '/api/cli/worker-events/scope');
+      return out(body);
+    }
+    case 'clear': {
+      const tabId = flagValue(rest, '--tab');
+      if (!tabId) die(`--tab is required — ${EVENT_USAGE}`);
+      requireEnv();
+      const { body } = await api('DELETE', `/api/cli/worker-events/scope?tabId=${encodeURIComponent(tabId)}`);
+      return out(body);
+    }
+    default:
+      die(EVENT_USAGE);
+  }
+};
+
+const cmdEvent = async (args) => {
+  const sub = args[0];
+  const rest = args.slice(1);
+  switch (sub) {
+    case 'send': {
+      const type = flagValue(rest, '--type');
+      if (!EVENT_TYPES.includes(type)) die(`--type must be one of ${EVENT_TYPES.join(', ')} — ${EVENT_USAGE}`);
+      const toEpic = flagValue(rest, '--to-epic');
+      if (!toEpic) die(`--to-epic is required — ${EVENT_USAGE}`);
+      const json = flagValue(rest, '--json');
+      const file = flagValue(rest, '--file') || flagValue(rest, '-f');
+      if ((json === null) === !file) die(`exactly one of --json PAYLOAD or -f FILE is required — ${EVENT_USAGE}`);
+      const raw = json !== null ? json : file === '-' ? await readStdin() : require('fs').readFileSync(file, 'utf8');
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (err) {
+        die(`the payload is not JSON: ${err.message}`);
+      }
+      requireEnv();
+      const { body } = await api('POST', '/api/cli/worker-events', { type, toEpic, payload });
+      return out(body);
+    }
+    case 'scope':
+      return cmdEventScope(rest);
+    default:
+      die(EVENT_USAGE);
   }
 };
 
@@ -3562,6 +3644,21 @@ Commands:
   note show ID                             The note and its body (recipient or sender workspace, or admin; else exit 3; 7 unknown)
   note ack ID [--comment TEXT]             Acknowledge a local note in your workspace, or a cross-workspace note as
                                            its verified currently routed coordinator (else exit 3)
+  event send --type review-ready|landed|blocked-on --to-epic SLUG (--json PAYLOAD | -f FILE | -f -)
+                                           A verified worker tab announces a result inside its scope (ADR-0043). The
+                                           server checks the evidence, then delivers it as a note to the epic's
+                                           recipient. Every payload: repo, branch, head, base, attempt; review-ready adds
+                                           key, gateLog, reviewDir, receipt? (absent on a first hand-off); landed adds key,
+                                           gateLog, target? (default main); blocked-on adds reason, clearInput. Exit 2
+                                           event-invalid; 3
+                                           event-refused (the failed checks), event-out-of-scope, event-stale,
+                                           event-check-unavailable (a remote tab, or no PMUX_EVENT_PATCH_ID_CMD on the
+                                           server); 5 event-no-recipient
+  event scope set --tab TAB --epic SLUG [--story KEY] [--depends-on A,B] [--attempt N]
+                                           The workspace's verified coordinator declares what TAB may announce: its
+                                           served epic (held in this workspace) and the story's dependency epics
+  event scope list | event scope clear --tab TAB
+                                           The scopes of your workspace; clear is the coordinator's
   config get KEY                           Print a fleet config value bare (e.g. gate.slots); exit 7 when unset
   config list [--json]                     Every fleet config value with its version, time and setter
   config set KEY VALUE [--expect-version N]
@@ -3701,6 +3798,8 @@ const main = async () => {
       return cmdInbox(args.slice(1));
     case 'note':
       return cmdNote(args.slice(1));
+    case 'event':
+      return cmdEvent(args.slice(1));
     case 'grant':
       return cmdGrant(args.slice(1));
     case 'config':

@@ -40,6 +40,8 @@ import {
 import type { IGrant } from '@/types/grant';
 import type { IInboxItem } from '@/types/inbox';
 import type { INote, INoteAdmission, INoteReceipt, INotesState, INoteView, TNoteRoutingStatus } from '@/types/note';
+import { WorkerEventError } from '@/lib/worker-event-schema';
+import type { INoteEventRecord } from '@/types/worker-event';
 
 // Notes route directly inside one workspace and coordinator-to-coordinator
 // across workspaces (ADR-0013). Only the inbox's fixed line is typed; the body is pulled.
@@ -106,6 +108,17 @@ export interface ISendInput {
   body?: unknown;
   fromEpic?: unknown;
   externalKey?: string;
+}
+
+export interface IEventNoteInput {
+  toEpic: string;
+  subject: string;
+  body: string;
+  record: INoteEventRecord;
+  /** The short status note to the source coordinator (ADR-0043 §4); absent for a step result. */
+  status?: { subject: string; body: string; record: INoteEventRecord };
+  /** Runs first inside the notes lock; a throw refuses the event before anything is routed (ADR-0043 §4). */
+  recheck?: () => Promise<void>;
 }
 
 export interface IListFilter {
@@ -205,7 +218,7 @@ export class NotesService {
         ? { status: 'routed', recipient: { workspaceId: targetWorkspaceId, tabId } }
         : { status: 'undeliverable', reason: 'target-coordinator-unavailable' };
     }
-    if (note.admission?.mode !== 'coordinator' && note.admission?.mode !== 'owner') {
+    if (note.admission?.mode !== 'coordinator' && note.admission?.mode !== 'owner' && note.admission?.mode !== 'event') {
       return {
         status: 'policyblocked',
         reason: note.admission ? 'cross-workspace-admission-required' : 'legacy-cross-workspace-admission-missing',
@@ -661,6 +674,77 @@ export class NotesService {
     }));
     if (admission.mode === 'owner' && created) await this.auditOwnerNote(sent);
     return (await this.views([sent]))[0];
+  }
+
+  /**
+   * A typed worker event the events service validated (ADR-0043): the `event` admission, routed like
+   * a coordinator note. One lifecycle lock covers the duplicate check, the sender cap and both notes,
+   * so a resend never delivers twice. An event with no live recipient is refused and stores nothing.
+   */
+  async sendEvent(caller: ICaller, input: IEventNoteInput): Promise<{ note: INoteView; status: INoteView | null }> {
+    if (caller.admin || !caller.verified || !caller.workspaceId || !caller.tabId) {
+      throw new NoteError('forbidden', 'a typed event needs a verified tab');
+    }
+    const sender = { workspaceId: caller.workspaceId, tabId: caller.tabId };
+    const to = checkTarget(input.toEpic, undefined);
+    const now = this.deps.now();
+    const reads = this.reads();
+    const make = (target: { epic: string | null; workspaceId: string | null }, subject: string, body: string, record: INoteEventRecord): INote => {
+      const note = createNote({
+        from: { ...sender, verified: true, identity: caller.identity, epic: null },
+        to: target,
+        subject: cleanSubject(subject),
+        body: checkBody(body),
+        admission: { mode: 'event', sender, authorizedAt: now },
+      }, now, this.deps.newId());
+      note.event = record;
+      return note;
+    };
+    const delivery = make(to, input.subject, input.body, input.record);
+    const result = await this.withOperation(() => this.deps.mutate(async (state) => {
+      await input.recheck?.();
+      // An expired note was never acked: the same event may be sent again. Any other earlier note stands.
+      const earlier = state.notes.find((n) => n.event?.role === 'delivery' && n.event.dedupeKey === input.record.dedupeKey
+        && n.from.workspaceId === sender.workspaceId && n.state !== 'expired');
+      if (earlier) {
+        const said = earlier.state === 'acked' ? 'acked' : `${earlier.state}, not yet acked`;
+        throw new WorkerEventError('event-stale',
+          `this event was already sent as note ${earlier.id} (${said}); it is not delivered twice — it may be sent again once that note expires unacked`,
+          { noteId: earlier.id, noteState: earlier.state });
+      }
+      const mine = state.notes.filter((n) => OPEN_STATES.has(n.state)
+        && n.from.workspaceId === sender.workspaceId && n.from.tabId === sender.tabId && n.from.humanActor === undefined).length;
+      const needed = input.status ? 2 : 1;
+      if (mine + needed > NOTE_OPEN_PER_SENDER) {
+        throw new NoteError('note-cap', `this sender already has ${mine} open notes (the limit is ${NOTE_OPEN_PER_SENDER}); wait for acks or expiry`);
+      }
+      const routedDelivery = await this.route(delivery, now, reads);
+      if (routedDelivery.state !== 'delivered' || !routedDelivery.deliveredTo) {
+        throw new WorkerEventError('event-no-recipient',
+          `epic:${to.epic} has no live recipient now (${routedDelivery.routingReason ?? 'unrouted'}); nothing was stored — send again when its holder and orchestrator are live`,
+          { reason: routedDelivery.routingReason });
+      }
+      const coordinator = await reads.orchestratorOf(sender.workspaceId);
+      const coordinatorIsRecipient = coordinator !== null && routedDelivery.deliveredTo.workspaceId === sender.workspaceId
+        && routedDelivery.deliveredTo.tabId === coordinator;
+      let status: INote | null = null;
+      if (input.status && !coordinatorIsRecipient && coordinator !== sender.tabId) {
+        try {
+          status = await this.route(make({ epic: null, workspaceId: sender.workspaceId }, input.status.subject, input.status.body,
+            { ...input.status.record, deliveryNoteId: routedDelivery.id }), now, reads);
+        } catch (err) {
+          // Nothing is stored when this throws, so the delivery's queued line must not stay behind (review R1-6).
+          if (routedDelivery.inboxItemId) {
+            await this.deps.withdraw(routedDelivery.inboxItemId, 'event-not-stored').catch(() => false);
+          }
+          throw err;
+        }
+      }
+      const added = status ? [routedDelivery, status] : [routedDelivery];
+      return { state: { notes: [...state.notes, ...added] }, value: { delivery: routedDelivery, status } };
+    }));
+    const views = await this.views(result.status ? [result.delivery, result.status] : [result.delivery]);
+    return { note: views[0], status: views[1] ?? null };
   }
 
   /** One `owner-note` line per note sent under an owner grant (ADR-0029 §5); a failed write never unsends it. */

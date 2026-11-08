@@ -28,6 +28,7 @@ const CLI_COMMANDS = new Set([
   'curator',
   'inbox',
   'note',
+  'event',
   'config',
   'grant',
   'deploy',

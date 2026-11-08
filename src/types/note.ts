@@ -1,4 +1,5 @@
 import type { TCallerIdentity } from '@/types/identity';
+import type { INoteEventRecord } from '@/types/worker-event';
 
 // Notes with acknowledgement (ADR-0013): a body the recipient pulls. Only the
 // inbox's fixed one-line notice is ever typed into the recipient's tab.
@@ -10,8 +11,10 @@ export interface INoteAdmission {
   /**
    * Human admission is bound to one target by the authenticated same-origin control.
    * Owner admission is a verified tab holding an active owner grant (ADR-0029); it routes like `coordinator`.
+   * Event admission is a verified worker tab whose typed event the server validated in its declared
+   * scope (ADR-0043); it routes like `coordinator`.
    */
-  mode: 'local' | 'coordinator' | 'human' | 'owner';
+  mode: 'local' | 'coordinator' | 'human' | 'owner' | 'event';
   sender: { workspaceId: string | null; tabId: string | null };
   /** The owner grant that admitted an `owner` note. */
   grantId?: string;
@@ -43,6 +46,8 @@ export interface INote {
   id: string;
   /** Stable producer key for an idempotent portfolio action or escalation. */
   externalKey?: string;
+  /** A typed worker event this note carries (ADR-0043). */
+  event?: INoteEventRecord;
   from: INoteParty;
   to: INoteTarget;
   /** ≤ 120 characters, control characters removed. Shown by list/show, never typed. */

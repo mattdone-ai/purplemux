@@ -132,6 +132,12 @@ to an exit code through one table:
                                                  open-proposal or no-orchestrator-run)
      2  usage error (steer and send, story 14)   steer-reason-invalid,                      fix the command
                                                  terminal-not-command-line
+     2  usage error (typed events, ADR-0043)     event-invalid,                             fix the command
+                                                 event-scope-invalid
+     3  refused by state (events, ADR-0043)      event-refused (each failed check),         after the evidence, scope
+                                                 event-out-of-scope,                        or attempt changes
+                                                 event-stale, event-check-unavailable
+     5  not ready (typed events, ADR-0043)       event-no-recipient                         yes, bounded
 
 The CLI writes the code and its class to stderr, e.g.
   error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
@@ -728,6 +734,59 @@ POST /api/cli/notes/<id>/ack
   comment itself is pulled with note show.
   Response: { "note" } in state "acked". 404 note-not-found (exit 7); 403 forbidden (exit 3),
   also for a note that is not delivered.
+
+## Typed worker events (ADR-0043)
+
+A verified worker tab announces a routine result without its orchestrator retyping it. The server
+checks the evidence first, then delivers the event as a note (admission mode "event") to the target
+epic's recipient by the note rules above. Nothing is typed but the notes' fixed line, and no tab
+or terminal control is granted. landed and blocked-on also send one short status note to the
+sender's own coordinator (not when it is the recipient); review-ready does not, and the coordinator
+reads it with note list.
+
+PUT /api/cli/worker-events/scope
+  The workspace's verified, designated live coordinator only (else 403 forbidden, exit 3).
+  Body: { "tabId" (a live tab of this workspace), "epic" (held as epic:<slug> by a live tab of this
+  workspace), "story"?, "dependsOn"? (≤ 16 epic slugs), "attempt"? (≥ 1; default the previous
+  attempt, else 1; never lower) }. Response: { "scope" }. 400 event-scope-invalid (exit 2).
+
+GET /api/cli/worker-events/scope
+  The scopes of the caller's workspace (admin: all). Response: { "scopes": [...] }.
+
+DELETE /api/cli/worker-events/scope?tabId=TAB
+  The coordinator clears one tab's scope. Response: { "cleared": true|false }.
+
+POST /api/cli/worker-events
+  A verified tab with a scope, on this server's host (a remote tab, ADR-0022, is refused as
+  event-check-unavailable). Body: { "type": "review-ready"|"landed"|"blocked-on", "toEpic" (the
+  scope's epic or one of its dependsOn), "payload" }. Every payload: "repo" (absolute; under the
+  workspace's directories or PMUX_EVENT_EVIDENCE_ROOTS), "branch", "head", "base" (full object
+  ids), "attempt" (the scope's attempt). review-ready (the hand-off for review) adds "key",
+  "gateLog", "reviewDir", and "receipt"? (absent on a first hand-off; checked when given); landed
+  adds "key", "gateLog", and "target"? (the branch it landed in, default main); blocked-on adds
+  "reason", "clearInput" (≤ 500 characters). Unknown fields are refused. Checks: evidence-paths
+  (each path resolves under the roots, of the right kind); range (refs/heads/<branch> is head, and
+  base is its ancestor; for landed, once the branch is gone or has moved on, head may instead be an
+  ancestor of refs/heads/<target> or refs/remotes/origin/<target>); review-ready and landed also
+  gate-verdict (the last run says VERDICT=VALID and SETTLED=yes), gate-tree (the last run's
+  GIT_TREE_END= is the tree of head), patch-id (the server's PMUX_EVENT_PATCH_ID_CMD, a JSON array
+  whose first item is an absolute path outside the sender's repo, prints key; unset, the event is
+  event-check-unavailable). The command and the server's own git reads run in the sender's repo
+  with GIT_CONFIG_COUNT overrides that outrank its .git/config (core.fsmonitor, core.hooksPath,
+  diff.external, core.pager, core.editor, core.sshCommand, core.askPass, credential.helper,
+  core.alternateRefsCommand, gpg.program). Attribute drivers cannot be pinned that way, so the
+  script must use plumbing (git diff-tree, git patch-id) with --no-ext-diff --no-textconv, never
+  porcelain that a repo's diff or filter drivers can redirect. review-ready also review-folder
+  (range.txt, diff.patch, status.txt,
+  patch-id.txt naming key, record.md) and receipt (named <key>.md; no verdict: BLOCK). The scope
+  is read again inside the notes lock after the checks.
+  Response: { "event": { "type", "toEpic", "state": "delivered", "checks", "noteId",
+  "statusNoteId" }, "note", "status" }. 400 event-invalid (exit 2); 422 event-refused with
+  "failures": [{ "check", "measured", "expected" }] (exit 3); 403 event-out-of-scope or forbidden
+  (exit 3); 409 event-stale (exit 3): an old attempt, a scope changed during the checks, or an
+  event already sent whose note has not expired ("noteId", "noteState"); 409
+  event-check-unavailable (exit 3); 409 note-cap (exit 3); 503 event-no-recipient (exit 5): no
+  live holder or coordinator, nothing stored.
 
 ## Harness watches (ADR-0015)
 
