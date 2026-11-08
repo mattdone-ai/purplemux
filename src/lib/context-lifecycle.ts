@@ -128,14 +128,49 @@ export const isHandoffReady = (tail: string | null | undefined): boolean => {
  * `busy`: a turn is on its way, the check runs again. `hostUnreachable`: the restart stopped before it killed anything
  * because the remote host or its kit did not answer (ADR-0028 §4); a wait like any ssh failure (review r1 F2).
  */
-export type TRestartOutcome = { ok: true } | { ok: false; busy: boolean; hostUnreachable?: boolean; error: string };
+export type TRestartOutcome =
+  | { ok: true }
+  | {
+    ok: false; busy: boolean; hostUnreachable?: boolean;
+    /** `<code>: <reason>`, for the log and the seat's own failed-check message. */
+    error: string;
+    /** The restart's wire token (`tab-busy`, `remote-host-unreachable`), when it answered one. */
+    code?: string;
+    /** The restart's own words, without the token. */
+    reason?: string;
+  };
+
+export type TRestartRefusal = Extract<TRestartOutcome, { ok: false }>;
+
+/** The operator's words for each restart refusal the rotation waits on; a wire token never reaches the face. */
+const RESTART_WAIT_LABELS: Readonly<Record<string, string>> = {
+  'tab-busy': 'the restart waits: the seat is mid-turn',
+  'remote-host-unreachable': "the restart waits: the seat's host did not answer",
+  'remote-kit-broken': "the restart waits: the purplemux kit does not run on the seat's host",
+};
+
+/**
+ * The face of a restart the rotation waits on (pm49 gap 2): the mapped sentence for a known token, else a neutral
+ * word plus the restart's own reason, never the token. Membership is an own-property check, so `constructor` or
+ * `__proto__` is unmapped, not a label.
+ */
+export const restartWaitFace = (outcome: { code?: string; reason?: string; error: string }): string => {
+  if (outcome.code !== undefined && Object.prototype.hasOwnProperty.call(RESTART_WAIT_LABELS, outcome.code)) {
+    return RESTART_WAIT_LABELS[outcome.code];
+  }
+  return `the restart was refused: ${outcome.reason ?? outcome.error}`;
+};
+
+/** The face while the seat cannot rotate (not at its prompt, or holding background work): the current cause. */
+export const SEAT_BUSY_FACE = 'the rotation waits: the seat is busy or holds background work';
 
 /** Restart refusals raised before anything is killed because the remote host or its kit did not answer. */
 const HOST_WAIT_CODES: ReadonlySet<string> = new Set(['remote-host-unreachable', 'remote-kit-broken']);
 
 /** A `tab restart` refusal as a rotation outcome: `tab-busy` retries, a host that did not answer waits. */
-export const restartRefusalOutcome = (code: string, error: string): TRestartOutcome => ({
+export const restartRefusalOutcome = (code: string, error: string): TRestartRefusal => ({
   ok: false, busy: code === 'tab-busy', ...(HOST_WAIT_CODES.has(code) ? { hostUnreachable: true } : {}), error: `${code}: ${error}`,
+  code, reason: error,
 });
 
 /** The seat's host did not answer over ssh: a wait, never a failed handoff check (vel-D5). */
@@ -808,6 +843,11 @@ export class ContextLifecycle {
   private async checkAndRotate(seat: ISeatTab, state: ISeatState): Promise<void> {
     if (!(await this.deps.canRotate(seat.tabId))) {
       log.info({ tabId: seat.tabId }, 'handoff check waits: the seat is not at its prompt or has background work');
+      // An earlier cause (a host that did not answer) is not why the seat waits now (pm49 gap 1). Not a counted stop.
+      if (state.checkpointRefused !== null && state.checkpointRefused !== SEAT_BUSY_FACE) {
+        state.checkpointRefused = SEAT_BUSY_FACE;
+        this.write(seat, state, 'clear');
+      }
       return;
     }
     // The awaits below can let a turn start and end; the rotation goes on only for the request it checked (r1 F6).
@@ -865,14 +905,14 @@ export class ContextLifecycle {
       if (outcome.busy) {
         // A turn started, or the stop's acknowledgement is still in flight: the check runs again shortly, and its
         // checkpoint is the same attempt, written again. The face names this cause; it is no counted stop.
-        state.checkpointRefused = `the restart waits for the seat: ${outcome.error}`;
+        state.checkpointRefused = restartWaitFace(outcome);
         this.write(seat, state, 'state');
         this.retrySoon(seat, state);
         return;
       }
       if (outcome.hostUnreachable) {
         // Nothing was killed: the row stays `written`, and the rotation waits inside its deadline (r1 F2).
-        this.refuseRotation(seat, state, `the restart could not reach the seat's host: ${outcome.error}`);
+        this.refuseRotation(seat, state, restartWaitFace(outcome));
         return;
       }
       this.markCheckpoint(seat, checkpoint.id, ['written'], 'abandoned');

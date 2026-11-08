@@ -247,6 +247,15 @@ mutation listed was killed: the named test file failed.
 | M54 | pm48 N1: the count gate reads the face again | durable (store recovers, then a host down: still one) |
 | M55 | pm48 N1: a counted stop is not read back after a restart | durable (a counted stop is read back) |
 | M56 | pm48 N1: the clear does not end the counted attempt | durable (busy, then the clear: `refusalCounted: false`) |
+| M57 | pm49 gap 2: label membership by `in`, not an own property | durable (`constructor`, `__proto__` read as unmapped) |
+| M58 | pm49 gap 2: the busy face shows the raw restart outcome | durable (store recovers, then a busy restart) |
+| M59 | pm49 gap 1: a busy seat keeps the earlier cause | durable (host did not answer, then the seat goes busy) |
+| M60 | pm49 gap 1: the busy face is written on every pass | durable (the second busy pass writes no event) |
+
+**Face labels (pm49).** A restart wait reaches the face as an operator sentence (`RESTART_WAIT_LABELS`, own-property
+membership). An unmapped token reads `the restart was refused: <the restart's reason>`. While the seat cannot
+rotate, a standing earlier cause is replaced once by `the rotation waits: the seat is busy or holds background
+work`. The count is unchanged.
 
 **After the merge (bugfix/d5-f2-deterministic).** CI run 42455698496 failed the F2 test once. The cause was the
 test, not the code. The test asserted the state between a host-down restart refusal and the retry that the refusal

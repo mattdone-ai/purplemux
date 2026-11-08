@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  CHECKPOINT_LIVE_MS, ContextLifecycle, FIRST_MESSAGE_TTL_MS, HandoffRefused, ROTATION_DEADLINE_MS, SeatHostUnreachable, restartRefusalOutcome,
+  CHECKPOINT_LIVE_MS, ContextLifecycle, FIRST_MESSAGE_TTL_MS, HandoffRefused, ROTATION_DEADLINE_MS, SEAT_BUSY_FACE, SeatHostUnreachable, restartRefusalOutcome, restartWaitFace,
   type IContextLifecycleDeps, type TRestartOutcome,
 } from '@/lib/context-lifecycle';
 import { LedgerStore, SERVER_PRODUCER } from '@/lib/ledger-store';
@@ -421,9 +421,10 @@ describe('review pm48 N1: the face names the current stop; the count is one per 
     await new Promise((resolve) => setTimeout(resolve, 20));
     await flush();
     expect(w.clears).toBe(0);
-    expect(life.holdReason(SEAT.tabId)).toContain('the restart waits for the seat: tab-busy');
+    expect(life.holdReason(SEAT.tabId)).toContain('the restart waits: the seat is mid-turn');
+    expect(life.holdReason(SEAT.tabId)).not.toContain('tab-busy');
     expect(life.holdReason(SEAT.tabId)).not.toContain(STORE_FULL);
-    expect(seatItem(w)?.attrs.checkpointRefused).toContain('the restart waits for the seat: tab-busy');
+    expect(seatItem(w)?.attrs.checkpointRefused).toBe('the restart waits: the seat is mid-turn');
     expect(life.view(SEAT.tabId)?.checkpointRefusals).toBe(1);
     w.restartBusy = false;
     await life.advance(SEAT.tabId);
@@ -440,7 +441,8 @@ describe('review pm48 N1: the face names the current stop; the count is one per 
     await life.advance(SEAT.tabId);
     await new Promise((resolve) => setTimeout(resolve, 20));
     await flush();
-    expect(life.holdReason(SEAT.tabId)).toContain("the restart could not reach the seat's host");
+    expect(life.holdReason(SEAT.tabId)).toContain("the restart waits: the seat's host did not answer");
+    expect(life.holdReason(SEAT.tabId)).not.toContain('remote-host-unreachable');
     expect(life.holdReason(SEAT.tabId)).not.toContain(STORE_FULL);
     expect(life.view(SEAT.tabId)?.checkpointRefusals).toBe(1);
   });
@@ -475,6 +477,42 @@ describe('review pm48 N1: the face names the current stop; the count is one per 
   });
 });
 
+describe('pm49 gap 1: a seat that is only busy shows that, not an earlier cause', () => {
+  it('a host that did not answer, then the seat goes busy: the face says it waits for the seat; the count stays one', async () => {
+    const w = world();
+    const life = server(w);
+    await request(w, life);
+    w.hostDown = true;
+    await handoffReady(w, life, POINTS[0]);
+    expect(life.view(SEAT.tabId)?.checkpointRefused).toContain('the handoff file could not be read');
+    w.hostDown = false;
+    w.atPrompt = false;
+    await life.advance(SEAT.tabId);
+    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'handoff-ready', checkpointRefused: SEAT_BUSY_FACE, checkpointRefusals: 1 });
+    expect(life.holdReason(SEAT.tabId)).not.toContain('did not answer');
+    expect(seatItem(w)?.attrs.checkpointRefused).toBe(SEAT_BUSY_FACE);
+    const events = w.store.items('ws-a', { type: 'seat' }, w.clock.now).items[0].lastSeq;
+    await life.advance(SEAT.tabId);
+    expect(w.store.items('ws-a', { type: 'seat' }, w.clock.now).items[0].lastSeq).toBe(events);
+    w.atPrompt = true;
+    await life.advance(SEAT.tabId);
+    expect(w.clears).toBe(1);
+    expect(life.view(SEAT.tabId)).toMatchObject({ checkpointRefused: null, checkpointRefusals: 1 });
+  });
+
+  it('a seat that is busy with nothing standing writes no face', async () => {
+    const w = world();
+    const life = server(w);
+    await request(w, life);
+    w.atPrompt = false;
+    w.clock.now += 30_000;
+    w.files.set(PATH, handoff(POINTS[0], stampOf(w.clock.now)));
+    life.onTurnEnd(SEAT.tabId, 'HANDOFF-READY');
+    await flush();
+    expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'handoff-ready', checkpointRefused: null });
+  });
+});
+
 describe('review r1: the restart hop and the gap after the checkpoint (F2, F4, F6)', () => {
   it('F2: host up at the check, down at the restart: a wait, the row stays written, no failed check; then it clears', async () => {
     const w = world();
@@ -490,7 +528,7 @@ describe('review r1: the restart hop and the gap after the checkpoint (F2, F4, F
     expect(w.clears).toBe(0);
     expect(latest(w)?.status).toBe('written');
     expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'handoff-ready', failures: 0, handoffRefusals: 0, checkpointRefusals: 1, pendingMessage: null });
-    expect(life.view(SEAT.tabId)?.checkpointRefused).toContain("the restart could not reach the seat's host: remote-host-unreachable");
+    expect(life.view(SEAT.tabId)?.checkpointRefused).toBe("the restart waits: the seat's host did not answer");
     expect(w.rotates).toHaveLength(1);
     w.restartHostDown = false;
     await life.advance(SEAT.tabId);
@@ -500,10 +538,24 @@ describe('review r1: the restart hop and the gap after the checkpoint (F2, F4, F
   });
 
   it('F2: the restart refusals map to outcomes: busy retries, a host or kit that did not answer waits, others fail', () => {
-    expect(restartRefusalOutcome('tab-busy', 'mid-turn')).toEqual({ ok: false, busy: true, error: 'tab-busy: mid-turn' });
+    expect(restartRefusalOutcome('tab-busy', 'mid-turn')).toEqual({ ok: false, busy: true, error: 'tab-busy: mid-turn', code: 'tab-busy', reason: 'mid-turn' });
     expect(restartRefusalOutcome('remote-host-unreachable', 'x')).toMatchObject({ busy: false, hostUnreachable: true });
     expect(restartRefusalOutcome('remote-kit-broken', 'x')).toMatchObject({ busy: false, hostUnreachable: true });
-    expect(restartRefusalOutcome('restart-not-confirmed', 'x')).toEqual({ ok: false, busy: false, error: 'restart-not-confirmed: x' });
+    expect(restartRefusalOutcome('restart-not-confirmed', 'x')).toEqual({ ok: false, busy: false, error: 'restart-not-confirmed: x', code: 'restart-not-confirmed', reason: 'x' });
+  });
+
+  it('pm49 gap 2: a restart wait reaches the face as an operator sentence, an unmapped token as a neutral word and its reason', () => {
+    expect(restartWaitFace(restartRefusalOutcome('tab-busy', 'the tab is mid-turn; restart it with --interrupt to abandon the turn')))
+      .toBe('the restart waits: the seat is mid-turn');
+    expect(restartWaitFace(restartRefusalOutcome('remote-host-unreachable', 'exit 255'))).toBe("the restart waits: the seat's host did not answer");
+    expect(restartWaitFace(restartRefusalOutcome('remote-kit-broken', 'x'))).toBe("the restart waits: the purplemux kit does not run on the seat's host");
+    expect(restartWaitFace(restartRefusalOutcome('restart-raced', 'another restart ran first'))).toBe('the restart was refused: another restart ran first');
+    for (const token of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      const face = restartWaitFace(restartRefusalOutcome(token, 'odd answer'));
+      expect(face).toBe('the restart was refused: odd answer');
+      expect(face).not.toContain(token);
+    }
+    expect(restartWaitFace({ error: 'spawn failed' })).toBe('the restart was refused: spawn failed');
   });
 
   it('F4: a remote file over the size cap is the checker\'s size refusal, not a wait', async () => {
