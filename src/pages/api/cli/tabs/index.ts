@@ -221,7 +221,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     // The markers whose end lines reach the target (ADR-0025); absent or null forwards every marker.
     const reportOnChecked = reportOn === undefined ? { markers: null } : checkReportOn(reportOn);
     if (isReportOnInvalid(reportOnChecked)) return res.status(400).json(reportOnChecked);
-    const seat = checkSeatOptions(handoff, rotateAt, host);
+    const seat = checkSeatOptions(handoff, rotateAt);
     if (!seat.ok) return res.status(400).json(seat);
     const dispatchPolicy = await checkAgentDispatchPolicy(workspaceId);
     if (!dispatchPolicy.ok) {
@@ -330,6 +330,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
           reportOn: tab.reportOn ?? null,
           handoffPath: tab.handoffPath ?? null,
           rotateAt: tab.rotateAt ?? null,
+          host: tab.host ?? null,
           lastEvent: null,
           eventSeq: 0,
         });

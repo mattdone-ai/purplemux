@@ -3,7 +3,8 @@
 ## Status
 Accepted (2026-11-03, epic `harness-flow-loop`, story 10; architecture ADR-HFL-04, decision 4 as amended by
 HFL-consult-06). Amends ADR-0028 (a third restart actor, `server`) and ADR-0034 (two anomalies,
-`seat-compactions` and `rotation-alarm`).
+`seat-compactions` and `rotation-alarm`). Amended 2026-11-08 by vel-D5 (§1 remote seats, §9 the durable
+checkpoint, the threshold line in Consequences).
 
 ## Context
 Long-lived seats average about 540k tokens of context per call; 378 compactions in 14 days, 46 of them the v2
@@ -23,8 +24,8 @@ Option 2.
    resolves it against its cwd; it need not exist yet). Only seats rotate. The threshold is the tab's
    `--rotate-at <50000..900000>`, else fleet config `context.rotate-at-tokens` (same range, default 300,000; an
    invalid value is the default and is logged), or `--rotate-at off`. The value is orchestrator-writable like the
-   flow thresholds: it tunes, it does not admit. A remote tab is refused (`handoff is local only`): the harness reads
-   the file on its own host. The context is the statusline's last request: input + cache writes + cache reads
+   flow thresholds: it tunes, it does not admit. A remote tab (`--host`) is a seat too (vel-D5, §9): the path names
+   the file on the tab's own host, which the server reads over ssh. The context is the statusline's last request: input + cache writes + cache reads
    (`context_window.current_usage`), matched to the tab by its agent session id. Codex and Grok send no statusline,
    so their seats can rotate only after a compaction, and only when their provider reports a background task
    count.
@@ -131,8 +132,8 @@ Option 2.
    `rotateRequestedAt`, `readySessionId`, `rotationFailures`, `rotationAlarm`, `firstMessage`, `sessionBefore`,
    `restartedAt`. A changed reading is recorded at most every 5 min. A reading belongs to its session: a
    session-start (a human `/clear`, a launch) drops it, and so does a bound session other than the reading's (F5).
-   After a server restart the counts, an open request and an alarm are read back from the open item. A ledger that
-   cannot be written is logged and never stops a rotation.
+   After a server restart the counts, an open request and an alarm are read back from the open item. A seat item
+   that cannot be written is logged and never stops a rotation: it is telemetry. The checkpoint of §9 is not.
 6. **Board.** Three anomalies per open seat (ADR-0034 amended): `seat-compactions` (`compactionsSinceRotation`,
    threshold 0: a compaction is a missed rotation), `rotation-alarm` (`rotationFailures`, threshold 1) and
    `handoff-undelivered` (1 while `handoffUndeliveredAt` is set, threshold 0: "rotated but the handoff was not
@@ -141,8 +142,35 @@ Option 2.
 7. **Paths** (convention, not enforced): v2 `.v2/seats/<seat>/handoff.md`; other workspaces
    `~/.purplemux/workspaces/<ws>/seats/<tab-name>/handoff.md`.
 
+9. **Durable checkpoint (vel-D5, `docs/design/vel-d5-durable-rotation.md`).** A passing check is not enough to
+   clear a session. The server probes git on the tab's host (worktree, branch, head, base ref and merge base, dirty
+   count) and writes a checkpoint to `rotation_checkpoints` in `ledger.sqlite`. The checkpoint holds those facts and
+   the handoff's own fields (resume command, in-flight rows, open decision ids, `Do not`, standing-rule sources,
+   decisions, the whole text). The key is `seat:<ws>:<tab-name>#<attempt>`, never a session or an account. The
+   server reads the row back and compares the digests. Only an equal read-back lets `restart --clear` run. A write
+   or a read-back that fails stops the rotation in `handoff-ready`, with `checkpointRefused` on the seat item, an
+   error in the log and the refusal in the stale-digest flag, and the rotation deadline bounds it. A remote host that
+   does not answer is the same wait, never a failed check. The row only moves forward (`written`, `cleared`,
+   `delivering`, `delivered`; or `abandoned`, `undelivered`, `delivery-unknown`). A server start reads it before the
+   seat item: a row the clear reached resumes `rotating`, and a row stopped in `delivering` is frozen, never typed
+   twice, and flagged `handoff-undelivered`. At resume the server probes git again and writes the handoff (when it
+   is missing or differs) and `<handoff>.checkpoint.json` on the tab's host. The first message then adds a RESTORE
+   NOTICE. A match keeps the line `Read <path>, then continue: <resume command>` first. A mismatch lists each
+   difference and asks for reconciliation before the resume command. Both say what the checkpoint does not restore.
+   The fleet view (`rotation`) reports the covered workers, the rotations, the refusals and the wait-to-rotate time.
+   Its totals include closed seats. A counter that no seat item wrote is `null`, which means not measured.
+   Review round 1 adds these rules:
+   - A row is live only for its own tab id. Closing a tab abandons its unfinished rows.
+   - A `written` or `cleared` row that has not moved for 40 min is finished, never resumed. The 40 min is the 30
+     min deadline plus the 10 min first-message wait.
+   - A `written` row whose checkpoint has no session is frozen as `delivery-unknown`.
+   - A restart that cannot reach the remote host or its kit before it kills anything is a wait.
+   - A remote seat's host comes from the seat, else from its layout, and never defaults to this host.
+   - Retention deletes finished rows after 92 days, but never a task's newest row.
+
 ## Consequences
-- A seat restarts at about 50-100k tokens instead of compacting at 967k; its standing rules live in a file a
+- A seat restarts at its threshold, 300,000 tokens by default (amended by vel-D5: this line said 50-100k, which
+  the code never did), instead of compacting at 967k; its standing rules live in a file a
   checker reads, not in a compaction summary.
 - The rotation adds one urgent wake (ROTATE) per rotation and, on a failed check, one more.
 - A seat's first rotation after deploy needs its tab created with `--handoff`: existing tabs carry no handoff path.

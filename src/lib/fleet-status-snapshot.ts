@@ -12,6 +12,8 @@ import type {
 import type { ILease } from '@/types/lease';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
+import type { ILedgerItem } from '@/types/ledger';
+import { rotationCoverage, type ICoverageTab } from '@/lib/rotation-checkpoint';
 
 // The server half of the fleet status read model (ADR-0023): gathers the facts
 // the StatusManager, the watch, liveness and lease stores and the Mission
@@ -37,6 +39,11 @@ export interface IFleetDeps {
   mtime: (file: string) => Promise<number | null>;
   config: (key: string) => Promise<string | null>;
   providerId: (tab: ITab) => string | null;
+  /**
+   * The seat items of a workspace (ADR-0036), open and closed, for the rotation coverage (vel-D5 AC6); throws when
+   * the ledger holds more than it answers, so a total is never silently partial. Absent: no section.
+   */
+  seatItems?: (workspaceId: string) => Promise<ILedgerItem[]>;
 }
 
 export const FLEET_CONFIG_KEYS: Record<keyof IFleetThresholds, string> = {
@@ -124,6 +131,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
   const facts: IFleetTabFacts[] = [];
   const liveTabKeys = new Set<string>();
   const agentTabCounts = new Map<string, number>();
+  const coverageTabs: ICoverageTab[] = [];
   let jobsFailed = false;
   let layoutFailed = false;
 
@@ -138,6 +146,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
       return;
     }
     agentTabCounts.set(workspace.id, tabs.length);
+    for (const tab of tabs) coverageTabs.push({ workspaceId: workspace.id, handoffPath: tab.handoffPath ?? null, rotateAt: tab.rotateAt ?? null });
     await Promise.all(tabs.map(async (tab) => {
       const key = `${workspace.id}/${tab.id}`;
       liveTabKeys.add(key);
@@ -213,6 +222,15 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
     }))
     : undefined;
 
+  // vel-D5 AC6: the share of agent workers that rotate, and how their rotations went; a workspace not read is left out.
+  let rotation: IFleetView['rotation'];
+  const seatItems = deps.seatItems;
+  if (seatItems) {
+    const items = await settle(async () => (await Promise.all(workspaces.map((w) => seatItems(w.id)))).flat());
+    if (items.ok) rotation = rotationCoverage(coverageTabs, items.value, now);
+    else errors.push({ scope: 'rotation', error: items.error });
+  }
+
   return {
     at: now,
     thresholds,
@@ -220,8 +238,12 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
     unattributed,
     errors,
     ...(wip ? { wip } : {}),
+    ...(rotation ? { rotation } : {}),
   };
 };
+
+/** Seat items are one per tab name, kept 92 days after close; far more than this is not a fleet this view serves. */
+const SEAT_ITEMS_LIMIT = 5_000;
 
 const realDeps = async (): Promise<IFleetDeps> => {
   const [
@@ -262,6 +284,12 @@ const realDeps = async (): Promise<IFleetDeps> => {
     mtime: async (file) => (await fs.stat(file)).mtimeMs,
     config: async (key) => valueOf(await fleetConfig, key)?.value ?? null,
     providerId: (tab) => getProviderByPanelType(tab.panelType)?.id ?? null,
+    seatItems: async (workspaceId) => {
+      const { getLedgerStore } = await import('@/lib/ledger-store');
+      const read = getLedgerStore().items(workspaceId, { type: 'seat', limit: SEAT_ITEMS_LIMIT }, Date.now());
+      if (read.truncated) throw new Error(`more than ${SEAT_ITEMS_LIMIT} seat items in ${workspaceId}: the rotation totals would be partial`);
+      return read.items;
+    },
   };
 };
 

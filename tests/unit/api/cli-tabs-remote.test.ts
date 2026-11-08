@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const layout = vi.hoisted(() => ({ addTabToPane: vi.fn() }));
 const registry = vi.hoisted(() => ({ hosts: ['ai-server'] as string[] | Error }));
 const registerTab = vi.hoisted(() => vi.fn());
+const registerSeat = vi.hoisted(() => vi.fn());
 const pool = vi.hoisted(() => ({ place: vi.fn() }));
 vi.mock('@/lib/pool-service', () => ({ placeOnPool: pool.place }));
 
@@ -43,7 +44,7 @@ vi.mock('@/lib/claude-command', () => ({
 const dirs = vi.hoisted(() => ({ remote: true as boolean | Error }));
 vi.mock('@/lib/providers/grok', () => ({ grokProvider: { buildLaunchCommand: vi.fn() } }));
 vi.mock('@/lib/status-manager', () => ({
-  getStatusManager: () => ({ registerTab, markAgentLaunch: vi.fn(), getAllForClient: () => ({}) }),
+  getStatusManager: () => ({ registerTab, registerSeat, markAgentLaunch: vi.fn(), getAllForClient: () => ({}) }),
 }));
 vi.mock('@/lib/agent-dispatch-policy', () => ({ checkAgentDispatchPolicy: vi.fn(async () => ({ ok: true })) }));
 vi.mock('@/lib/reports-to', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/reports-to')>()), checkReportsTo: vi.fn(async () => null) }));
@@ -87,7 +88,17 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
     dirs.remote = true;
     layout.addTabToPane.mockImplementation(async (_ws, _pane, name, cwd, panelType, _cmd, opts) => ({
       id: 'tab-new', sessionName: 'pt-ws-a-pane-one-tab-new', name, order: 0, cwd, panelType, ...(opts?.host ? { host: opts.host } : {}),
+      ...(opts?.handoffPath ? { handoffPath: opts.handoffPath } : {}),
     }));
+  });
+
+  it('vel-D5: a remote claude-code tab with a handoff is a seat; its path names the remote host\'s file', async () => {
+    const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', panelType: 'claude-code', handoff: '/srv/wt/.v2/seats/kit/handoff.md' });
+    expect(state.statusCode, JSON.stringify(state.body)).toBe(201);
+    expect(state.body).toMatchObject({ host: 'ai-server', handoffPath: '/srv/wt/.v2/seats/kit/handoff.md' });
+    expect(layout.addTabToPane.mock.calls[0][6]).toMatchObject({ host: 'ai-server', handoffPath: '/srv/wt/.v2/seats/kit/handoff.md' });
+    expect(registerTab).toHaveBeenCalledWith('tab-new', expect.objectContaining({ host: 'ai-server', handoffPath: '/srv/wt/.v2/seats/kit/handoff.md' }));
+    expect(registerSeat).toHaveBeenCalledWith('tab-new');
   });
 
   it('creates a terminal tab on a registered host and reports the host', async () => {

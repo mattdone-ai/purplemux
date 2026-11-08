@@ -101,6 +101,8 @@ export interface IFleetView {
   errors: Array<{ scope: string; error: string; workspaceId?: string }>;
   /** Per workspace id (ADR-0027); absent from a server older than it, or when the cap could not be read. */
   wip?: Record<string, IFleetWip>;
+  /** Rotation coverage (vel-D5): workers that rotate, rotations and refusals, wait-to-rotate; absent when unread. */
+  rotation?: import('@/types/rotation-checkpoint').IRotationCoverage;
 }
 
 export type TComposerReading = 'empty' | 'text' | 'unreadable';

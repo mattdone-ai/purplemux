@@ -14,7 +14,9 @@ export interface ISeatTab {
   workspaceId: string;
   tabId: string;
   tabName: string;
-  /** Absolute path of the seat's handoff file. */
+  /** Absolute path of the seat's handoff file, on the host the tab runs on. */
   handoffPath: string;
   rotateAt: TRotateAt | null;
+  /** The ssh alias of a remote seat (ADR-0022, vel-D5); absent or null on the control host. */
+  host?: string | null;
 }

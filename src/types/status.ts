@@ -61,6 +61,8 @@ export interface ITabStatusEntry {
   handoffPath?: string | null;
   /** Mirrors ITab.rotateAt. */
   rotateAt?: import('@/types/context-lifecycle').TRotateAt | null;
+  /** Mirrors ITab.host: the ssh alias of a remote tab (ADR-0022). Null: this host. */
+  host?: string | null;
   /** How the watchdog classified the last `stop` (ADR-0018). Runtime only. */
   turnEnd?: ITurnEndRecord | null;
   /** The provider-error episode this tab is in; a clean stop ends it (story 26). Runtime only. */

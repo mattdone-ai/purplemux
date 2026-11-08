@@ -3,13 +3,17 @@ import { createLogger } from '@/lib/logger';
 import { checkHandoff } from '@/lib/handoff-check';
 import { DEFAULT_ROTATE_AT_TOKENS } from '@/lib/constraint';
 import { LEDGER_SERVER_PRODUCER } from '@/lib/ledger';
+import { buildCheckpoint, checkpointDigest, compareFacts, firstMessageWithNotice, type IResumeCheck } from '@/lib/rotation-checkpoint';
 import type { ISeatTab, TRotateAt, TSeatPhase } from '@/types/context-lifecycle';
 import type { ILedgerEventInput, TLedgerAttrValue } from '@/types/ledger';
+import type { IGitFacts, IRotationCheckpoint, IStoredCheckpoint, TCheckpointStatus } from '@/types/rotation-checkpoint';
 
 // Context lifecycle (ADR-0036; ADR-HFL-04): a tab created with `--handoff <path>` is a seat. When its context
 // reaches the rotate threshold, or after a compaction, and it sits at its prompt with no background work, it is
 // sent ROTATE; on HANDOFF-READY its handoff file is checked, and a pass restarts it fresh under the same tab id
 // with the file as its first read. The seat item in the ledger records its context, compactions and rotations.
+// vel-D5: no session is cleared before a durable checkpoint of the rotation is written and read back; the fresh
+// session gets the checkpoint compared with its worktree, and a remote seat rotates like a local one.
 
 const log = createLogger('context-lifecycle');
 
@@ -36,6 +40,12 @@ export const RETRY_MS = 3_000;
 const RETRIES = 5;
 /** A rotated seat's first message waits this long after the restart for the fresh agent; then it is dropped. */
 export const FIRST_MESSAGE_TTL_MS = 10 * 60_000;
+/**
+ * A `written` or `cleared` checkpoint row that has not moved for this long belongs to no live rotation (review r1
+ * F1): a live rotation writes its row inside its 30 min deadline and clears seconds later, and its first message
+ * waits at most 10 min after the clear. An older row is finished at the next server start, never resumed.
+ */
+export const CHECKPOINT_LIVE_MS = ROTATION_DEADLINE_MS + FIRST_MESSAGE_TTL_MS;
 /** A failed check's message carries the reasons up to this many bytes; `handoff check` prints them all. */
 const FAILED_MESSAGE_MAX = 1_500;
 
@@ -67,17 +77,16 @@ export type TSeatOptionsCheck = { ok: true; options: ISeatOptions } | { ok: fals
 const HANDOFF_PATH_MAX = 1024;
 
 /**
- * `tab create --handoff <path> --rotate-at <N|off>` (ADR-0036 §1). The path is absolute and need not exist yet: the
- * seat writes it on its first ROTATE. A remote tab is refused: the harness reads the file on this host.
+ * `tab create --handoff <path> --rotate-at <N|off>` (ADR-0036 §1). The path is absolute on the host the tab runs on
+ * and need not exist yet: the seat writes it on its first ROTATE. A remote seat's file is read over ssh (vel-D5).
  */
-export const checkSeatOptions = (handoff: unknown, rotateAt: unknown, host: unknown): TSeatOptionsCheck => {
+export const checkSeatOptions = (handoff: unknown, rotateAt: unknown): TSeatOptionsCheck => {
   const refuse = (error: string): TSeatOptionsCheck => ({ ok: false, error, code: 'invalid-request' });
   if (handoff === undefined || handoff === null) {
     return rotateAt === undefined || rotateAt === null ? { ok: true, options: {} } : refuse('rotateAt needs handoff: only a tab with a handoff path rotates');
   }
   if (typeof handoff !== 'string' || !path.isAbsolute(handoff)) return refuse(`handoff must be an absolute path, got ${JSON.stringify(handoff)}`);
   if (handoff.length > HANDOFF_PATH_MAX || /[\p{C}]/u.test(handoff)) return refuse(`handoff must be one printable path of at most ${HANDOFF_PATH_MAX} characters`);
-  if (host !== undefined && host !== null) return refuse('handoff is local only: the harness reads the handoff file on this host, and a remote tab writes it on its own');
   const options: ISeatOptions = { handoffPath: path.normalize(handoff) };
   if (rotateAt === undefined || rotateAt === null) return { ok: true, options };
   const parsed = parseTabRotateAt(rotateAt);
@@ -115,7 +124,47 @@ export const isHandoffReady = (tail: string | null | undefined): boolean => {
   return !!last && /^HANDOFF-READY(?::|[.!]?$)/.test(last);
 };
 
-export type TRestartOutcome = { ok: true } | { ok: false; busy: boolean; error: string };
+/**
+ * `busy`: a turn is on its way, the check runs again. `hostUnreachable`: the restart stopped before it killed anything
+ * because the remote host or its kit did not answer (ADR-0028 §4); a wait like any ssh failure (review r1 F2).
+ */
+export type TRestartOutcome = { ok: true } | { ok: false; busy: boolean; hostUnreachable?: boolean; error: string };
+
+/** Restart refusals raised before anything is killed because the remote host or its kit did not answer. */
+const HOST_WAIT_CODES: ReadonlySet<string> = new Set(['remote-host-unreachable', 'remote-kit-broken']);
+
+/** A `tab restart` refusal as a rotation outcome: `tab-busy` retries, a host that did not answer waits. */
+export const restartRefusalOutcome = (code: string, error: string): TRestartOutcome => ({
+  ok: false, busy: code === 'tab-busy', ...(HOST_WAIT_CODES.has(code) ? { hostUnreachable: true } : {}), error: `${code}: ${error}`,
+});
+
+/** The seat's host did not answer over ssh: a wait, never a failed handoff check (vel-D5). */
+export class SeatHostUnreachable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SeatHostUnreachable';
+  }
+}
+
+/** The handoff was read and refused before the checker saw it (a remote file over the size cap): `message` is the reason. */
+export class HandoffRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HandoffRefused';
+  }
+}
+
+/** The durable checkpoint store (`rotation_checkpoints`, vel-D5). Every call throws when the store fails. */
+export interface ICheckpointStore {
+  put: (checkpoint: IRotationCheckpoint, at: number) => void;
+  get: (workspaceId: string, checkpointId: string) => IStoredCheckpoint | null;
+  latest: (workspaceId: string, taskId: string) => IStoredCheckpoint | null;
+  mark: (workspaceId: string, checkpointId: string, from: readonly TCheckpointStatus[], to: TCheckpointStatus, at: number) => boolean;
+  /** Every unfinished row of a closed tab becomes `abandoned`; answers how many moved. */
+  abandonTab: (tabId: string, at: number) => number;
+}
+
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export interface IContextLifecycleDeps {
   now: () => number;
@@ -132,8 +181,16 @@ export interface IContextLifecycleDeps {
   atPrompt: (tabId: string) => boolean;
   /** Type a `rotate` event through the tab event router (urgent, ADR-0035); true when it was typed. */
   send: (seat: ISeatTab, text: string, whenReady: () => boolean) => Promise<boolean>;
-  /** The handoff file as UTF-8 text, a BOM kept; throws when it cannot be read or decoded. */
-  readHandoff: (path: string) => Promise<string>;
+  /** The handoff file as UTF-8 text on the seat's host, a BOM kept; throws, `SeatHostUnreachable` when ssh fails. */
+  readHandoff: (path: string, seat: ISeatTab) => Promise<string>;
+  /** Git facts of the tab's directory on its own host; `expectedHead` asks whether it is in HEAD's history. */
+  gitFacts: (seat: ISeatTab, expectedHead: string | null) => Promise<IGitFacts>;
+  checkpoints: ICheckpointStore;
+  /**
+   * Put `<handoff>.checkpoint.json` on the seat's host and, with `restoreHandoff`, the handoff itself when it is
+   * missing or differs from the checkpoint; answers whether the handoff was written. Throws when it cannot.
+   */
+  placeCheckpoint: (seat: ISeatTab, checkpoint: IRotationCheckpoint, restoreHandoff: boolean) => Promise<{ restored: boolean }>;
   /** `tab restart --clear` (ADR-0028); a WAITING seat's `interrupt` is decided inside the restart lock. */
   restart: (seat: ISeatTab) => Promise<TRestartOutcome>;
   /** Type the fresh session's first message once it is idle at its prompt; true when it was typed. */
@@ -189,6 +246,21 @@ interface ISeatState {
   /** When a rotated seat's first message was dropped; the board flags it until a later rotation delivers one. */
   handoffUndeliveredAt: number | null;
   retries: number;
+  /** The rotation's checkpoint (vel-D5): written and read back before the clear, keyed by task and attempt. */
+  checkpointId: string | null;
+  /** Why the rotation stopped before the clear; null once a checkpoint is durable or the rotation ends. */
+  checkpointRefused: string | null;
+  /** The worktree compared with the checkpoint at resume; computed once per rotation. */
+  resumeCheck: IResumeCheck | null;
+  checkpointMismatch: string | null;
+  handoffRefusals: number;
+  checkpointRefusals: number;
+  rotationTimeouts: number;
+  /** When the rotation first became due: wait-to-rotate runs from here to the clear. */
+  rotationDueAt: number | null;
+  lastWaitToRotateMs: number | null;
+  waitToRotateTotalMs: number;
+  waitToRotateCount: number;
 }
 
 const num = (value: TLedgerAttrValue | undefined): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
@@ -248,10 +320,20 @@ export class ContextLifecycle {
       restartedAt: state.restartedAt,
       rotatingSince: state.rotatingSince,
       handoffUndeliveredAt: state.handoffUndeliveredAt,
+      checkpointId: state.checkpointId,
+      checkpointRefused: state.checkpointRefused,
+      checkpointMismatch: state.checkpointMismatch,
+      handoffRefusals: state.handoffRefusals,
+      checkpointRefusals: state.checkpointRefusals,
+      rotationTimeouts: state.rotationTimeouts,
+      rotationDueAt: state.rotationDueAt,
+      lastWaitToRotateMs: state.lastWaitToRotateMs,
+      waitToRotateTotalMs: state.waitToRotateTotalMs,
+      waitToRotateCount: state.waitToRotateCount,
     };
   }
 
-  /** One server event on the seat item. A ledger that cannot be written never stops a rotation. */
+  /** One server event on the seat item: telemetry. A ledger that cannot be written never stops a rotation. */
   private write(seat: ISeatTab, state: ISeatState, kind: 'open' | 'state' | 'clear' | 'close', extra: Record<string, TLedgerAttrValue> = {}): void {
     const at = this.deps.now();
     this.eventCounter += 1;
@@ -351,11 +433,96 @@ export class ContextLifecycle {
       rotatingSince: num(a.rotatingSince),
       handoffUndeliveredAt: num(a.handoffUndeliveredAt),
       retries: 0,
+      checkpointId: str(a.checkpointId),
+      checkpointRefused: null,
+      resumeCheck: null,
+      checkpointMismatch: str(a.checkpointMismatch),
+      handoffRefusals: num(a.handoffRefusals) ?? 0,
+      checkpointRefusals: num(a.checkpointRefusals) ?? 0,
+      rotationTimeouts: num(a.rotationTimeouts) ?? 0,
+      rotationDueAt: num(a.rotationDueAt),
+      lastWaitToRotateMs: num(a.lastWaitToRotateMs),
+      waitToRotateTotalMs: num(a.waitToRotateTotalMs) ?? 0,
+      waitToRotateCount: num(a.waitToRotateCount) ?? 0,
       ...this.resumed(item, this.deps.sessionId(seat.tabId)),
     };
+    this.resumeFromCheckpoint(seat, state, item);
     this.states.set(seat.tabId, state);
     this.write(seat, state, item ? 'state' : 'open');
     return state;
+  }
+
+  /**
+   * The durable checkpoint wins over the best-effort seat item (vel-D5): recovery reads stored state. A row the clear
+   * reached (`cleared`, or `written` while the bound session is no longer the one it was taken from) resumes
+   * `rotating` with its first message rebuilt from the row. A row stopped mid-delivery is frozen: its first message
+   * may have been typed, so it is never typed again and the board flags it. Any other row leaves the ADR-0036 resume.
+   */
+  private resumeFromCheckpoint(seat: ISeatTab, state: ISeatState, item: { state: string | null; attrs: Record<string, TLedgerAttrValue> } | null): void {
+    let latest: IStoredCheckpoint | null;
+    try {
+      latest = this.deps.checkpoints.latest(seat.workspaceId, state.itemKey);
+    } catch (err) {
+      log.error(`seat ${state.itemKey}: checkpoints not read at resume; the seat item alone decides: ${message(err)}`);
+      return;
+    }
+    if (!latest) return;
+    const checkpoint = latest.checkpoint;
+    // A row of another tab that had this name (closed, then created again) is never this tab's rotation (r1 F1).
+    if (checkpoint.tabId !== seat.tabId) return;
+    const now = this.deps.now();
+    if ((latest.status === 'written' || latest.status === 'cleared') && now - latest.updatedAt > CHECKPOINT_LIVE_MS) {
+      const finished = latest.status === 'written' ? 'abandoned' : 'undelivered';
+      this.markCheckpoint(seat, checkpoint.id, [latest.status], finished);
+      log.warn({ tabId: seat.tabId, checkpoint: checkpoint.id, ageMs: now - latest.updatedAt }, `checkpoint row too old to resume: marked ${finished}`);
+      return;
+    }
+    const freeze = (to: TCheckpointStatus, why: string): void => {
+      this.markCheckpoint(seat, checkpoint.id, [latest.status], to);
+      log.warn({ tabId: seat.tabId, checkpoint: checkpoint.id }, why);
+      Object.assign(state, {
+        phase: 'watching', checkpointId: checkpoint.id, firstMessage: null, sessionBefore: null, restartedAt: null, freshSession: false,
+        handoffUndeliveredAt: now, deadline: null, rotateRequestedAt: null, rotationDueAt: null, readySessionId: null, resendRotate: false,
+      } satisfies Partial<ISeatState>);
+    };
+    if (latest.status === 'delivering') {
+      freeze('delivery-unknown', 'server stopped while the first message was typed: it is not typed again; the board flags the seat');
+      return;
+    }
+    // A checkpoint taken with no bound session cannot show whether its clear ran: frozen, never cleared again (r1 Q1).
+    if (latest.status === 'written' && checkpoint.sessionBefore === null) {
+      freeze('delivery-unknown', 'server stopped after a checkpoint with no session: the clear may have run; not cleared again; the board flags the seat');
+      return;
+    }
+    const bound = this.deps.sessionId(seat.tabId);
+    // A restart unbinds the session (markAgentLaunch): a session gone since the checkpoint means the clear ran.
+    const sessionMoved = checkpoint.sessionBefore !== null && bound !== checkpoint.sessionBefore;
+    const cleared = latest.status === 'cleared' || (latest.status === 'written' && sessionMoved);
+    if (!cleared) return;
+    if (latest.status === 'written') this.markCheckpoint(seat, checkpoint.id, ['written'], 'cleared');
+    const counted = item?.state === 'rotating' && num(item.attrs.restartedAt) !== null;
+    if (!counted) {
+      state.rotations += 1;
+      state.lastRotationAt = now;
+      state.compactionsSinceRotation = 0;
+      state.failures = 0;
+      state.alarm = null;
+    }
+    Object.assign(state, {
+      phase: 'rotating', checkpointId: checkpoint.id, firstMessage: resumeMessage(checkpoint.handoffPath, checkpoint.intendedNextAction),
+      sessionBefore: checkpoint.sessionBefore, restartedAt: now, freshSession: bound !== null && bound !== checkpoint.sessionBefore,
+      rotatingSince: state.rotatingSince ?? now, deadline: null, rotateRequestedAt: null, rotationDueAt: null,
+    } satisfies Partial<ISeatState>);
+  }
+
+  /** A checkpoint step: true when the row moved. A store that fails is logged; the caller decides what that stops. */
+  private markCheckpoint(seat: ISeatTab, id: string, from: readonly TCheckpointStatus[], to: TCheckpointStatus): boolean {
+    try {
+      return this.deps.checkpoints.mark(seat.workspaceId, id, from, to, this.deps.now());
+    } catch (err) {
+      log.error(`checkpoint ${id} not marked ${to}: ${message(err)}`);
+      return false;
+    }
   }
 
   /** Open the seat item of every seat now (server start, tab create): a seat with no reading is still a seat. */
@@ -421,6 +588,8 @@ export class ContextLifecycle {
     state.contextTokens = null;
     state.contextAt = null;
     state.contextSessionId = null;
+    // A fresh context owes no rotation: a due one that never started stops counting its wait.
+    if (state.phase === 'watching') state.rotationDueAt = null;
     if (state.phase === 'rotating' && state.restartedAt !== null && this.deps.now() >= state.restartedAt) state.freshSession = true;
     this.schedule(tabId);
   }
@@ -480,6 +649,12 @@ export class ContextLifecycle {
     const state = this.states.get(tabId);
     if (state && seat) this.write(seat, state, 'close');
     this.states.delete(tabId);
+    // A tab created later with the same name must never take this tab's rotation (r1 F1).
+    try {
+      this.deps.checkpoints.abandonTab(tabId, this.deps.now());
+    } catch (err) {
+      log.error(`checkpoints of closed tab ${tabId} not marked abandoned: ${message(err)}`);
+    }
   }
 
   /** Every seat: a reading due for the ledger, a rotation or a first message due at the prompt. */
@@ -556,11 +731,16 @@ export class ContextLifecycle {
    * it counts as one failed check, so a second failed rotation raises the alarm (ADR-0036 §2).
    */
   private timedOut(seat: ISeatTab, state: ISeatState): void {
-    const reason = `no rotation within ${ROTATION_DEADLINE_MS / 60_000} min of the first ROTATE (the seat was ${state.phase})`;
+    const refused = state.checkpointRefused ? `; the last checkpoint was refused: ${state.checkpointRefused}` : '';
+    const reason = `no rotation within ${ROTATION_DEADLINE_MS / 60_000} min of the first ROTATE (the seat was ${state.phase}${refused})`;
     state.failures += 1;
+    state.rotationTimeouts += 1;
     state.resendRotate = false;
     state.pendingMessage = null;
     state.deadline = null;
+    state.rotationDueAt = null;
+    state.checkpointRefused = null;
+    if (state.checkpointId) this.markCheckpoint(seat, state.checkpointId, ['written'], 'abandoned');
     if (state.failures >= 2) {
       state.phase = 'rotation-alarm';
       state.alarm = reason;
@@ -579,7 +759,8 @@ export class ContextLifecycle {
     const state = this.states.get(tabId);
     if (!state || !OPEN_PHASES.includes(state.phase)) return null;
     const until = state.deadline !== null ? `, released by ${new Date(state.deadline).toISOString().replace(/\.\d{3}Z$/, 'Z')} at the latest` : '';
-    return `the seat's context rotation holds its digests (phase ${state.phase}${until})`;
+    const refused = state.checkpointRefused ? `; the rotation stopped before the clear: ${state.checkpointRefused}` : '';
+    return `the seat's context rotation holds its digests (phase ${state.phase}${until}${refused})`;
   }
 
   /** ROTATE when due (`again`: the seat owes a fresh HANDOFF-READY, whatever its context). */
@@ -589,6 +770,11 @@ export class ContextLifecycle {
     const overThreshold = state.contextTokens !== null && state.contextTokens >= threshold;
     if (!again && !overThreshold && !state.compactionPending) return;
     if (!again && state.nextRotationAt !== null && this.deps.now() < state.nextRotationAt) return;
+    if (state.rotationDueAt === null) {
+      // Wait-to-rotate (vel-D5 AC6) runs from the first moment the rotation was due, the prompt waits included.
+      state.rotationDueAt = this.deps.now();
+      this.write(seat, state, 'clear');
+    }
     if (!(await this.deps.canRotate(seat.tabId))) return;
     const requestedAt = this.wholeSecond();
     const sent = await this.deps.send(seat, rotateMessage(seat.handoffPath), () => this.deps.atPrompt(seat.tabId));
@@ -616,16 +802,37 @@ export class ContextLifecycle {
       log.info({ tabId: seat.tabId }, 'handoff check waits: the seat is not at its prompt or has background work');
       return;
     }
+    // The awaits below can let a turn start and end; the rotation goes on only for the request it checked (r1 F6).
+    const requestedAt = state.rotateRequestedAt;
+    const stillThisRotation = (): boolean => state.phase === 'handoff-ready' && state.rotateRequestedAt === requestedAt;
     let reasons: string[];
     let resumeCommand: string | null = null;
+    let text = '';
     try {
-      const result = checkHandoff(await this.deps.readHandoff(seat.handoffPath), this.deps.now(), state.rotateRequestedAt);
+      text = await this.deps.readHandoff(seat.handoffPath, seat);
+      const result = checkHandoff(text, this.deps.now(), state.rotateRequestedAt);
       reasons = result.reasons;
       resumeCommand = result.resumeCommand;
     } catch (err) {
-      reasons = [`cannot read ${seat.handoffPath}: ${err instanceof Error ? err.message : err} (expected a readable UTF-8 handoff file)`];
+      // The seat cannot repair its host's network: a wait inside the deadline, never a failed check.
+      if (err instanceof SeatHostUnreachable) {
+        this.refuseRotation(seat, state, `the handoff file could not be read: ${err.message}`);
+        return;
+      }
+      reasons = err instanceof HandoffRefused
+        ? [err.message]
+        : [`cannot read ${seat.handoffPath}: ${err instanceof Error ? err.message : err} (expected a readable UTF-8 handoff file)`];
     }
     if (!reasons.length && resumeCommand) {
+      const checkpoint = await this.durableCheckpoint(seat, state, text);
+      if (!checkpoint) return;
+      // A plain copy beside the handoff on the seat's host: recovery from files alone; the stored row is the gate.
+      await this.deps.placeCheckpoint(seat, checkpoint, false)
+        .catch((err) => log.warn(`checkpoint ${checkpoint.id} not copied beside ${seat.handoffPath}: ${message(err)}`));
+      if (!stillThisRotation()) {
+        log.info({ tabId: seat.tabId, phase: state.phase }, 'rotation not started: the seat ran a turn while its checkpoint was written');
+        return;
+      }
       // Written before the restart: a server that stops mid-rotation resumes it from here (F3).
       state.phase = 'rotating';
       // Kept when set: a rotation resumed from before a server stop releases what it held then too.
@@ -638,6 +845,8 @@ export class ContextLifecycle {
       log.info({ tabId: seat.tabId }, 'handoff check passed: restarting the seat');
       const outcome = await this.deps.restart(seat);
       if (outcome.ok) {
+        // A failed mark leaves the row `written`; the resume reads a moved session as cleared all the same.
+        this.markCheckpoint(seat, checkpoint.id, ['written'], 'cleared');
         this.restarted(seat, state);
         return;
       }
@@ -646,14 +855,77 @@ export class ContextLifecycle {
       state.sessionBefore = null;
       this.release(seat, state);
       if (outcome.busy) {
-        // A turn started, or the stop's acknowledgement is still in flight: the check runs again shortly.
+        // A turn started, or the stop's acknowledgement is still in flight: the check runs again shortly, and its
+        // checkpoint is the same attempt, written again.
         this.write(seat, state, 'state');
         this.retrySoon(seat, state);
         return;
       }
+      if (outcome.hostUnreachable) {
+        // Nothing was killed: the row stays `written`, and the rotation waits inside its deadline (r1 F2).
+        this.refuseRotation(seat, state, `the restart could not reach the seat's host: ${outcome.error}`);
+        return;
+      }
+      this.markCheckpoint(seat, checkpoint.id, ['written'], 'abandoned');
       reasons = [`the restart failed: ${outcome.error}`];
     }
     await this.failed(seat, state, reasons);
+  }
+
+  /**
+   * vel-D5 AC1: the rotation's checkpoint, written and read back with an equal digest, or null when the rotation must
+   * stop before the clear. The attempt comes from the store: a row still `written` (its clear never ran) is the same
+   * attempt again; anything later starts the next one.
+   */
+  private async durableCheckpoint(seat: ISeatTab, state: ISeatState, text: string): Promise<IRotationCheckpoint | null> {
+    let latest: IStoredCheckpoint | null;
+    try {
+      latest = this.deps.checkpoints.latest(seat.workspaceId, state.itemKey);
+    } catch (err) {
+      return this.refuseRotation(seat, state, `the checkpoint store could not be read: ${message(err)}`);
+    }
+    const attempt = latest?.status === 'written' && latest.checkpoint.tabId === seat.tabId
+      ? latest.checkpoint.attempt
+      : (latest?.checkpoint.attempt ?? 0) + 1;
+    let facts: IGitFacts;
+    try {
+      facts = await this.deps.gitFacts(seat, null);
+    } catch (err) {
+      return this.refuseRotation(seat, state, `the git facts could not be read on ${seat.host ?? 'this host'}: ${message(err)}`);
+    }
+    const checkpoint = buildCheckpoint({
+      taskId: state.itemKey, attempt, workspaceId: seat.workspaceId, tabId: seat.tabId, tabName: seat.tabName, host: facts.host ?? seat.host ?? null,
+      createdAt: this.deps.now(), handoffPath: seat.handoffPath, handoffText: text, facts, sessionBefore: this.deps.sessionId(seat.tabId),
+    });
+    const digest = checkpointDigest(checkpoint);
+    try {
+      this.deps.checkpoints.put(checkpoint, this.deps.now());
+      const back = this.deps.checkpoints.get(seat.workspaceId, checkpoint.id);
+      if (!back) throw new Error('the read-back found no row');
+      if (back.status !== 'written') throw new Error(`the read-back found it ${back.status} (expected written)`);
+      const read = checkpointDigest(back.checkpoint);
+      if (read !== digest || back.digest !== digest) {
+        throw new Error(`the read-back digest is ${read.slice(0, 12)} (stored ${back.digest.slice(0, 12)}), expected ${digest.slice(0, 12)}`);
+      }
+    } catch (err) {
+      return this.refuseRotation(seat, state, `checkpoint ${checkpoint.id} is not durable: ${message(err)}`);
+    }
+    state.checkpointId = checkpoint.id;
+    state.checkpointRefused = null;
+    return checkpoint;
+  }
+
+  /**
+   * The rotation stops before the clear, visibly (vel-D5 AC1): the seat stays `handoff-ready`, the reason goes on the
+   * seat item, in the log and in the stale-digest flag, and the step is tried again; the rotation deadline bounds it.
+   */
+  private refuseRotation(seat: ISeatTab, state: ISeatState, reason: string): null {
+    if (state.checkpointRefused === null) state.checkpointRefusals += 1;
+    state.checkpointRefused = reason;
+    this.write(seat, state, 'clear');
+    log.error({ tabId: seat.tabId, reason }, 'rotation stopped before the clear: no durable checkpoint');
+    this.retrySoon(seat, state);
+    return null;
   }
 
   /** The restart ran; the seat stays `rotating` until its first message is typed into the fresh session (F3, F4). */
@@ -674,14 +946,23 @@ export class ContextLifecycle {
     state.failures = 0;
     state.alarm = null;
     state.retries = 0;
+    state.checkpointRefused = null;
+    state.resumeCheck = null;
+    if (state.rotationDueAt !== null) {
+      state.lastWaitToRotateMs = Math.max(0, now - state.rotationDueAt);
+      state.waitToRotateTotalMs += state.lastWaitToRotateMs;
+      state.waitToRotateCount += 1;
+      state.rotationDueAt = null;
+    }
     this.write(seat, state, 'state');
-    log.info({ tabId: seat.tabId, rotations: state.rotations }, 'seat restarted: the first message waits for the fresh session');
+    log.info({ tabId: seat.tabId, rotations: state.rotations, waitToRotateMs: state.lastWaitToRotateMs }, 'seat restarted: the first message waits for the fresh session');
   }
 
   /** The first message goes once a session newer than the restart is idle at its prompt; never on the old idle (F4). */
   private async maybeTypeFirstMessage(seat: ISeatTab, state: ISeatState): Promise<void> {
     if (state.restartedAt !== null && this.deps.now() - state.restartedAt >= FIRST_MESSAGE_TTL_MS) {
-      log.warn({ tabId: seat.tabId }, 'rotated seat never reported a fresh session: its first message was not typed');
+      log.warn({ tabId: seat.tabId, checkpoint: state.checkpointId }, 'rotated seat never took its first message: the checkpoint stays on this host, undelivered');
+      if (state.checkpointId) this.markCheckpoint(seat, state.checkpointId, ['written', 'cleared'], 'undelivered');
       state.handoffUndeliveredAt = this.deps.now();
       this.settle(seat, state, { firstMessageDropped: true });
       return;
@@ -689,9 +970,15 @@ export class ContextLifecycle {
     const bound = this.deps.sessionId(seat.tabId);
     if (!state.freshSession && bound !== null && state.sessionBefore !== null && bound !== state.sessionBefore) state.freshSession = true;
     if (!state.freshSession) return;
+    const stored = this.storedCheckpoint(seat, state);
+    if (stored === 'unreadable') return;
+    if (stored) {
+      await this.deliverCheckpoint(seat, state, stored);
+      return;
+    }
     if (!state.firstMessage) {
       try {
-        const resume = checkHandoff(await this.deps.readHandoff(seat.handoffPath), this.deps.now(), null).resumeCommand;
+        const resume = checkHandoff(await this.deps.readHandoff(seat.handoffPath, seat), this.deps.now(), null).resumeCommand;
         state.firstMessage = resume ? resumeMessage(seat.handoffPath, resume) : null;
       } catch (err) {
         log.warn(`first message of ${seat.tabId} not rebuilt: ${err instanceof Error ? err.message : err}`);
@@ -707,6 +994,63 @@ export class ContextLifecycle {
       this.settle(seat, state, {});
       log.info({ tabId: seat.tabId, rotations: state.rotations }, 'seat rotated');
     }
+  }
+
+  /** The rotation's stored checkpoint; null for a rotation that has none (begun before vel-D5), or `unreadable`. */
+  private storedCheckpoint(seat: ISeatTab, state: ISeatState): IStoredCheckpoint | null | 'unreadable' {
+    if (!state.checkpointId) return null;
+    try {
+      return this.deps.checkpoints.get(seat.workspaceId, state.checkpointId);
+    } catch (err) {
+      log.error(`checkpoint ${state.checkpointId} not read at resume; the first message waits: ${message(err)}`);
+      return 'unreadable';
+    }
+  }
+
+  /**
+   * vel-D5 AC4: the fresh session's first message from the stored checkpoint. The worktree is compared once, the
+   * handoff and the checkpoint are put on the seat's host, and the row is marked `delivering` before the paste, so a
+   * server that stops mid-paste freezes it instead of typing it twice. A host that does not answer is a wait.
+   */
+  private async deliverCheckpoint(seat: ISeatTab, state: ISeatState, stored: IStoredCheckpoint): Promise<void> {
+    const { checkpoint } = stored;
+    if (checkpoint.tabId !== seat.tabId) {
+      log.warn({ tabId: seat.tabId, checkpoint: checkpoint.id }, 'first message not typed: the checkpoint belongs to another tab');
+      state.handoffUndeliveredAt = this.deps.now();
+      this.settle(seat, state, { firstMessageDropped: true });
+      return;
+    }
+    if (stored.status === 'delivered') {
+      this.settle(seat, state, { checkpointId: checkpoint.id });
+      return;
+    }
+    if (stored.status !== 'written' && stored.status !== 'cleared') {
+      log.warn({ tabId: seat.tabId, checkpoint: checkpoint.id, status: stored.status }, 'first message not typed: the checkpoint is past delivery');
+      state.handoffUndeliveredAt = this.deps.now();
+      this.settle(seat, state, { firstMessageDropped: true });
+      return;
+    }
+    if (!state.resumeCheck) {
+      try {
+        const facts = await this.deps.gitFacts(seat, checkpoint.facts.head);
+        const differences = compareFacts(checkpoint.facts, facts);
+        const { restored } = await this.deps.placeCheckpoint(seat, checkpoint, true);
+        state.resumeCheck = { differences, restored };
+      } catch (err) {
+        log.warn({ tabId: seat.tabId, checkpoint: checkpoint.id }, `checkpoint not delivered yet; it waits on this host: ${message(err)}`);
+        return;
+      }
+      state.checkpointMismatch = state.resumeCheck.differences.length ? state.resumeCheck.differences.join('; ').slice(0, 500) : null;
+      this.write(seat, state, 'clear', { resumeRestored: state.resumeCheck.restored });
+      if (state.checkpointMismatch) log.warn({ tabId: seat.tabId, checkpoint: checkpoint.id, mismatch: state.checkpointMismatch }, 'the worktree moved since the checkpoint: the fresh session reconciles it first');
+    }
+    if (!this.markCheckpoint(seat, checkpoint.id, ['written', 'cleared'], 'delivering')) return;
+    const typed = await this.deps.typeFirstMessage(seat, firstMessageWithNotice(checkpoint, state.resumeCheck));
+    this.markCheckpoint(seat, checkpoint.id, ['delivering'], typed ? 'delivered' : 'cleared');
+    if (!typed) return;
+    state.handoffUndeliveredAt = null;
+    this.settle(seat, state, { checkpointId: checkpoint.id, resumeVerdict: state.checkpointMismatch ? 'mismatch' : 'match' });
+    log.info({ tabId: seat.tabId, rotations: state.rotations, checkpoint: checkpoint.id }, 'seat rotated');
   }
 
   /** The urgent events held while `rotating` go now, oldest first. */
@@ -725,12 +1069,14 @@ export class ContextLifecycle {
     state.restartedAt = null;
     state.freshSession = false;
     state.readySessionId = null;
+    state.resumeCheck = null;
     this.write(seat, state, 'state', extra);
   }
 
   /** One message naming the failed check; a second failure raises the alarm and leaves the session (ADR-0036 §2). */
   private async failed(seat: ISeatTab, state: ISeatState, reasons: string[]): Promise<void> {
     state.failures += 1;
+    state.handoffRefusals += 1;
     if (state.failures >= 2) {
       state.phase = 'rotation-alarm';
       state.alarm = reasons.join('; ').slice(0, 500);

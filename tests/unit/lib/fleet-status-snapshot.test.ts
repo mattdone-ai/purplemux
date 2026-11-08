@@ -238,3 +238,32 @@ describe('readComposer', () => {
     expect(readComposer('terminal', '$ ')).toBe('unreadable');
   });
 });
+
+describe('rotation coverage in the fleet view (vel-D5 AC6)', () => {
+  const seat = (key: string, attrs: Record<string, number | string | null>) => ({
+    workspaceId: 'ws-1', itemKey: key, itemType: 'seat' as const, openedAt: 0, closedAt: null, state: 'watching', stateSince: 0, waitReason: null,
+    waitSince: null, holder: key.split(':')[2], clearInput: null, parentKey: null, attrs, lastEventAt: 0, lastSeq: 1,
+  });
+
+  it('reports workers covered, rotations, refusals and wait-to-rotate from the layouts and the seat items', async () => {
+    deps.agentTabs = async () => [tab('tab-seat', { handoffPath: '/h/a.md' }), tab('tab-off', { handoffPath: '/h/b.md', rotateAt: 'off' }), tab('tab-plain')];
+    deps.seatItems = async () => [seat('seat:ws-1:name-tab-seat', { rotations: 2, checkpointRefusals: 1, waitToRotateTotalMs: 60_000, waitToRotateCount: 2 })];
+    const view = await buildFleetView(deps, NOW);
+    expect(view.rotation).toMatchObject({ workers: 3, covered: 1, rotations: 2, checkpointRefusals: 1, waitToRotateMeanMs: 30_000 });
+    expect(view.rotation?.coverage).toBeCloseTo(1 / 3);
+  });
+
+  it('a seat store that cannot be read is an error of its own; the rows still render', async () => {
+    deps.seatItems = async () => {
+      throw new Error('ledger locked');
+    };
+    const view = await buildFleetView(deps, NOW);
+    expect(view.rotation).toBeUndefined();
+    expect(view.errors).toContainEqual({ scope: 'rotation', error: 'ledger locked' });
+    expect(view.rows).toHaveLength(4);
+  });
+
+  it('a server without the seat read has no section', async () => {
+    expect((await buildFleetView(deps, NOW)).rotation).toBeUndefined();
+  });
+});

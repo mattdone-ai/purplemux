@@ -1625,8 +1625,9 @@ GET /api/mission-control/pulse[?workspaceId=all|WS]  (human session; all answers
 
 A seat is an agent tab created with a handoff file: POST /api/cli/tabs with "handoff": "/abs/path.md"
 and optionally "rotateAt": <50000..900000> | "off"   (purplemux tab create ... --handoff PATH [--rotate-at N|off]).
-The path is absolute (the CLI resolves it against its cwd) and need not exist yet; a remote tab, a
-relative path, or rotateAt without handoff is 400 invalid-request. The tab answers and lists
+The path is absolute (the CLI resolves it against its cwd) and need not exist yet; a relative path,
+or rotateAt without handoff, is 400 invalid-request. A remote tab (--host) is a seat too: the path
+names the file on its host, read over ssh; a host that does not answer is a wait. The tab answers and lists
 "handoffPath" and "rotateAt". Paths by convention: v2 seats .v2/seats/<seat>/handoff.md; other
 workspaces ~/.purplemux/workspaces/<ws>/seats/<tab-name>/handoff.md. Only seats rotate.
 Context: the Claude statusline's last request (input + cache writes + cache reads), per session.
@@ -1640,10 +1641,16 @@ A turn whose last line is HANDOFF-READY (or starts "HANDOFF-READY:") gets the fi
 next idle with the checker below, against the request time (whole seconds). Any other turn end, or a
 new submission after HANDOFF-READY, asks ROTATE again with a new request time: the file is checked
 only as of the seat's last turn. While a rotation is owed or under way the seat's digests are held.
-Pass: the tab restarts --clear under the same id (ADR-0028: leases, watches, probes, notes and
+Pass: the server first writes a durable checkpoint (vel-D5: git worktree, branch, head and base from
+the tab's host, the handoff's fields, key seat:<ws>:<tab-name>#<attempt>) to the ledger file and reads
+it back; a write that fails stops the rotation before the clear (seat item attr checkpointRefused).
+Then the tab restarts --clear under the same id (ADR-0028: leases, watches, probes, notes and
 reportsTo stay; a seat waiting only on watches restarts with interrupt, decided inside the restart
 lock) and its first message, typed once a session newer than the restart is idle at its prompt, is
-"Read <path>, then continue: <resume command>". The seat item stays "rotating" until then, so a
+"Read <path>, then continue: <resume command>" and a RESTORE NOTICE: what the checkpoint verified,
+what it covers and what it does not restore; when the worktree, branch, head or uncommitted files
+differ from the checkpoint it lists the differences and asks for reconciliation before the resume
+command. The seat item stays "rotating" until then, so a
 server restart resumes the rotation. Fail: one message
 "HANDOFF CHECK FAILED: <path>: <reasons>. Fix the file, then end your turn with HANDOFF-READY.";
 a second failure raises the rotation alarm and leaves the session as it is (a later HANDOFF-READY

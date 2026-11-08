@@ -95,7 +95,6 @@ describe('POST /api/cli/tabs: a seat (ADR-0036 §1)', () => {
     ['--rotate-at without --handoff', { rotateAt: '200000' }, 'rotateAt needs handoff'],
     ['a threshold under 50,000', { handoff: '/srv/h.md', rotateAt: '49999' }, 'from 50000 to 900000'],
     ['a threshold over 900,000', { handoff: '/srv/h.md', rotateAt: 900_001 }, 'from 50000 to 900000'],
-    ['a remote tab', { handoff: '/srv/h.md', host: 'ai-server' }, 'handoff is local only'],
   ])('refuses %s with 400 and nothing created', async (_label, body, error) => {
     const before = (await readTabs()).length;
     const r = await post(body);

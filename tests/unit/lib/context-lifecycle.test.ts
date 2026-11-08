@@ -16,8 +16,11 @@ import {
   type IContextLifecycleDeps,
   type TRestartOutcome,
 } from '@/lib/context-lifecycle';
+import { RotationCheckpointsTable } from '@/lib/rotation-checkpoint-store';
 import type { ISeatTab } from '@/types/context-lifecycle';
 import type { ILedgerEventInput, TLedgerAttrValue } from '@/types/ledger';
+import type { IGitFacts, IRotationCheckpoint } from '@/types/rotation-checkpoint';
+import Database from 'better-sqlite3';
 
 const T0 = Date.UTC(2026, 10, 3, 12, 0, 0, 400);
 const PATH = '/home/u/.purplemux/workspaces/ws-a/seats/orch/handoff.md';
@@ -48,7 +51,17 @@ interface IHarness {
   session: { value: string | null };
   firstReady: { value: boolean };
   released: number[];
+  checkpoints: RotationCheckpointsTable;
+  facts: { value: IGitFacts };
+  placed: Array<{ id: string; restore: boolean }>;
 }
+
+const FACTS: IGitFacts = {
+  kind: 'ok', cwd: '/srv/wt', worktree: '/srv/wt', branch: 'story/x', head: 'a'.repeat(40), baseRef: 'origin/main', base: 'b'.repeat(40), dirty: 0,
+};
+
+/** The ADR-0036 first line of a rotation whose worktree matches its checkpoint, before the restore notice. */
+const firstLine = (resume = '/v2-orchestrate') => `Read ${PATH}, then continue: ${resume} RESTORE NOTICE (checkpoint `;
 
 const harness = (overrides: Partial<ISeatTab> = {}, depsOverride: Partial<IContextLifecycleDeps> = {}): IHarness => {
   const clock = { now: T0 };
@@ -57,7 +70,11 @@ const harness = (overrides: Partial<ISeatTab> = {}, depsOverride: Partial<IConte
     clock, seat, sent: [], restarts: [], first: [], events: [], files: new Map<string, string>(), ready: { value: true },
     restartOutcome: { value: { ok: true } as TRestartOutcome }, item: { value: null }, canRotateCalls: [],
     session: { value: 'sess-1' }, firstReady: { value: true }, released: [],
+    facts: { value: FACTS }, placed: [],
   } as unknown as IHarness;
+  const database = new Database(':memory:');
+  h.checkpoints = new RotationCheckpointsTable(database);
+  h.checkpoints.ensureShape();
   h.life = new ContextLifecycle({
     now: () => clock.now,
     seat: (tabId) => (tabId === seat.tabId ? seat : null),
@@ -97,6 +114,12 @@ const harness = (overrides: Partial<ISeatTab> = {}, depsOverride: Partial<IConte
       h.events.push(...events);
     },
     readSeatItem: () => h.item.value,
+    gitFacts: async () => h.facts.value,
+    checkpoints: h.checkpoints,
+    placeCheckpoint: async (_seat, checkpoint: IRotationCheckpoint, restore) => {
+      h.placed.push({ id: checkpoint.id, restore });
+      return { restored: false };
+    },
     ...depsOverride,
   });
   return h;
@@ -272,13 +295,14 @@ describe('HANDOFF-READY and the check (AC 3)', () => {
     await h.life.advance(h.seat.tabId);
     expect(h.first).toEqual([]);
     await freshSession(h);
-    expect(h.first).toEqual([`Read ${PATH}, then continue: /v2-orchestrate`]);
-    expect(resumeMessage(PATH, '/v2-orchestrate')).toBe(h.first[0]);
+    expect(h.first).toHaveLength(1);
+    expect(h.first[0].startsWith(`${resumeMessage(PATH, '/v2-orchestrate')} RESTORE NOTICE (checkpoint seat:ws-a:orch#1)`)).toBe(true);
+    expect(h.first[0].startsWith(firstLine())).toBe(true);
     expect(h.life.view(h.seat.tabId)).toMatchObject({ phase: 'watching', rotations: 1, contextTokens: null, failures: 0 });
     expect(h.life.holdsDigest(h.seat.tabId)).toBe(false);
     expect(stateEvents(h)).toEqual(['rotate-requested', 'handoff-ready', 'rotating', 'rotating', 'watching']);
     const rotating = h.events.filter((e) => e.state === 'rotating');
-    expect(rotating[0].attrs).toMatchObject({ firstMessage: h.first[0], sessionBefore: 'sess-1', restartedAt: null });
+    expect(rotating[0].attrs).toMatchObject({ firstMessage: resumeMessage(PATH, '/v2-orchestrate'), sessionBefore: 'sess-1', restartedAt: null });
     expect(rotating[1].attrs).toMatchObject({ rotations: 1, restartedAt: h.clock.now, compactionsSinceRotation: 0, rotationFailures: 0 });
   });
 

@@ -333,3 +333,38 @@ export const checkHandoff = (text: string, now: number, rotateRequestedAt: numbe
     resumeCommand: resumeLines.length === 1 ? resumeLines[0] : null,
   };
 };
+
+/** The structured fields of a handoff, read with the checker's own splitter; meaningful only after a pass. */
+export interface IHandoffFields {
+  role: string[];
+  inFlight: Array<{ itemKey: string; state: string; nextAction: string; waitingOn: string }>;
+  /** `## Open questions`: Mission Control item ids, the note after each dropped. */
+  openQuestions: string[];
+  /** The one source of each standing rule, as written. */
+  standingRuleSources: string[];
+  decisions: string[];
+  doNot: string[];
+  resumeCommand: string | null;
+}
+
+const LEADING_ITEM_ID_RE = new RegExp(`^(?:- )?\`?(${ITEM_ID})\`?`, 'u');
+
+export const handoffFields = (text: string): IHandoffFields => {
+  const { bodies } = splitSections(splitLines(text));
+  const items = (name: string): string[] => {
+    const lines = handoffItems(bodies.get(name) ?? []);
+    return isNone(lines) ? [] : lines.map((line) => line.replace(/^- /, ''));
+  };
+  const rows = filled(bodies.get('In flight') ?? []).map(tableCells).filter((row): row is string[] => row !== null && row.length === 4);
+  const resume = filled(bodies.get('Resume command') ?? []);
+  const sources = handoffItems(bodies.get('Standing rules') ?? []);
+  return {
+    role: filled(bodies.get('Role') ?? []),
+    inFlight: rows.slice(2).map(([itemKey, state, nextAction, waitingOn]) => ({ itemKey, state, nextAction, waitingOn })),
+    openQuestions: items('Open questions').map((line) => LEADING_ITEM_ID_RE.exec(line)?.[1] ?? line),
+    standingRuleSources: isNone(sources) ? [] : sources.map((line) => RULE_RE.exec(line)?.groups?.sources ?? '').filter(Boolean),
+    decisions: items('Decisions in the last 24 h'),
+    doNot: items('Do not'),
+    resumeCommand: resume.length === 1 ? resume[0] : null,
+  };
+};
