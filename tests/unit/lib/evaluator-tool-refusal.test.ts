@@ -32,7 +32,7 @@ const claudeBin = (() => {
 // A managed settings PreToolUse hook runs before the tool configuration in every claude process on the host, and no
 // setting overrides it. Where one is wired, the tests that assert the permission layer's own Bash refusal skip; the
 // assertions stay as they are, and hosts without managed hooks (CI included) keep proving them.
-const managedHooks = managedPreToolUseHookFiles();
+const managedHooks = managedPreToolUseHookFiles('Bash');
 
 interface IToolCall { name: string; input: Record<string, unknown> }
 interface IToolResult { content: string; isError: boolean }
@@ -218,6 +218,10 @@ describe.skipIf(!claudeBin)('an evaluator tab refuses writes and credential read
       expect(result!.content).toMatch(/denied/i);
       expect(result!.content).not.toContain('SECRET-CLI-TOKEN');
     });
+    // Not skipped under a managed Bash hook (vel-MC-ACT-FU): a managed hook that refused `cat <token>` first would show
+    // a hook error here, not this permission message, so the test still proves the permission layer's own refusal.
+    // Measured on a host whose managed PreToolUse hooks take Bash and Read: every refusal above was the permission layer's.
+    expect(results[3]!.content).toMatch(/Permission to use Bash.*denied/i);
     expect(results[8]).toMatchObject({ isError: false, content: expect.stringContaining('hello') });
     expect(results[9]!.isError).toBe(false);
     expect(results[10]).toMatchObject({ isError: false, content: expect.stringContaining('hello') });

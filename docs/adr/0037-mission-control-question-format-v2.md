@@ -242,7 +242,7 @@ A recurrence the owner raised. Two things went missing from Mission Control:
   - **Production path:** `mission events` and the events route go through `applyMissionEventBatch`. For an attention.opened kind=action with no `humanReview`, the batch reads two things:
     - the opener's live identity: the opener is the caller tab from the request credential, never from the payload (ADR-0023);
     - the workspace's configured orchestrator.
-  - **When it stamps:** only when the opener IS the configured orchestrator with a `launch` identity, and its live identity matches the run's binding. These are the checks an explicit review passes. The store then stamps `humanNeed: external-action`:
+  - **When it stamps:** only when the opener IS the configured orchestrator with a `launch` identity, and its live identity matches the run's binding. These are the checks an explicit review passes, plus one: the explicit review does not check who sent it (see "An explicit review is an asserted process" below). The store then stamps `humanNeed: external-action`:
     - `humanReason` is "An action only the owner can take: <decision or title>." plus its whyNow;
     - `handling` says the server stamped it;
     - `reviewerTabId` is the orchestrator.
@@ -257,6 +257,15 @@ A recurrence the owner raised. Two things went missing from Mission Control:
   Each stays a candidate for the orchestrator's review, as before. Both the events route and `mc ask` (the check route) warn the opener: `humanReview: absent on a kind=action`, naming who makes it visible.
 - **After the stamp:** the item is open like any reviewed item. An attention.updated that changes its text needs a `humanReview` again (renewed review, as for every open item): without one it is refused 409 and the item keeps its stamp; with one the explicit review replaces the stamp. Pinned in the owner-action test.
 - **The view.** The Needs you list also renders an open owner item the page holds no draft for yet, from a fresh draft. That closes a one-render gap only; it was not case 2's cause.
+- **An explicit review is an asserted process (follow-up vel-MC-ACT-FU, #63 review).** A caller that is not a `launch` orchestrator can still open an owner item: it sends an explicit `humanReview` whose `reviewerTabId` names the configured orchestrator. This is accepted, and it is not a gap in the stamp rule.
+  - **What the server checks:** the reviewer tab is the configured orchestrator, the run is bound to that tab, and the orchestrator's live identity matches the binding. It never checks the sender. The contract records this: "a server-checked process assertion under the shared workspace token, not authenticated tab authorship" (`docs/mission-control-contract.md`, human review).
+  - **Why the sender is not checked:** two callers send a review on the orchestrator's behalf by design.
+    - The NEEDS-DECISION opener opens an owner item from a worker's end line with the worker as opener (`hook`) and a review naming the orchestrator (`src/lib/needs-decision-opener.ts`).
+    - The acceptance runner posts reviewed items for a stand-in orchestrator from its own process (`scripts/acceptance/checks-attention-alert.cjs`, `checks-wave4.cjs`).
+    A launch requirement on the review would refuse both. The review is a stated claim with an audit trail: the opener row keeps the sender's own identity (`hook`, `session`, or none).
+  - **Why the stamp is stricter:** the stamp infers a review that nobody sent. It turns an unreviewed action into an owner item on the strength of who sent it. So the sender is all it reads, and only `launch` proves the sender.
+  - **What would change it:** a per-tab credential required for every write that names the orchestrator. That is a change to ADR-0010's trust model, not to this ADR.
+  - Pinned in `tests/unit/lib/mission-control-owner-action.test.ts`: an explicit review from a `session`, `hook`, worker or tab-less sender opens the item with the sender recorded as opener; a review naming another tab, or sent while the orchestrator's live session does not match the binding, is refused 409.
 
 **Owner steps are lint, not a refusal.**
 - **What is read:** every attention.opened and attention.updated of a kind=question, in its `context`, `decision`, `whyNow` and the options' `label`, `consequence` and `description`. Code blocks are dropped, since they hold quoted text.

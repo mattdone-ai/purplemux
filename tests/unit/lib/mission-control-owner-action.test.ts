@@ -144,3 +144,57 @@ describe('a later attention.updated on a stamped owner action (vel-MC-ACT, #60 r
     expect(isMissionHumanInboxItem(restamped)).toBe(true);
   });
 });
+
+// vel-MC-ACT-FU (#63 review): an explicit humanReview is a server-checked process assertion, not proof of who sent it
+// (ADR-0037 vel-MC-ACT-FU amendment; docs/mission-control-contract.md, human review). The server checks the review
+// against the orchestrator's live binding, never the sender's identity: a `hook`, `session` or tab-less caller that
+// names the orchestrator opens the item, as the acceptance runner and the NEEDS-DECISION opener do. Only the stamp,
+// which infers a review nobody sent, needs a `launch` opener. These pin both sides of that line.
+describe('an explicit human review naming the orchestrator is an asserted process (vel-MC-ACT-FU)', () => {
+  const review = {
+    humanNeed: 'external-action',
+    humanReason: 'Only the owner can issue the deploy token.',
+    handling: 'The orchestrator reviewed the step.',
+    reviewerTabId: 'tab-orch',
+  };
+  const openReviewed = (eventId: string, itemId: string, reviewerTabId = 'tab-orch'): TMissionProducerEvent => {
+    const opened = openAction(eventId, itemId);
+    return { ...opened, payload: { ...(opened.payload as object), humanReview: { ...review, reviewerTabId } } } as TMissionProducerEvent;
+  };
+
+  it.each([
+    ['the orchestrator tab, session identity', { tabId: 'tab-orch', identity: 'session' as const }],
+    ['the orchestrator tab, hook identity', { tabId: 'tab-orch', identity: 'hook' as const }],
+    ['a worker tab, launch identity', { tabId: 'tab-worker', identity: 'launch' as const }],
+    ['no tab (a workspace or admin token)', null],
+  ])('sent by %s: open, reviewed by the orchestrator binding, opener recorded as asserted', async (_label, opener) => {
+    await startRun();
+    await applyMissionEventBatch('ws-a', [openReviewed('ev-explicit', 'item-explicit')], opener);
+    const item = itemOf('item-explicit');
+    expect(item.state).toBe('open');
+    expect(item.humanReview).toMatchObject({
+      humanNeed: 'external-action', reviewerTabId: 'tab-orch', eventId: 'ev-explicit',
+      binding: expect.objectContaining({ tabId: 'tab-orch', sessionId: 'session-tab-orch' }),
+    });
+    expect(isMissionHumanInboxItem(item)).toBe(true);
+    // The opener row keeps the sender's own identity, so an asserted review stays visible as asserted.
+    const row = store.openItemOpeners().find((entry) => entry.itemId === 'item-explicit');
+    expect(row).toBeDefined();
+    expect(row!.opener).toEqual(opener);
+  });
+
+  it('naming a tab other than the configured orchestrator: refused 409, nothing opens', async () => {
+    await startRun();
+    const refused = applyMissionEventBatch('ws-a', [openReviewed('ev-other', 'item-other', 'tab-worker')], { tabId: 'tab-worker', identity: 'launch' });
+    await expect(refused).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/configured orchestrator/) });
+    expect(store.snapshot().items.find((item) => item.id === 'item-other')).toBeUndefined();
+  });
+
+  it('when the orchestrator\'s live session no longer matches the run binding: refused 409, whoever sends it', async () => {
+    await startRun();
+    live.identities.set('tab-orch', { ...identityOf('tab-orch'), sessionId: 'session-relaunched' });
+    const refused = applyMissionEventBatch('ws-a', [openReviewed('ev-stale-review', 'item-stale-review')], { tabId: 'tab-orch', identity: 'launch' });
+    await expect(refused).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/current orchestrator session binding/) });
+    expect(store.snapshot().items.find((item) => item.id === 'item-stale-review')).toBeUndefined();
+  });
+});
