@@ -434,3 +434,37 @@ describe('the pool view (AC 7)', () => {
     expect(view.hosts[1].budget).toMatchObject({ workerThreads: 48, used: { product: { threads: 8, memBytes: 8 * GIB } } });
   });
 });
+
+describe('readPoolPaths (vel-RETRO-R2)', () => {
+  const path = (rttMs: number, kind: 'relayed' | 'direct' | 'unknown') => ({
+    kind, alias: 'exec-1', address: 'exec-1.tailnet.example', ip: 'fd7a:115c:a1e0::2', peer: 'exec-1', region: kind === 'relayed' ? 'sin' : null,
+    rttMs, measuredAt: Date.parse('2026-11-09T05:00:00Z'), reason: kind === 'unknown' ? 'timeout waiting for ping reply' : null,
+    relayedReads: kind === 'relayed' ? 2 : 0,
+  });
+  const remote = (host: string, p: ReturnType<typeof path> | null): TPoolHostRead => ({
+    host, local: false, state: 'known', readAt: 1, via: host, metrics: metrics({}), ...(p ? { path: p } : {}),
+  });
+  const local: TPoolHostRead = { host: 'control-host', local: true, state: 'known', readAt: 1, via: null, metrics: metrics({}) };
+
+  it('serves every remote host with its path and the alert line, and never this host', async () => {
+    const { readPoolPaths } = await service();
+    const paths = await readPoolPaths({
+      reads: async () => [local, remote('exec-1', path(1170, 'relayed')), remote('exec-2', path(300, 'direct')), remote('host-b-lan', null)],
+      config: async () => () => null,
+    });
+    expect(paths.map((p) => [p.host, p.path?.alert ?? null, p.text])).toEqual([
+      ['exec-1', 'tailnet-relayed', 'exec-1 tailnet path relayed via DERP(sin), RTT 1170 ms'],
+      ['exec-2', 'tailnet-slow', 'exec-2 tailnet path slow: RTT 300 ms (threshold 250 ms)'],
+      ['host-b-lan', null, null],
+    ]);
+  });
+
+  it('judges slowness by the default threshold when the fleet config cannot be read', async () => {
+    const { readPoolPaths } = await service();
+    const paths = await readPoolPaths({
+      reads: async () => [remote('exec-2', path(300, 'direct'))],
+      config: async () => { throw new Error('unreadable'); },
+    });
+    expect(paths[0].path).toMatchObject({ alert: 'tailnet-slow', slowMs: 250 });
+  });
+});

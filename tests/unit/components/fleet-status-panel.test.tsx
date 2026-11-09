@@ -204,6 +204,35 @@ describe('fleet status panel', () => {
     });
   });
 
+  describe('the tailnet path lines (vel-RETRO-R2)', () => {
+    const hostPath = (host: string, alert: 'tailnet-relayed' | 'tailnet-slow' | null, text: string | null) => ({
+      host,
+      path: {
+        kind: alert === 'tailnet-relayed' ? 'relayed' as const : 'direct' as const, alert, alias: host, address: null, ip: null, peer: null,
+        region: alert === 'tailnet-relayed' ? 'sin' : null, rttMs: 1170, relayedReads: alert === 'tailnet-relayed' ? 2 : 0, slowMs: 250, measuredAt: '2026-11-09T05:00:00.000Z', reason: null,
+      },
+      text,
+    });
+
+    it('shows each relayed or slow host in its alert line, and no line for a fine host', () => {
+      const html = render(ok(view({
+        poolPaths: [
+          hostPath('exec-1', 'tailnet-relayed', 'exec-1 tailnet path relayed via DERP(sin), RTT 1170 ms'),
+          hostPath('exec-2', 'tailnet-slow', 'exec-2 tailnet path slow: RTT 300 ms (threshold 250 ms)'),
+          hostPath('host-b-lan', null, null),
+        ],
+      })));
+      expect(html).toMatch(/data-pool-path-host="exec-1" data-pool-path-alert="tailnet-relayed">exec-1 tailnet path relayed via DERP\(sin\), RTT 1170 ms</);
+      expect(html).toMatch(/data-pool-path-host="exec-2" data-pool-path-alert="tailnet-slow">exec-2 tailnet path slow/);
+      expect(html).not.toContain('data-pool-path-host="host-b-lan"');
+    });
+
+    it('renders no line without paths (an older server) or for a host not measured', () => {
+      expect(render(ok(view()))).not.toContain('data-pool-path-host');
+      expect(render(ok(view({ poolPaths: [{ host: 'exec-1', path: null, text: null }] })))).not.toContain('data-pool-path-host');
+    });
+  });
+
   describe('WIP per workspace (ADR-0027)', () => {
     const rows = [row(), row({ workspaceId: 'ws-2', workspaceName: 'Billing', tabId: 'tab-z' })];
 

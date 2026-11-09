@@ -1,4 +1,5 @@
 import { isAgentPanelType } from '@/lib/agent-panel-types';
+import { DEFAULT_POOL_PATH_SLOW_MS, POOL_PATH_SLOW_KEY, pathView } from '@/lib/tailnet-path';
 import type { ILease } from '@/types/lease';
 import {
   POOL_CLASSES,
@@ -94,6 +95,7 @@ const NUMBER_RULES: readonly INumberRule[] = [
   { re: new RegExp(`^pool\\.envelope\\.(${KIND_ALT})\\.threads$`), min: 1, max: 4096, integer: true, form: 'whole threads 1..4096' },
   { re: new RegExp(`^pool\\.envelope\\.(${KIND_ALT})\\.mem-gb$`), min: 0, max: 4096, integer: false, form: 'GiB 0..4096' },
   { re: /^pool\.harness-share-pct$/, min: 0, max: 100, integer: true, form: 'a whole percent 0..100' },
+  { re: /^pool\.path\.slow-ms$/, min: 1, max: 60000, integer: true, form: 'whole milliseconds 1..60000' },
 ];
 
 export const isPoolNumberKey = (key: string): boolean => NUMBER_RULES.some((r) => r.re.test(key));
@@ -247,6 +249,9 @@ export interface IPoolBudget {
 
 export const harnessSharePctOf = (config: TConfigValue): number => configNumber(config, POOL_HARNESS_SHARE_KEY) ?? DEFAULT_HARNESS_SHARE_PCT;
 
+/** `pool.path.slow-ms` (vel-RETRO-R2): a tailnet RTT at or above it is slow. */
+export const pathSlowMsOf = (config: TConfigValue): number => configNumber(config, POOL_PATH_SLOW_KEY) ?? DEFAULT_POOL_PATH_SLOW_MS;
+
 /**
  * The host's one budget (vel-D4 §5). Threads and memory come from fleet config, else the read; the reserve
  * defaults to max(2, 25 % of threads) and max(4 GiB, 15 % of memory). An unknown host has no budget, never zero.
@@ -398,6 +403,7 @@ export const hostState = (read: TPoolHostRead, leases: readonly ILease[], tabs: 
       slots,
       agentTabs: tabs.worker + tabs.controlPlane,
       budget: budgetView,
+      path: read.path ? pathView(read.path, pathSlowMsOf(config)) : null,
     },
     budget,
     ledger,

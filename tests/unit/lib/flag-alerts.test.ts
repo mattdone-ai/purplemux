@@ -15,7 +15,7 @@ vi.mock('@/lib/logger', () => {
 
 const {
   DEFAULT_FLAG_REPEAT_MINUTES, FLAG_ALERT_CONFIG_KEYS, createFlagAlertState, flagKey, fleetFlagScan, flowFlagScan,
-  parseFlagAlertConfig, runFlagAlertTick, runScheduledFlagAlertTick, startFlagAlerts, stopFlagAlerts,
+  parseFlagAlertConfig, poolFlagScan, pruneFlagSources, runFlagAlertTick, runScheduledFlagAlertTick, startFlagAlerts, stopFlagAlerts,
 } = await import('@/lib/flag-alerts');
 const { DEFAULT_FLOW_THRESHOLDS } = await import('@/lib/flow-flags');
 const { resolveThresholds } = await import('@/lib/ledger-alarms');
@@ -95,6 +95,8 @@ interface IScript {
   view: IFleetView | Error;
   flows: Record<string, IFlowRecord | null | Error>;
   finder: Map<string, IFinderResult>;
+  /** The portfolio Scrum Master selection (vel-RETRO-R2); an Error is an unreadable store. */
+  seat: { managerWorkspaceId: string; managerTabId: string; workspaceIds: string[] } | null | Error;
 }
 
 const harness = (initial: Partial<IScript> = {}) => {
@@ -104,6 +106,7 @@ const harness = (initial: Partial<IScript> = {}) => {
     view: view([row('ws-a', 'tab-orch')]),
     flows: {},
     finder: new Map(),
+    seat: null,
     ...initial,
   };
   const sent: Array<{ draft: TAlertDraft; workspaceDir: string | null | undefined }> = [];
@@ -138,6 +141,10 @@ const harness = (initial: Partial<IScript> = {}) => {
     routeTabEvent: async (event) => {
       routed.push(event);
       return { class: event.class, delivered: event.class === 'urgent', seq: routed.length, duplicate: false };
+    },
+    scrumMaster: async () => {
+      if (script.seat instanceof Error) throw script.seat;
+      return script.seat;
     },
     alarmCopies: async () => ({ held: false, lastDeliveredAt: null }),
   };
@@ -842,5 +849,217 @@ describe('server wiring (ADR-0032 decision 2)', () => {
     const start = server.indexOf('await getMissionControlRuntime().start();');
     expect(server.indexOf('startFlagAlerts();', start)).toBeGreaterThan(start);
     expect(server.match(/startFlagAlerts\(\)/g)).toHaveLength(1);
+  });
+});
+
+describe('pool path flags (vel-RETRO-R2)', () => {
+  type TPoolHostPath = NonNullable<IFleetView['poolPaths']>[number];
+  const SEAT = { managerWorkspaceId: 'ws-sm', managerTabId: 'tab-sm', workspaceIds: ['ws-a'] };
+  const hostPath = (host: string, kind: 'relayed' | 'direct' | 'unknown', rttMs: number | null = kind === 'relayed' ? 1170 : 4, slowMs = 250): TPoolHostPath => {
+    const alert = kind === 'relayed' ? 'tailnet-relayed' : kind === 'direct' && rttMs !== null && rttMs >= slowMs ? 'tailnet-slow' : null;
+    return {
+      host,
+      path: {
+        kind, alert, alias: host, address: `${host}.tailnet.example`, ip: 'fd7a:115c:a1e0::2', peer: host, region: kind === 'relayed' ? 'sin' : null,
+        rttMs, relayedReads: kind === 'relayed' ? 2 : 0, slowMs, measuredAt: new Date(T0).toISOString(), reason: kind === 'unknown' ? 'timeout waiting for ping reply' : null,
+      },
+      text: alert === 'tailnet-relayed' ? `${host} tailnet path relayed via DERP(sin), RTT ${rttMs} ms` : alert ? `${host} tailnet path slow: RTT ${rttMs} ms (threshold ${slowMs} ms)` : null,
+    };
+  };
+  const smView = (paths: TPoolHostPath[] | undefined, extra: Partial<IFleetView> = {}) =>
+    view([row('ws-a', 'tab-orch'), row('ws-sm', 'tab-sm')], { ...(paths ? { poolPaths: paths } : {}), ...extra });
+  const smHarness = (over: Parameters<typeof harness>[0] = {}) =>
+    harness({ workspaces: [workspace('ws-a'), workspace('ws-sm', 'tab-sm')], seat: SEAT, view: smView([hostPath('exec-1', 'direct')]), ...over });
+  const KEY = 'pool:fleet:tailnet-path:exec-1';
+
+  describe('poolFlagScan', () => {
+    it('raises a relayed host and a slow host, keyed by the fixed fleet part, and reads a direct host', () => {
+      const scan = poolFlagScan(smView([hostPath('exec-1', 'relayed'), hostPath('exec-2', 'direct', 300), hostPath('host-b-lan', 'direct')]));
+      expect(scan.flags.map((f) => [f.key, f.text])).toEqual([
+        [KEY, 'exec-1 tailnet path relayed via DERP(sin), RTT 1170 ms'],
+        ['pool:fleet:tailnet-path:exec-2', 'exec-2 tailnet path slow: RTT 300 ms (threshold 250 ms)'],
+      ]);
+      expect([...scan.read].sort()).toEqual(['pool', 'pool:exec-1', 'pool:exec-2', 'pool:host-b-lan']);
+      expect([...scan.failed]).toEqual([]);
+    });
+
+    it('a relayed host raises one rule only: relayed wins over slow', () => {
+      const scan = poolFlagScan(smView([hostPath('exec-1', 'relayed', 1170)]));
+      expect(scan.flags.map((f) => f.rule)).toEqual(['tailnet-relayed']);
+    });
+
+    it('reads an unknown or unmeasured path as a failed source, never as a clear', () => {
+      const scan = poolFlagScan(smView([hostPath('exec-1', 'unknown', null), { host: 'exec-2', path: null, text: null }]));
+      expect(scan.flags).toEqual([]);
+      expect([...scan.failed].sort()).toEqual(['pool:exec-1', 'pool:exec-2']);
+    });
+
+    it('fails the pool source when the view carries no paths or names their read error', () => {
+      expect([...poolFlagScan(smView(undefined)).failed]).toEqual(['pool']);
+      expect([...poolFlagScan(null).failed]).toEqual(['pool']);
+      expect([...poolFlagScan(smView([], { errors: [{ scope: 'pool paths', error: 'read failed' }] })).failed]).toEqual(['pool']);
+      expect(fleetFlagScan(smView([], { errors: [{ scope: 'pool paths', error: 'read failed' }] }), [workspace('ws-a')]).failed.has('fleet-view')).toBe(false);
+    });
+  });
+
+  it('sends one digest line to the Scrum Master seat when a path turns relayed, and no phone alert', async () => {
+    const h = smHarness();
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    const result = await h.tick(T0 + MIN);
+
+    expect(h.routed).toEqual([{
+      workspaceId: 'ws-sm', tabId: 'tab-sm', kind: 'flag', text: 'exec-1 tailnet path relayed via DERP(sin), RTT 1170 ms', class: 'digest', rule: 'tailnet-relayed',
+    }]);
+    expect(result.routed).toHaveLength(1);
+    expect(h.sent).toEqual([]);
+
+    await h.tick(T0 + 2 * MIN);
+    expect(h.routed).toHaveLength(1);
+  });
+
+  it('alerts once for a path relayed at its first read: a restart, the retro case (review r1 M1)', async () => {
+    const h = smHarness({ view: smView([hostPath('exec-1', 'relayed')]) });
+    const first = await h.tick(T0);
+    await h.tick(T0 + MIN);
+    await h.tick(T0 + 61 * MIN);
+
+    expect(first.baseline).toBe(true);
+    expect(h.routed).toEqual([expect.objectContaining({ tabId: 'tab-sm', rule: 'tailnet-relayed', class: 'digest' })]);
+    expect(h.sent).toEqual([]);
+  });
+
+  it('alerts once for a host the pool adds while it is relayed (review r1 M1)', async () => {
+    const h = smHarness();
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'direct'), hostPath('exec-new', 'relayed')]);
+    await h.tick(T0 + MIN);
+    await h.tick(T0 + 2 * MIN);
+
+    expect(h.routed.map((e) => e.text)).toEqual(['exec-new tailnet path relayed via DERP(sin), RTT 1170 ms']);
+  });
+
+  it('keeps the start-up baseline for every other flag: only a pool flag alerts at its first read', async () => {
+    const scan = poolFlagScan(smView([hostPath('exec-1', 'relayed')]));
+    expect(scan.flags.map((f) => f.alertAtFirstRead)).toEqual([true]);
+    expect(fleetFlagScan(smView([hostPath('exec-1', 'relayed')]), [workspace('ws-a')]).flags.every((f) => f.alertAtFirstRead === undefined)).toBe(true);
+  });
+
+  it('a first-read alert still keeps the repeat window: a re-raise inside it says nothing', async () => {
+    const h = smHarness({ view: smView([hostPath('exec-1', 'relayed')]) });
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'direct')]);
+    await h.tick(T0 + MIN);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + 2 * MIN);
+    expect(h.routed).toHaveLength(1);
+  });
+
+  it('alerts once per host per repeat window, whatever the rule: relayed, then slow, then relayed (review r1 L4)', async () => {
+    const h = smHarness();
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + MIN);
+    h.script.view = smView([hostPath('exec-1', 'direct', 400)]);
+    await h.tick(T0 + 2 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'direct')]);
+    await h.tick(T0 + 3 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'direct', 400)]);
+    await h.tick(T0 + 4 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + 5 * MIN);
+    expect(h.routed.map((e) => e.rule)).toEqual(['tailnet-relayed']);
+
+    h.script.view = smView([hostPath('exec-1', 'direct')]);
+    await h.tick(T0 + 62 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'direct', 400)]);
+    await h.tick(T0 + 63 * MIN);
+    expect(h.routed.map((e) => e.rule)).toEqual(['tailnet-relayed', 'tailnet-slow']);
+  });
+
+  it('with no Scrum Master selection sends nothing and names the key as having no target', async () => {
+    const h = smHarness({ seat: null });
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    const result = await h.tick(T0 + MIN);
+    expect(result.noTarget).toEqual([KEY]);
+    expect(h.routed).toEqual([]);
+    expect(logs.warn).toHaveBeenCalledWith(expect.objectContaining({ key: KEY, reason: 'no-scrum-master' }), 'flag-alert-no-target');
+  });
+
+  it('refuses a selected tab that is no longer its workspace orchestrator', async () => {
+    const h = smHarness({ seat: { ...SEAT, managerTabId: 'tab-old' } });
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    const result = await h.tick(T0 + MIN);
+    expect(result.noTarget).toEqual([KEY]);
+    expect(logs.warn).toHaveBeenCalledWith(expect.objectContaining({ reason: 'scrum-master-not-current' }), 'flag-alert-no-target');
+  });
+
+  it('retries the raise on the next tick when the selection cannot be read', async () => {
+    const h = smHarness({ seat: new Error('portfolio.db locked') });
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    expect((await h.tick(T0 + MIN)).targetUnknown).toEqual([KEY]);
+    h.script.seat = SEAT;
+    await h.tick(T0 + 2 * MIN);
+    expect(h.routed.map((e) => e.tabId)).toEqual(['tab-sm']);
+  });
+
+  it('retries the raise on the next tick when the router refuses the line', async () => {
+    const h = smHarness();
+    let refuse = true;
+    const route = h.deps.routeTabEvent;
+    h.deps.routeTabEvent = async (event) => {
+      if (refuse) throw new Error('ledger busy');
+      return route(event);
+    };
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + MIN);
+    expect(h.routed).toEqual([]);
+    refuse = false;
+    await h.tick(T0 + 2 * MIN);
+    expect(h.routed).toHaveLength(1);
+  });
+
+  it('an unknown path neither clears nor raises again; a flapping path says it once per repeat window', async () => {
+    const h = smHarness();
+    await h.tick(T0);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + MIN);
+    h.script.view = smView([hostPath('exec-1', 'unknown', null)]);
+    await h.tick(T0 + 2 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + 3 * MIN);
+    expect(h.routed).toHaveLength(1);
+
+    h.script.view = smView([hostPath('exec-1', 'direct')]);
+    await h.tick(T0 + 4 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + 5 * MIN);
+    expect(h.routed).toHaveLength(1);
+
+    h.script.view = smView([hostPath('exec-1', 'direct')]);
+    await h.tick(T0 + 70 * MIN);
+    h.script.view = smView([hostPath('exec-1', 'relayed')]);
+    await h.tick(T0 + 71 * MIN);
+    expect(h.routed).toHaveLength(2);
+  });
+
+  it('forgets the source of a host the pool no longer lists', async () => {
+    const h = smHarness();
+    await h.tick(T0);
+    expect(h.state.readSources.has('pool:exec-1')).toBe(true);
+    h.script.view = smView([]);
+    await h.tick(T0 + MIN);
+    expect(h.state.readSources.has('pool:exec-1')).toBe(false);
+  });
+
+  it('keeps a host source while the pool paths could not be read', () => {
+    const state = createFlagAlertState();
+    state.readSources.add('pool:exec-1');
+    pruneFlagSources(state, [workspace('ws-a')], poolFlagScan(smView(undefined)));
+    expect(state.readSources.has('pool:exec-1')).toBe(true);
   });
 });

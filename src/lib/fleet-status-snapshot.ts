@@ -10,7 +10,7 @@ import type {
   IFleetTabFacts, IFleetThresholds, IFleetUnattributed, IFleetView, IFleetWip, TComposerReading,
 } from '@/types/fleet-status';
 import type { ILease } from '@/types/lease';
-import type { IPoolWouldRefuseView } from '@/types/pool';
+import type { IPoolHostPath, IPoolWouldRefuseView } from '@/types/pool';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { ITab } from '@/types/terminal';
 import type { ILedgerItem } from '@/types/ledger';
@@ -42,6 +42,8 @@ export interface IFleetDeps {
   providerId: (tab: ITab) => string | null;
   /** The pool's would-refuse counter; absent: the view carries none. */
   poolWouldRefuse?: () => Promise<IPoolWouldRefuseView>;
+  /** Each remote pool host's tailnet path, from the last pool read (vel-RETRO-R2); absent: the view carries none. */
+  poolPaths?: () => Promise<IPoolHostPath[]>;
   /**
    * The seat items of a workspace (ADR-0036), open and closed, for the rotation coverage (vel-D5 AC6); throws when
    * the ledger holds more than it answers, so a total is never silently partial. Absent: no section.
@@ -115,15 +117,17 @@ const composerSince = (tab: ITab, status: IClientTabStatusEntry, reading: TCompo
 
 export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promise<IFleetView> => {
   const errors: IFleetView['errors'] = [];
-  const [workspaces, thresholds, watches, leases, openers, pool] = await Promise.all([
+  const [workspaces, thresholds, watches, leases, openers, pool, poolPaths] = await Promise.all([
     deps.workspaces(),
     readThresholds(deps.config),
     settle(deps.watches),
     settle(deps.leases),
     settle(async () => deps.openers()),
     deps.poolWouldRefuse ? settle(deps.poolWouldRefuse) : Promise.resolve(null),
+    deps.poolPaths ? settle(deps.poolPaths) : Promise.resolve(null),
   ]);
   if (pool && !pool.ok) errors.push({ scope: 'pool', error: pool.error });
+  if (poolPaths && !poolPaths.ok) errors.push({ scope: 'pool paths', error: poolPaths.error });
   // Each workspace's cap: its own key wins over the fleet key (story 17 AC 8).
   const tabCap = await settle(async () =>
     new Map(await Promise.all(workspaces.map(async (w) => [w.id, (await readTabCap(deps.config, w.id)).cap] as const))));
@@ -244,6 +248,7 @@ export const buildFleetView = async (deps: IFleetDeps, now = Date.now()): Promis
     errors,
     ...(wip ? { wip } : {}),
     ...(pool?.ok ? { pool: pool.value } : {}),
+    ...(poolPaths?.ok ? { poolPaths: poolPaths.value } : {}),
     ...(rotation ? { rotation } : {}),
   };
 };
@@ -291,6 +296,7 @@ const realDeps = async (): Promise<IFleetDeps> => {
     config: async (key) => valueOf(await fleetConfig, key)?.value ?? null,
     providerId: (tab) => getProviderByPanelType(tab.panelType)?.id ?? null,
     poolWouldRefuse: async () => (await import('@/lib/pool-service')).readPoolWouldRefuse(),
+    poolPaths: async () => (await import('@/lib/pool-service')).readPoolPaths(),
     seatItems: async (workspaceId) => {
       const { getLedgerStore } = await import('@/lib/ledger-store');
       const read = getLedgerStore().items(workspaceId, { type: 'seat', limit: SEAT_ITEMS_LIMIT }, Date.now());

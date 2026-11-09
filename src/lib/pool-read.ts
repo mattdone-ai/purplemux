@@ -1,8 +1,17 @@
+import { execFile } from 'child_process';
+import dns from 'dns/promises';
 import os from 'os';
+import { promisify } from 'util';
 import { readHostMetrics } from '@/lib/host-metrics';
 import { createLogger } from '@/lib/logger';
 import { describeRemoteFailure, originName, readRemoteHosts, runSsh } from '@/lib/remote-host';
-import type { IPoolDisk, IPoolGpu, IPoolMetrics, IPoolSweepState, IPoolUnitState, TPoolHostRead, TPoolSweepStatus } from '@/types/pool';
+import {
+  TAILNET_PATH_TTL_MS, TAILSCALE_PING_TIMEOUT_S, ageTailnetPath, followTailnetPath, isTailnetPathSettled, measureTailnetPath,
+  type ITailnetPathDeps,
+} from '@/lib/tailnet-path';
+import type {
+  IPoolDisk, IPoolGpu, IPoolMetrics, IPoolPathRead, IPoolSweepState, IPoolUnitState, TPoolHostRead, TPoolSweepStatus,
+} from '@/types/pool';
 
 // The pool read model (ADR-0039 §1): this host through host-metrics, each
 // registered remote host through one ssh read every 30 s. A read that fails
@@ -15,6 +24,8 @@ export const POOL_READ_INTERVAL_MS = 30_000;
 export const POOL_READ_TIMEOUT_MS = 5_000;
 /** A known read older than this is unknown: the poller missed two cycles. */
 export const POOL_READ_STALE_MS = 3 * POOL_READ_INTERVAL_MS;
+/** A path measurement stands for its TTL, so it turns unknown only once it is that old and the reads stopped. */
+export const POOL_PATH_STALE_MS = TAILNET_PATH_TTL_MS + POOL_READ_STALE_MS;
 
 export const POOL_FALLBACK_KEY_PREFIX = 'pool.fallback.';
 
@@ -159,6 +170,8 @@ export interface IPoolReaderDeps {
   fallbackOf: (alias: string) => Promise<string | null>;
   runRemote: (alias: string, script: string, timeoutMs: number) => Promise<string>;
   readLocal: () => Promise<IPoolMetrics | { error: string }>;
+  /** The tailnet path to an alias (vel-RETRO-R2), a local measurement; absent: no path is measured. */
+  measurePath?: (alias: string) => Promise<IPoolPathRead>;
 }
 
 const errorText = (err: unknown): string => (err instanceof PoolReadError ? err.message : describeRemoteFailure(err));
@@ -169,7 +182,37 @@ export class PoolReader {
 
   constructor(private readonly deps: IPoolReaderDeps) {}
 
+  /** The last measurement of each alias (review r1 L6): it stands for its TTL, so a host is not pinged every read. */
+  private readonly paths = new Map<string, IPoolPathRead>();
+  /** The pool host each measured alias was read for, so a host that leaves the pool takes its aliases along. */
+  private readonly pathHosts = new Map<string, string>();
+
+  /**
+   * The path of the alias the read went through, else the host's own; a measurement that throws is `unknown`. It runs
+   * after the host read and at most once per TTL per alias; an unknown measurement, or a relayed one not yet
+   * confirmed by a second (L3), is taken again at the next read.
+   */
+  private async withPath(read: TPoolHostRead): Promise<TPoolHostRead> {
+    const { measurePath } = this.deps;
+    if (!measurePath) return read;
+    const alias = read.via ?? read.host;
+    const previous = this.paths.get(alias);
+    if (previous && isTailnetPathSettled(previous, this.deps.now())) return { ...read, path: previous };
+    const measured = await measurePath(alias).catch((err: unknown): IPoolPathRead => ({
+      kind: 'unknown', alias, address: null, ip: null, peer: null, region: null, rttMs: null, measuredAt: this.deps.now(),
+      reason: err instanceof Error ? err.message : String(err), relayedReads: 0,
+    }));
+    const path = followTailnetPath(previous, measured);
+    this.paths.set(alias, path);
+    this.pathHosts.set(alias, read.host);
+    return { ...read, path };
+  }
+
   private async readOne(host: string): Promise<TPoolHostRead> {
+    return this.withPath(await this.readHost(host));
+  }
+
+  private async readHost(host: string): Promise<TPoolHostRead> {
     const previous = this.reads.get(host);
     const lastReadAt = previous?.readAt ?? null;
     const tried: string[] = [];
@@ -196,6 +239,11 @@ export class PoolReader {
       try {
         const hosts = await this.deps.remoteHosts();
         for (const known of [...this.reads.keys()]) if (!hosts.includes(known)) this.reads.delete(known);
+        for (const [alias, host] of [...this.pathHosts]) {
+          if (hosts.includes(host)) continue;
+          this.paths.delete(alias);
+          this.pathHosts.delete(alias);
+        }
         const now = this.deps.now();
         await Promise.all(hosts.map(async (host) => {
           const prev = this.reads.get(host);
@@ -229,14 +277,36 @@ export class PoolReader {
     const remote = hosts.map((host): TPoolHostRead => {
       const read = this.reads.get(host);
       if (!read) return { host, local: false, state: 'unknown', readAt: null, via: null, reason: 'not read yet', retryAt: now };
+      const path = read.path ? { path: ageTailnetPath(read.path, now, POOL_PATH_STALE_MS) } : {};
       if (read.state === 'known' && now - read.readAt > POOL_READ_STALE_MS) {
-        return { host, local: false, state: 'unknown', readAt: read.readAt, via: read.via, reason: `last read ${Math.round((now - read.readAt) / 1000)} s ago`, retryAt: now };
+        return { host, local: false, state: 'unknown', readAt: read.readAt, via: read.via, reason: `last read ${Math.round((now - read.readAt) / 1000)} s ago`, retryAt: now, ...path };
       }
-      return read;
+      return { ...read, ...path };
     });
     return [localRead, ...remote];
   }
 }
+
+const execFileP = promisify(execFile);
+const LOCAL_EXEC_TIMEOUT_MS = 2_000;
+const PING_EXEC_TIMEOUT_MS = (TAILSCALE_PING_TIMEOUT_S + 2) * 1_000;
+
+export const defaultTailnetPathDeps = (): ITailnetPathDeps => ({
+  now: () => Date.now(),
+  sshConfig: async (alias) => (await execFileP('ssh', ['-G', '--', alias], { timeout: LOCAL_EXEC_TIMEOUT_MS })).stdout,
+  resolve: async (name) => (await dns.lookup(name, { all: true })).map((a) => a.address),
+  ping: async (ip) => {
+    try {
+      return (await execFileP('tailscale', ['ping', '-c', '1', '--timeout', `${TAILSCALE_PING_TIMEOUT_S}s`, ip], { timeout: PING_EXEC_TIMEOUT_MS })).stdout;
+    } catch (err) {
+      const e = err as { code?: unknown; stdout?: unknown; killed?: boolean };
+      // A non-zero exit still prints the pong it got (a DERP pong exits 1); only a run that could not start or was
+      // killed at its timeout is a failure.
+      if (typeof e.code === 'number' && !e.killed && typeof e.stdout === 'string') return e.stdout;
+      throw err;
+    }
+  },
+});
 
 export const defaultPoolReaderDeps = (): IPoolReaderDeps => ({
   now: () => Date.now(),
@@ -250,6 +320,10 @@ export const defaultPoolReaderDeps = (): IPoolReaderDeps => ({
   },
   runRemote: async (alias, script, timeoutMs) => (await runSsh(alias, 'sh -s', { timeoutMs, input: script })).stdout,
   readLocal: readLocalPoolMetrics,
+  measurePath: (() => {
+    const deps = defaultTailnetPathDeps();
+    return (alias: string) => measureTailnetPath(deps, alias);
+  })(),
 });
 
 const g = globalThis as unknown as { __ptPoolReader?: PoolReader; __ptPoolPoller?: { timer: NodeJS.Timeout | null } };

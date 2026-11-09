@@ -93,7 +93,7 @@ const checkPoolValue = (key: string, value: string): void => {
     return;
   }
   throw new FleetConfigError('config-invalid', `${key} is not a pool key: pool.slots.<host>.<kind>, pool.fallback.<alias>, pool.gate-host.<host>, `
-    + 'pool.budget.<host>.<threads|mem-gb|reserve-threads|reserve-mem-gb|max-load>, pool.envelope.<kind>.<threads|mem-gb>, pool.harness-share-pct or pool.mode');
+    + 'pool.budget.<host>.<threads|mem-gb|reserve-threads|reserve-mem-gb|max-load>, pool.envelope.<kind>.<threads|mem-gb>, pool.harness-share-pct, pool.path.slow-ms or pool.mode');
 };
 
 /** Values the remote keys must hold, checked at write time so a bad one never reaches a create. */

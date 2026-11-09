@@ -100,6 +100,7 @@ const fleet = (options: { route?: string | null; thresholds?: Record<string, str
       if (script.routeDown) throw new Error('router down');
       return router.route(event);
     },
+    scrumMaster: async () => null,
     alarmCopies: async (workspaceId, tabId, opening, since) => {
       if (script.copiesDown) throw new Error('SQLITE_BUSY');
       return table().copies(workspaceId, tabId, 'alarm', opening, since);

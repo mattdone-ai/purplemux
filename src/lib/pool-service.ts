@@ -22,6 +22,7 @@ import {
   parsePoolLeaseName,
   parsePoolQueueName,
   parseTicket,
+  pathSlowMsOf,
   placeWork,
   poolHostId,
   poolModeOf,
@@ -39,9 +40,11 @@ import {
 import { getPoolReader } from '@/lib/pool-read';
 import { recentTabStarts, recordWouldRefuse, wouldRefuseView } from '@/lib/pool-runtime';
 import { isValidRemoteHostName } from '@/lib/remote-host';
+import { pathAlertText, pathView } from '@/lib/tailnet-path';
 import type { ILease, ILeaseHolder } from '@/types/lease';
 import type {
-  IPoolAcquireResult, IPoolEnvelopeView, IPoolPlacementRequest, IPoolQueuedResult, IPoolView, TPoolHostRead, TPoolPlacement, TPoolRefusalReason,
+  IPoolAcquireResult, IPoolEnvelopeView, IPoolHostPath, IPoolPlacementRequest, IPoolQueuedResult, IPoolView, TPoolHostRead, TPoolPlacement,
+  TPoolRefusalReason,
 } from '@/types/pool';
 
 // The pool's operations (ADR-0039, vel-D4): the view the board and `pool show` read,
@@ -142,6 +145,19 @@ const ticketsOf = (leases: readonly ILease[]): IPoolTicket[] =>
 export const readPoolView = async (deps: IPoolServiceDeps = defaultPoolServiceDeps()): Promise<IPoolView> => {
   const [facts, leases] = await Promise.all([gatherFacts(deps), deps.leases()]);
   return buildPoolView(statesOf(facts, leases), deps.now(), ticketsOf(leases), wouldRefuseView(poolModeOf(facts.config)));
+};
+
+/**
+ * Each remote host's tailnet path, as the last pool read measured it (vel-RETRO-R2): never a measurement of its own.
+ * A fleet config that cannot be read judges slowness by the default threshold.
+ */
+export const readPoolPaths = async (deps: Pick<IPoolServiceDeps, 'reads' | 'config'> = defaultPoolServiceDeps()): Promise<IPoolHostPath[]> => {
+  const [reads, config] = await Promise.all([deps.reads(), deps.config().catch((): TConfigValue => () => null)]);
+  const slowMs = pathSlowMsOf(config);
+  return reads.filter((r) => !r.local).map((r) => {
+    const path = r.path ? pathView(r.path, slowMs) : null;
+    return { host: r.host, path, text: path?.alert ? pathAlertText(r.host, path) : null };
+  });
 };
 
 /** The counter the fleet view carries (review r1 F1); a fleet config that cannot be read reports shadow, the default. */

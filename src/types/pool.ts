@@ -84,6 +84,60 @@ export interface IPoolMetrics {
 }
 
 /**
+ * How ssh reaches a remote host over the tailnet (vel-RETRO-R2). `not-tailnet`: the alias dials an address outside the
+ * tailnet (a LAN alias such as `host-b-lan`); `unknown`: not measured, never read as `direct`.
+ */
+export type TPoolPathKind = 'direct' | 'relayed' | 'not-tailnet' | 'unknown';
+
+export type TPoolPathAlert = 'tailnet-relayed' | 'tailnet-slow';
+
+/** One measurement, as the pool reader keeps it. */
+export interface IPoolPathRead {
+  kind: TPoolPathKind;
+  /** The alias measured: the one that answered the pool read, else the host's own. */
+  alias: string;
+  /** What ssh dials (`ssh -G` hostname); null when it could not be read. */
+  address: string | null;
+  ip: string | null;
+  /** The peer name in the `pong from` line. */
+  peer: string | null;
+  /** The DERP region of a relayed path (`sin`), or `peer-relay`. */
+  region: string | null;
+  rttMs: number | null;
+  measuredAt: number;
+  reason: string | null;
+  /** Relayed measurements in a row up to this one (0 unless relayed); a relayed path alerts at 2 (review r1 L3). */
+  relayedReads: number;
+}
+
+/** The path as the pool view and the fleet view serve it. Placement reads none of it: the pool reports, never refuses. */
+export interface IPoolPathView {
+  kind: TPoolPathKind;
+  /** `tailnet-relayed` (on 2 relayed reads in a row) wins over `tailnet-slow`; null when fine or not measured. */
+  alert: TPoolPathAlert | null;
+  alias: string;
+  address: string | null;
+  ip: string | null;
+  peer: string | null;
+  region: string | null;
+  rttMs: number | null;
+  /** Relayed measurements in a row; a relayed path with 1 is not yet an alert. */
+  relayedReads: number;
+  /** `pool.path.slow-ms`: an RTT at or above it is slow. */
+  slowMs: number;
+  measuredAt: string;
+  reason: string | null;
+}
+
+/** A remote host's path as the fleet view carries it; `text` is the alert line, null while the path raises none. */
+export interface IPoolHostPath {
+  host: string;
+  /** Null: the host was not measured yet. */
+  path: IPoolPathView | null;
+  text: string | null;
+}
+
+/**
  * One host's last read. `unknown` carries no metrics: a failed read is never
  * read as zero load or zero memory, and nothing new is placed there.
  */
@@ -92,8 +146,14 @@ export type TPoolHostRead =
     host: string; local: boolean; state: 'known'; readAt: number; via: string | null; metrics: IPoolMetrics;
     /** Set when the host's own alias failed and only the fallback answered: shown, never placed on. */
     primaryFailure?: string;
+    /** The tailnet path, measured with the read (remote hosts only). */
+    path?: IPoolPathRead;
   }
-  | { host: string; local: boolean; state: 'unknown'; readAt: number | null; via: string | null; reason: string; retryAt: number };
+  | {
+    host: string; local: boolean; state: 'unknown'; readAt: number | null; via: string | null; reason: string; retryAt: number;
+    /** A host that does not answer ssh still has a path to report: a relayed path is a likely cause. */
+    path?: IPoolPathRead;
+  };
 
 export interface IPoolSlotUse {
   used: number;
@@ -124,6 +184,8 @@ export interface IPoolHostView {
   agentTabs: number;
   /** Null for an unknown host: its budget is not known, never zero. */
   budget: IPoolBudgetView | null;
+  /** The tailnet path (vel-RETRO-R2); null for this host, and for a remote host not measured yet. */
+  path: IPoolPathView | null;
 }
 
 export interface IPoolTotals {

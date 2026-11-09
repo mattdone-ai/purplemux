@@ -1,4 +1,4 @@
-import type { IPoolWouldRefuseView } from '@/types/pool';
+import type { IPoolHostPath, IPoolWouldRefuseView } from '@/types/pool';
 import type { TPanelType } from '@/types/terminal';
 import type { IClientTabStatusEntry } from '@/types/status';
 
@@ -104,6 +104,8 @@ export interface IFleetView {
   wip?: Record<string, IFleetWip>;
   /** The pool's shadow-mode would-refuse counter (vel-D4 review r1 F1); absent when it could not be read. */
   pool?: IPoolWouldRefuseView;
+  /** Each remote pool host's tailnet path (vel-RETRO-R2); absent when the pool reads could not be read. */
+  poolPaths?: IPoolHostPath[];
   /** Rotation coverage (vel-D5): workers that rotate, rotations and refusals, wait-to-rotate; absent when unread. */
   rotation?: import('@/types/rotation-checkpoint').IRotationCoverage;
 }

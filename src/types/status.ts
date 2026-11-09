@@ -294,7 +294,7 @@ export interface IAlertQuestionOption {
   needsText: boolean;
 }
 
-export type TAlertFlagSource = 'fleet' | 'flow' | 'ledger';
+export type TAlertFlagSource = 'fleet' | 'flow' | 'ledger' | 'pool';
 
 export interface IAlertFlag {
   source: TAlertFlagSource;

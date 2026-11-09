@@ -179,6 +179,24 @@ const PoolLine = ({ view }: { view: IFleetView }) => {
   );
 };
 
+/**
+ * Each remote host whose tailnet path is relayed or slow (vel-RETRO-R2), in the line the alert carries. The pool
+ * places work there as before; the line says why that host is slow. Absent paths (an older server): no line.
+ */
+const PoolPathLines = ({ view }: { view: IFleetView }) => {
+  const flagged = (view.poolPaths ?? []).filter((p) => p.path?.alert && p.text);
+  if (!flagged.length) return null;
+  return (
+    <>
+      {flagged.map((p) => (
+        <p key={p.host} className="text-ui-amber" data-pool-path-host={p.host} data-pool-path-alert={p.path?.alert}>
+          {p.text}
+        </p>
+      ))}
+    </>
+  );
+};
+
 export interface IFleetFilter {
   showAll: boolean;
   workspace: string | null;
@@ -204,6 +222,7 @@ const FleetView = ({ view, filter, onFilter }: { view: IFleetView; filter: IFlee
       <p className="text-muted-foreground" data-thresholds="">{thresholdsText(view)}</p>
       <WipLine view={view} workspace={workspace} />
       <PoolLine view={view} />
+      <PoolPathLines view={view} />
       {view.errors.map((e) => (
         <p key={`${e.scope}:${e.error}`} className="text-destructive" data-state="partial-error">Could not read {e.scope}: {e.error}</p>
       ))}

@@ -511,3 +511,31 @@ describe('tab starts the read cannot show yet (review r1 F6)', () => {
     });
   });
 });
+
+describe('the host view serves the tailnet path (vel-RETRO-R2)', () => {
+  const relayedRead = (host: string, rttMs: number, kind: 'relayed' | 'direct' = 'relayed'): TPoolHostRead => ({
+    ...known(host, false, { threads: 64, memTotalBytes: 373 * GIB }),
+    path: { kind, alias: host, address: `${host}.tailnet.example`, ip: 'fd7a:115c:a1e0::2', peer: host, region: kind === 'relayed' ? 'sin' : null, rttMs, measuredAt: NOW, reason: null, relayedReads: kind === 'relayed' ? 2 : 0 },
+  });
+
+  it('serves a relayed path with its alert, and this host none', () => {
+    const [local, remote] = states([md(), relayedRead('exec-1', 1170)]);
+    expect(local.view.path).toBeNull();
+    expect(remote.view.path).toMatchObject({ kind: 'relayed', alert: 'tailnet-relayed', region: 'sin', rttMs: 1170, slowMs: 250 });
+  });
+
+  it('judges a direct path slow by pool.path.slow-ms, else by the default 250 ms', () => {
+    expect(states([relayedRead('exec-1', 300, 'direct')])[0].view.path?.alert).toBe('tailnet-slow');
+    expect(states([relayedRead('exec-1', 300, 'direct')], [], {}, cfg({ 'pool.path.slow-ms': '500' }))[0].view.path).toMatchObject({ alert: null, slowMs: 500 });
+    expect(states([relayedRead('exec-1', 300, 'direct')], [], {}, cfg({ 'pool.path.slow-ms': 'soon' }))[0].view.path?.slowMs).toBe(250);
+  });
+
+  it('never refuses a host for its path: placement reads none of it (the owner keeps the hosts)', () => {
+    const quiet = { threads: 64, memTotalBytes: 373 * GIB, load1: 0, load5: 0, memAvailableBytes: 300 * GIB };
+    const relayed = { ...relayedRead('host-b-lan', 1170), metrics: metrics(quiet) } as TPoolHostRead;
+    const plain = known('host-b-lan', false, quiet);
+    const req: IPoolPlacementRequest = { kind: 'gate', memGb: 8 };
+    expect(place([md({ load1: 30, load5: 30 }), relayed], req)).toEqual(place([md({ load1: 30, load5: 30 }), plain], req));
+    expect(place([md({ load1: 30, load5: 30 }), relayed], req)).toMatchObject({ ok: true, host: 'host-b-lan' });
+  });
+});

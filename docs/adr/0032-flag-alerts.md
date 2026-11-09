@@ -124,3 +124,24 @@ item alarms (consult ruling 13).
 Why (consult ruling 13): edge-only never says a missed line again, and an item that crossed its threshold while the
 server was down would never be alarmed at all. The guard keeps a busy or dead holder to one held line per item; the
 router's held-tab report (ADR-0035 §3) tells the human after an hour.
+
+## Amendment vel-RETRO-R2 (2026-11-09): pool path flags, §5 source `pool`
+Consult ruling: `docs/design/vel-retro-r2-tailnet-path.md`. ADR-0039 amendment vel-RETRO-R2 measures the path.
+
+1. **Source and rules.** `TAlertFlagSource` gains `pool`. The rules are `tailnet-relayed` and `tailnet-slow`, and the
+   subject is the host. A host raises at most one rule per tick, and `relayed` wins. The key is
+   `pool:fleet:tailnet-path:<host>`, one per host whatever the rule (review r1 L4): the fixed `fleet` keeps a Scrum
+   Master reselection from re-raising a standing flag, and a path that flaps between the rules alerts once per window.
+2. **Read sources.** `pool` is the fleet view's `poolPaths` (failed when absent, or when the view names a `pool paths`
+   error, which fails nothing else). `pool:<host>` is read for a `relayed`, `direct` or `not-tailnet` path and failed
+   for an `unknown` or unmeasured one. The tick reads the cached view and never measures. A host the pool no longer
+   lists loses its source while `pool` reads well. **The §4 baseline does not hold back a pool flag** (review r1 M1):
+   a host already relayed at its first read (a restart, a host added while relayed: the retro case) alerts once,
+   inside the repeat window. Every other source keeps the baseline.
+3. **Target.** Resolved at send time from the portfolio Scrum Master selection: the manager workspace's enabled
+   orchestrator, which must be the selected manager tab. No selection: `no-scrum-master`. Another tab:
+   `scrum-master-not-current`. Both are no-target cases (§5): logged, and the flag stays on the fleet panel. An
+   unreadable selection, and §5's unknown cases, are retried on the next tick.
+4. **Delivery.** One digest line through the tab event router (kind `flag`, `rule` set), and no phone alert: under
+   SO-10 the Scrum Master decides what reaches the owner. A line the router refuses is retried on the next tick.
+5. **Repeat.** As §3: a re-raise inside `alerts.flag-repeat-minutes` sends nothing, and a standing flag does not repeat.

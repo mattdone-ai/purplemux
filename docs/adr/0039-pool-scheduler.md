@@ -145,3 +145,22 @@ a caller that never asks is not placed.
 - The slot wait p90 is above 2 min with story 24 in place.
 - A remote gate's wall time is more than 20 % above the local one at equal load.
 - A placement lands on a host that was unknown, or two leases share one slot.
+
+## Amendment vel-RETRO-R2: the tailnet path (2026-11-09)
+Retro 2026-11-09 row R2: the exec hosts reached control-host only through a DERP relay (RTT 0.85-1.17 s, ssh 18-25 s)
+for hours, and no tool noticed. Design and consult ruling: `docs/design/vel-retro-r2-tailnet-path.md`.
+
+1. Each remote read (§1) also measures the tailnet path to the alias that answered, else the host's own
+   (`measureTailnetPath`, `src/lib/tailnet-path.ts`). It runs on this host, after the ssh read, and never under the
+   lease lock. `ssh -G` names the address, a lookup gives the IP, and a tailnet IP gets one
+   `tailscale ping -c 1 --timeout 2s`. The first `pong from` line decides: `via DERP(<region>)` or `via peer-relay` is
+   `relayed`; `via <ip>:<port>` is `direct`; any other `via` is `unknown` (review r1 M2). The exit status decides
+   nothing: a DERP pong exits 1 with "direct connection not established". No pong is `unknown`; so is an alias that
+   cannot be read or resolved. An address outside the tailnet is `not-tailnet`. A measurement stands for its alias for
+   5 minutes; an unknown one, or a relayed one not yet confirmed, is taken again at the next read (review r1 L6).
+2. The host view serves `path` (§7). A relayed path raises `tailnet-relayed` on its second relayed measurement in a
+   row (`relayedReads`, review r1 L3). A direct path at or above `pool.path.slow-ms` (default 250, 1..60000) raises
+   `tailnet-slow`. A relayed path wins. A measurement older than its 5-minute TTL plus 90 s is `unknown`.
+3. Placement (§3) reads none of it. The owner keeps the hosts: a relayed host takes work as before.
+4. The fleet view carries `poolPaths`, and the Mission Control fleet panel shows one line per relayed or slow host.
+   One flag alert goes to the portfolio Scrum Master seat (ADR-0032 amendment vel-RETRO-R2).

@@ -258,6 +258,32 @@ describe('the pool would-refuse counter on the fleet view (vel-D4 review r1 F1)'
   });
 });
 
+describe('the tailnet paths in the fleet view (vel-RETRO-R2)', () => {
+  const paths = [{
+    host: 'exec-1',
+    path: {
+      kind: 'relayed' as const, alert: 'tailnet-relayed' as const, alias: 'exec-1', address: 'exec-1.tailnet.example', ip: 'fd7a:115c:a1e0::2', peer: 'exec-1',
+      region: 'sin', rttMs: 1170, relayedReads: 2, slowMs: 250, measuredAt: new Date(NOW).toISOString(), reason: null,
+    },
+    text: 'exec-1 tailnet path relayed via DERP(sin), RTT 1170 ms',
+  }];
+
+  it('carries the paths when they are read', async () => {
+    expect((await buildFleetView({ ...deps, poolPaths: async () => paths }, NOW)).poolPaths).toEqual(paths);
+  });
+
+  it('paths that cannot be read are left out and named as their own scope; the rows still render', async () => {
+    const view = await buildFleetView({ ...deps, poolPaths: async () => { throw new Error('pool reader down'); } }, NOW);
+    expect(view.poolPaths).toBeUndefined();
+    expect(view.errors).toContainEqual({ scope: 'pool paths', error: 'pool reader down' });
+    expect(view.rows.length).toBeGreaterThan(0);
+  });
+
+  it('no paths dep (an older caller) carries no field', async () => {
+    expect(await buildFleetView(deps, NOW)).not.toHaveProperty('poolPaths');
+  });
+});
+
 describe('rotation coverage in the fleet view (vel-D5 AC6)', () => {
   const seat = (key: string, attrs: Record<string, number | string | null>) => ({
     workspaceId: 'ws-1', itemKey: key, itemType: 'seat' as const, openedAt: 0, closedAt: null, state: 'watching', stateSince: 0, waitReason: null,
