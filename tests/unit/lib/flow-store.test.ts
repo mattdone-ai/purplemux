@@ -90,7 +90,13 @@ describe('flow store', () => {
     const once = await readFlow('ws-1');
     expect(await readFlow('ws-1')).toBe(once);
     const changed: IFlowRecord = { ...once!, receivedAt: NOW + 12_345 };
+    const before = await fs.stat(file());
     await fs.writeFile(file(), JSON.stringify(changed));
+    // Same size (both receivedAt values have 13 digits), so only the mtime tells the change apart. Two writes
+    // can share one mtime tick (10 ms on a 100 Hz kernel, coarser on some filesystems), so the test moves the
+    // mtime itself: what it pins is that a changed mtime invalidates the cache, not the host's clock grain.
+    expect((await fs.stat(file())).size).toBe(before.size);
+    await fs.utimes(file(), before.atime, new Date(before.mtimeMs + 5_000));
     expect((await readFlow('ws-1'))?.receivedAt).toBe(NOW + 12_345);
   });
 
