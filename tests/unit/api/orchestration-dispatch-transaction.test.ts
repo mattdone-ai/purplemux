@@ -30,6 +30,9 @@ vi.mock('@/lib/tmux', () => ({
   hasSessionOrUnreachable: vi.fn(async () => true),
   sendEscape: mocks.escape,
   isContentPendingInComposer: vi.fn(async () => false),
+  capturePaneContent: vi.fn(async () => '› \n❯ '),
+  isPaneShowingPendingLine: () => false,
+  pressEnter: vi.fn(),
   listSessions: vi.fn(async () => []),
   killSession: vi.fn(),
 }));
@@ -40,7 +43,9 @@ vi.mock('@/lib/caller', () => ({ resolveCaller: async () => ({ kind: 'workspace'
 vi.mock('@/lib/providers/codex', () => ({ CODEX_LAUNCHER_SCRIPT: '/test/codex-launcher.js', codexProvider: {} }));
 vi.mock('@/lib/providers/codex/session-detection', () => ({ findCodexSessionById: vi.fn() }));
 vi.mock('@/lib/providers/codex/model-observation', () => ({ getCodexModelStatus: mocks.model }));
-vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => ({ getAllForClient: () => ({}), isWaitingAtPrompt: () => false }) }));
+// Every paste starts a turn: its prompt-submit seq is the paste count (vel-RETRO-R3).
+const submitEvidence = () => ({ cliState: 'idle' as const, eventSeq: mocks.paste.mock.calls.length, lastPromptSubmitSeq: mocks.paste.mock.calls.length, lastEventFromTool: false });
+vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => ({ getAllForClient: () => ({}), isWaitingAtPrompt: () => false, getSubmitEvidence: submitEvidence }) }));
 vi.mock('@/lib/sync-server', () => ({ broadcastSync: vi.fn() }));
 vi.mock('@/lib/providers/registry', () => ({ listProviders: () => [] }));
 vi.mock('@/lib/grok-home', () => ({ removeWorkspaceGrokHome: vi.fn() }));
@@ -182,14 +187,18 @@ describe('actual orchestration PATCH and dispatch share the mapping lease', () =
     const writerAttempted = attemptedWriter();
     const remapping = call(orchestration, { enabled: true, orchestratorTabId: 'crown-b', expectedRevision: 0, mode: 'recover' }, 'PATCH');
     await writerAttempted;
-    const readerAttempted = deferred();
-    const read = mapping.withOrchestrationMappingRead;
-    vi.spyOn(mapping, 'withOrchestrationMappingRead').mockImplementation((workspaceId, work) => {
-      readerAttempted.resolve();
-      return read(workspaceId, work);
+    // The later dispatch waits at the tab's send gate, which every dispatch takes before the mapping read
+    // (vel-RETRO-R3 CONFIRM r2), so it reaches the mapping only behind the PATCH already waiting there.
+    const gateAttempted = deferred();
+    const gate = await import('@/lib/send-proof-gate');
+    const enter = gate.withSendProofGate;
+    vi.spyOn(gate, 'withSendProofGate').mockImplementation((workspaceId, tabId, work) => {
+      gateAttempted.resolve();
+      return enter(workspaceId, tabId, work);
     });
     const second = deliver('automated');
-    await readerAttempted.promise;
+    await gateAttempted.promise;
+    expect(mocks.paste).toHaveBeenCalledOnce();
     release.resolve();
     expect(await first).toMatchObject({ status: 200 });
     expect(await remapping).toMatchObject({ status: 200 });

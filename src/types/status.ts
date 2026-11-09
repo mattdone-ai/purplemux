@@ -13,6 +13,17 @@ export interface ILastEvent {
   name: TEventName;
   at: number;
   seq: number;
+  /** A `prompt-submit` that is a Codex tool event: it shows a running turn and starts none, so no send counts it. */
+  fromTool?: true;
+}
+
+/** What a send reads before and after it types, to prove a submission (vel-RETRO-R3). */
+export interface ISubmitEvidence {
+  cliState: TCliState;
+  eventSeq: number;
+  lastPromptSubmitSeq: number | null;
+  /** The last hook event is a Codex tool `prompt-submit`, so a `busy` it set proves nothing. */
+  lastEventFromTool: boolean;
 }
 
 export interface ICurrentAction {
@@ -47,6 +58,11 @@ export interface ITabStatusEntry {
   jsonlPath?: string | null;
   lastEvent?: ILastEvent | null;
   eventSeq?: number;
+  /**
+   * The last `prompt-submit` that started a turn (a Codex tool event does not), by its `eventSeq`. A send proves its
+   * submission by a seq above the one it read before typing; `lastEvent` alone loses it to a fast `stop`. Runtime only.
+   */
+  lastPromptSubmit?: { seq: number; at: number } | null;
   lastInterruptTs?: number;
   // Wall-clock timestamp of the most recent agent launch/resume signal
   // (auto-resume sendKeys, session-start hook, synthetic interrupt).

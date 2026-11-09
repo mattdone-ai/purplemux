@@ -49,7 +49,7 @@ export const hasEmptyAgentComposer = (panelType: TPanelType | undefined, content
  * idle Claude tabs showed one, and read plain it is a non-empty composer. A
  * capture taken without escapes passes through unchanged.
  */
-const withoutSuggestions = (panelType: TPanelType | undefined, content: string): string =>
+export const paneAsSeen = (panelType: TPanelType | undefined, content: string): string =>
   renderPaneResult(content, panelType, 'no-suggestions').content;
 
 /**
@@ -58,7 +58,7 @@ const withoutSuggestions = (panelType: TPanelType | undefined, content: string):
  * (`❯ 2. Dark mode`) shows the marker on a non-empty line, so it is not ready.
  */
 export const paneShowsEmptyComposer = (panelType: TPanelType | undefined, content: string): boolean => {
-  const plain = withoutSuggestions(panelType, content);
+  const plain = paneAsSeen(panelType, content);
   if (parsePermissionOptions(tail(plain)).options.length > 0) return false;
   return hasEmptyAgentComposer(panelType, plain);
 };
@@ -91,7 +91,7 @@ const STARTUP_PROMPT_SCAN_LINES = 40;
 /** The startup dialog a Claude pane shows, or null. Only Claude Code has these dialogs. */
 export const paneStartupPrompt = (panelType: TPanelType | undefined, content: string): TStartupPrompt | null => {
   if (panelType !== 'claude-code') return null;
-  const plain = tail(withoutSuggestions(panelType, content), STARTUP_PROMPT_SCAN_LINES);
+  const plain = tail(paneAsSeen(panelType, content), STARTUP_PROMPT_SCAN_LINES);
   // A dialog that was answered is erased; an empty composer below old text means the agent is past it.
   if (hasEmptyAgentComposer(panelType, plain)) return null;
   const lines = plain.split('\n');
@@ -125,7 +125,7 @@ const COMPOSER_SCAN_LINES = 60;
  */
 export const readComposer = (panelType: TPanelType | undefined, captured: string | null): TComposerReading => {
   if (!captured) return 'unreadable';
-  const plain = withoutSuggestions(panelType, captured);
+  const plain = paneAsSeen(panelType, captured);
   if (parsePermissionOptions(tail(plain)).options.length > 0) return 'unreadable';
   const marker = composerMarker(panelType);
   if (!marker) return 'unreadable';
@@ -139,6 +139,22 @@ export const readComposer = (panelType: TPanelType | undefined, captured: string
 };
 
 export type TComposerReadiness = { ok: true } | { ok: false; reason: string };
+
+export type TComposerScreenRefusal = 'composer-unreadable' | 'interactive-prompt-active' | 'composer-not-empty';
+
+export type TComposerScreen = { ok: true } | { ok: false; reason: TComposerScreenRefusal };
+
+/**
+ * The screen half of {@link checkComposerReady}: a capture taken with escapes, read with the dim suggestion
+ * removed. No capture, an open option list, or text on the composer line is not ready.
+ */
+export const readComposerScreen = (panelType: TPanelType | undefined, captured: string | null): TComposerScreen => {
+  if (!captured) return { ok: false, reason: 'composer-unreadable' };
+  const content = paneAsSeen(panelType, captured);
+  if (parsePermissionOptions(tail(content)).options.length > 0) return { ok: false, reason: 'interactive-prompt-active' };
+  if (!hasEmptyAgentComposer(panelType, content)) return { ok: false, reason: 'composer-not-empty' };
+  return { ok: true };
+};
 
 export interface IComposerReadinessInput {
   panelType: TPanelType | undefined;
@@ -167,9 +183,5 @@ export const checkComposerReady = async (input: IComposerReadinessInput): Promis
   if (!stateReady) return { ok: false, reason: `composer-not-ready:${status.cliState}` };
 
   const captured = await input.capture().catch(() => null);
-  if (!captured) return { ok: false, reason: 'composer-unreadable' };
-  const content = withoutSuggestions(input.panelType, captured);
-  if (parsePermissionOptions(tail(content)).options.length > 0) return { ok: false, reason: 'interactive-prompt-active' };
-  if (!hasEmptyAgentComposer(input.panelType, content)) return { ok: false, reason: 'composer-not-empty' };
-  return { ok: true };
+  return readComposerScreen(input.panelType, captured);
 };

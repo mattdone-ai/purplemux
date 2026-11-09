@@ -1,4 +1,5 @@
 import { withCodexTargetLock } from '@/lib/providers/codex/launch-lifecycle';
+import { withSendProofGate } from '@/lib/send-proof-gate';
 import { withOrchestrationMappingRead } from '@/lib/orchestration-mapping-lock';
 import { authorizeHumanMutation } from '@/lib/human-mutation';
 import type { NextApiRequest, NextApiResponse } from 'next';
@@ -35,7 +36,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 
   let result;
   try {
-    result = await withOrchestrationMappingRead(parsed.request.workspaceId, () => withCodexTargetLock(parsed.request.workspaceId, parsed.request.tabId, () => performTabSend(
+    // The send gate first, as every dispatch takes it: a `tab send` waiting for its proof keeps this paste out.
+    result = await withSendProofGate(parsed.request.workspaceId, parsed.request.tabId, () => withOrchestrationMappingRead(parsed.request.workspaceId, () => withCodexTargetLock(parsed.request.workspaceId, parsed.request.tabId, () => performTabSend(
       {
         findTarget: async (workspaceId, tabId) => {
           const found = await findTab(workspaceId, tabId);
@@ -56,7 +58,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         isContentPendingInComposer,
       },
       parsed.request,
-    )));
+    ))));
   } catch (err) {
     // A remote tab's host that did not answer is retryable, never "the session is dead" (ADR-0022).
     if (err instanceof RemoteHostError) return res.status(503).json(remoteHostUnreachableBody(err));

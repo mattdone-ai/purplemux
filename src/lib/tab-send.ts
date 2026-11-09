@@ -1,4 +1,5 @@
 import { isAgentPanelType } from '@/lib/agent-panel-types';
+import type { TComposerScreen, TComposerScreenRefusal } from '@/lib/composer-readiness';
 import type { ITab, TPanelType } from '@/types/terminal';
 import type { TCliState, TStartupPrompt } from '@/types/timeline';
 
@@ -112,6 +113,8 @@ export interface ITabSendTarget {
   waitingAtPrompt?: boolean;
   /** The startup dialog a `startup-prompt` tab waits at (D14); absent in every other state. */
   startupPrompt?: TStartupPrompt | null;
+  /** The ssh alias of a remote tab's host (ADR-0022); absent for a local tab. */
+  host?: string;
 }
 
 /**
@@ -136,6 +139,13 @@ export const resolveSendWaitMs = (raw: unknown): number | null => {
 export interface ISendReadinessDeps {
   findTarget: (workspaceId: string, tabId: string) => Promise<ITabSendTarget | null>;
   hasSession: (sessionName: string) => Promise<boolean>;
+  /**
+   * The screen half of the `composer-ready` gate (vel-RETRO-R3). Absent: the gate reads `cliState` only, as the
+   * phone route and older callers do.
+   */
+  readScreen?: (target: ITabSendTarget) => Promise<TComposerScreen>;
+  /** A remote host's ssh budget (`remote.timeout-ms`, vel-D61). Absent: the default budget. */
+  remoteTimeoutMs?: (host: string) => Promise<number>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -151,13 +161,40 @@ export interface ISendReadinessRequest {
 }
 
 export type TSendReadiness =
-  | { ok: true; target: ITabSendTarget }
+  /** `screenEmpty`: the gate read an empty composer on the screen just before it answered. */
+  | { ok: true; target: ITabSendTarget; screenEmpty: boolean }
   | { ok: false; reason: 'tab-not-found' }
   | { ok: false; reason: 'session-not-running'; cliState: TCliState | null }
-  | { ok: false; reason: 'readiness-timeout'; cliState: TCliState | null; waitedMs: number }
+  | { ok: false; reason: 'readiness-timeout'; cliState: TCliState | null; waitedMs: number; screen?: TComposerScreenRefusal }
   | { ok: false; reason: 'startup-prompt'; cliState: TCliState | null; startupPrompt: TStartupPrompt | null };
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The states whose screen the `composer-ready` gate reads, the ones Mission Control screens
+ * (`checkComposerReady`). A fresh Claude tab turns `idle` on its SessionStart hook, which can fire before the TUI
+ * takes keys (vel-RETRO-R3). `needs-input` stays status-only (ADR-0007): its option list is what a send answers.
+ */
+const screensComposer = (target: ITabSendTarget): boolean =>
+  target.cliState === 'idle' || target.cliState === 'ready-for-review'
+  || (target.cliState === 'busy' && target.waitingAtPrompt === true);
+
+/** The ssh budget of one remote tmux call when `remote.timeout-ms` is unset (ADR-0022 §5). */
+export const REMOTE_CALL_DEFAULT_MS = 5_000;
+
+/**
+ * The gate's deadline once it reads a remote screen (review r1 F2). One capture is one ssh call that may run the
+ * host's whole budget and then fail, so the wait leaves room for a second capture after it: at least two budgets.
+ * The caller's longer wait stands, `timeoutMs: 0` stays one look, and the largest budget (120 s) gives 240 s, the
+ * CLI's own cap.
+ */
+const remoteScreenDeadlineMs = async (deps: ISendReadinessDeps, host: string, timeoutMs: number): Promise<number> => {
+  if (timeoutMs === 0) return 0;
+  const budget = deps.remoteTimeoutMs
+    ? await deps.remoteTimeoutMs(host).catch(() => REMOTE_CALL_DEFAULT_MS)
+    : REMOTE_CALL_DEFAULT_MS;
+  return Math.max(timeoutMs, 2 * Math.max(REMOTE_CALL_DEFAULT_MS, budget));
+};
 
 /**
  * Resolve a tab and decide whether it can be pasted into, per {@link TSendGate}.
@@ -179,8 +216,12 @@ export const awaitSendReadiness = async (
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? realSleep;
   const startedAt = now();
+  let screen: TComposerScreenRefusal | undefined;
+  let deadlineMs = request.timeoutMs;
+  let remoteDeadlineSet = false;
 
   for (;;) {
+    screen = undefined;
     const target = await deps.findTarget(request.workspaceId, request.tabId);
     if (!target) return { ok: false, reason: 'tab-not-found' };
 
@@ -194,13 +235,19 @@ export const awaitSendReadiness = async (
     // A live session is the whole bar on the `live-session` gate. Past it, the
     // composer check guards an agent composer only: a terminal pane has no turn
     // to accept and no cliState to report.
-    if (
-      request.gate === 'live-session' ||
-      !isAgentPanelType(target.panelType) ||
-      isComposerReadyCliState(target.cliState) ||
-      target.waitingAtPrompt === true
-    ) {
-      return { ok: true, target };
+    if (request.gate === 'live-session' || !isAgentPanelType(target.panelType)) {
+      return { ok: true, target, screenEmpty: false };
+    }
+    if (isComposerReadyCliState(target.cliState) || target.waitingAtPrompt === true) {
+      if (!deps.readScreen || !screensComposer(target)) return { ok: true, target, screenEmpty: false };
+      if (target.host && !remoteDeadlineSet) {
+        remoteDeadlineSet = true;
+        deadlineMs = await remoteScreenDeadlineMs(deps, target.host, request.timeoutMs);
+      }
+      // A failed or slow capture is one reading, never the answer: the gate reads again until the deadline.
+      const read = await deps.readScreen(target).catch((): TComposerScreen => ({ ok: false, reason: 'composer-unreadable' }));
+      if (read.ok) return { ok: true, target, screenEmpty: true };
+      screen = read.reason;
     }
 
     // A startup dialog (folder trust, external imports) never clears on its own: a wait would trade an
@@ -210,9 +257,9 @@ export const awaitSendReadiness = async (
     }
 
     const waitedMs = now() - startedAt;
-    const remainingMs = request.timeoutMs - waitedMs;
+    const remainingMs = deadlineMs - waitedMs;
     if (remainingMs <= 0) {
-      return { ok: false, reason: 'readiness-timeout', cliState: target.cliState, waitedMs };
+      return { ok: false, reason: 'readiness-timeout', cliState: target.cliState, waitedMs, ...(screen ? { screen } : {}) };
     }
     await sleep(Math.min(SEND_READY_POLL_INTERVAL_MS, remainingMs));
   }

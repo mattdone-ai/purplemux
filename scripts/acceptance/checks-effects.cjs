@@ -1,7 +1,7 @@
 'use strict';
 // Wave-13 acceptance checks: effect counts (story 15, ADR-0035 §7) through the candidate's production build. A
-// `tab send` reaches a live stand-in; its turn (prompt-submit, a Bash PostToolUse posted as status-hook.sh posts it,
-// stop) is written to tab_turns; `effects show` counts the send as delivered and followed, and reads every
+// `tab send` reaches a live stand-in; its turn (prompt-submit, posted when the typed line arrives, a Bash PostToolUse
+// posted as status-hook.sh posts it, stop) is written to tab_turns; `effects show` counts the send as delivered and followed, and reads every
 // phone-only flag rule as not measured with null counts, never 0.
 //
 // `wave13(inst, helpers)` returns results in checks.cjs's shape: { status, id, what, measured?, expected? }.
@@ -45,10 +45,15 @@ const checks = async (inst, { parseJson, within, sleep, brief }, results) => {
     if (standIn.rc !== 0 || !(await within(10000, async () => (await inst.cliState(wsA, worker.tabId)) === 'idle'))) {
       return fail(`stand-in ${brief(standIn)}; the tab never reached idle`);
     }
-    const sent = await inst.cli(['tab', 'send', '-w', wsA, worker.tabId, `acc12 effect probe ${nonce}`]);
-    if (sent.rc !== 0) return fail(`tab send ${brief(sent)}`);
+    // `tab send` exits 0 only on proof of the turn (vel-RETRO-R3): the stand-in posts its prompt-submit when the
+    // typed line reaches it, as Claude's hook does on a submit, while the send still waits for that proof.
+    const probe = `acc12 effect probe ${nonce}`;
     const session = worker.sessionName;
-    await hook('/api/status/hook', { event: 'prompt-submit', session });
+    const sending = inst.cli(['tab', 'send', '-w', wsA, worker.tabId, probe]);
+    const arrived = await within(10000, async () => fs.readFileSync(inputFile, 'utf8').includes(probe));
+    if (arrived) await hook('/api/status/hook', { event: 'prompt-submit', session });
+    const sent = await sending;
+    if (sent.rc !== 0) return fail(`tab send ${brief(sent)}; the typed line ${arrived ? 'reached' : 'never reached'} the stand-in`);
     await within(10000, async () => (await inst.cliState(wsA, worker.tabId)) === 'busy');
     const tool = await hook(`/api/status/hook?kind=tool&session=${encodeURIComponent(session)}`,
       { tool_name: 'Bash', tool_input: { command: `echo acc12 ${nonce}` }, tool_response: { exit_code: 0 } });

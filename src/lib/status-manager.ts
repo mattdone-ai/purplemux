@@ -34,7 +34,7 @@ import { parsePermissionOptions } from '@/lib/permission-prompt';
 import type { IPaneInfo } from '@/lib/tmux';
 import type { ITab, IWorkspace, TPanelType } from '@/types/terminal';
 import type { TCliState, TStartupPrompt } from '@/types/timeline';
-import type { IStartupPromptReading, ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
+import type { IStartupPromptReading, ITurnErrorEpisode, ICurrentAction, TTerminalStatus, ITabStatusEntry, IClientTabStatusEntry, ISubmitEvidence, IStatusUpdateMessage, IRateLimitsCache, TEventName, ILastEvent, IOrchestrationNudge, TOrchestrationNudgeKind, IWorkspaceStandup, TAlertKind, TAlertProviderId } from '@/types/status';
 import { addStandup, readAllLatestStandups, readLatestStandupEvidence } from '@/lib/standup-store';
 import {
   STANDUP_DUE_CONFIG_KEY,
@@ -1973,6 +1973,17 @@ export class StatusManager {
     };
   }
 
+  getSubmitEvidence(tabId: string): ISubmitEvidence | null {
+    const entry = this.tabs.get(tabId);
+    if (!entry) return null;
+    return {
+      cliState: entry.cliState,
+      eventSeq: entry.eventSeq ?? 0,
+      lastPromptSubmitSeq: entry.lastPromptSubmit?.seq ?? null,
+      lastEventFromTool: entry.lastEvent?.fromTool === true,
+    };
+  }
+
   getAllForClient(): Record<string, IClientTabStatusEntry> {
     const result: Record<string, IClientTabStatusEntry> = {};
     for (const [tabId, entry] of this.tabs) {
@@ -3483,7 +3494,8 @@ export class StatusManager {
 
     const seq = (entry.eventSeq ?? 0) + 1;
     entry.eventSeq = seq;
-    entry.lastEvent = { name: eventName, at: now, seq };
+    entry.lastEvent = { name: eventName, at: now, seq, ...(eventName === 'prompt-submit' && opts.fromTool ? { fromTool: true as const } : {}) };
+    if (eventName === 'prompt-submit' && !opts.fromTool) entry.lastPromptSubmit = { seq, at: now };
     if (eventName === 'session-start') {
       if (now >= (entry.lastResumeOrStartedAt ?? 0)) {
         this.orchestrationPendingLaunches.delete(tabId);

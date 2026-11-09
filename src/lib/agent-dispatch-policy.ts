@@ -6,6 +6,7 @@ import {
   withCodexTargetLock,
 } from '@/lib/providers/codex/launch-lifecycle';
 import { getCodexModelStatus, type ICodexModelStatus } from '@/lib/providers/codex/model-observation';
+import { withSendProofGate } from '@/lib/send-proof-gate';
 import { observeTabSessionsStrict } from '@/lib/tmux';
 import type { ITab } from '@/types/terminal';
 
@@ -114,8 +115,7 @@ export const checkAgentDispatchPolicyLocked = async (
   return { ok: true };
 };
 
-/** Keep the final check and terminal submission inside work; never nest target locks. */
-export const withAgentDispatchLock = async <T>(
+const withTargetLocks = async <T>(
   workspaceId: string,
   target: ITab | undefined,
   work: (checkPolicy: TAgentDispatchPolicyCheck) => Promise<T>,
@@ -127,6 +127,30 @@ export const withAgentDispatchLock = async <T>(
     : work((options) => checkAgentDispatchPolicyLocked(workspaceId, target, orchestratorId, options));
   return acquire(0);
 });
+
+/**
+ * Keep the final check and terminal submission inside work; never nest target locks. The target's send gate is
+ * taken first (`send-proof-gate.ts`), so no dispatch types into a tab while a `tab send` waits for its proof.
+ */
+export const withAgentDispatchLock = async <T>(
+  workspaceId: string,
+  target: ITab | undefined,
+  work: (checkPolicy: TAgentDispatchPolicyCheck) => Promise<T>,
+): Promise<T> => (target
+  ? withSendProofGate(workspaceId, target.id, () => withTargetLocks(workspaceId, target, work))
+  : withTargetLocks(workspaceId, target, work));
+
+/**
+ * As {@link withAgentDispatchLock}, then `after` once the target and orchestrator locks are released, still inside
+ * the target's send gate. A `tab send` waits for its proof there: a Codex hook applies inside the target lock, and
+ * an orchestrator's hooks inside its own, so neither may be held through the wait (vel-RETRO-R3, CONFIRM r2).
+ */
+export const withAgentDispatchThen = async <T, U>(
+  workspaceId: string,
+  target: ITab,
+  work: (checkPolicy: TAgentDispatchPolicyCheck) => Promise<T>,
+  after: (typed: T) => Promise<U>,
+): Promise<U> => withSendProofGate(workspaceId, target.id, async () => after(await withTargetLocks(workspaceId, target, work)));
 
 /** Called only after the request's workspace authorization succeeds. */
 export const checkAgentDispatchPolicy = async (

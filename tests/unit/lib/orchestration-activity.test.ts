@@ -16,12 +16,13 @@ vi.mock('os', async (original) => {
 vi.mock('node-pty', () => ({ spawn: (...args: unknown[]) => fixture.spawn(...args) }));
 vi.mock('@/lib/tmux', async (original) => ({
   ...await original<typeof import('@/lib/tmux')>(),
-  exitCopyMode: vi.fn(async () => undefined), hasSession: vi.fn(async () => true), hasSessionOrUnreachable: vi.fn(async () => true), sessionPresence: vi.fn(async () => 'present'), isContentPendingInComposer: vi.fn(async () => false), createSession: vi.fn(async () => undefined), resolveExistingDir: vi.fn(async () => '/tmp'),
+  exitCopyMode: vi.fn(async () => undefined), hasSession: vi.fn(async () => true), hasSessionOrUnreachable: vi.fn(async () => true), sessionPresence: vi.fn(async () => 'present'), isContentPendingInComposer: vi.fn(async () => false), capturePaneContent: vi.fn(async () => '❯ '), pressEnter: vi.fn(async () => undefined), createSession: vi.fn(async () => undefined), resolveExistingDir: vi.fn(async () => '/tmp'),
   sendKeys: fixture.send, sendTypedText: fixture.type, sendBracketedPasteText: fixture.type, submitComposer: fixture.submit,
   killSession: fixture.reap, observeSessionStrict: fixture.session,
 }));
 vi.mock('@/lib/process-utils', async (original) => ({ ...await original<typeof import('@/lib/process-utils')>(), observeProviderProcess: fixture.process }));
-vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => ({ isOrchestrationLaunchPending: () => false, isWaitingAtPrompt: () => true, markAgentLaunch: vi.fn(), getAllForClient: () => ({ 'tab-old': { workspaceId: 'ws-a', cliState: 'idle' } }) }) }));
+vi.mock('@/lib/status-manager', () => ({ getStatusManager: () => ({ isOrchestrationLaunchPending: () => false, isWaitingAtPrompt: () => true, markAgentLaunch: vi.fn(), getAllForClient: () => ({ 'tab-old': { workspaceId: 'ws-a', cliState: 'idle' } }),
+  getSubmitEvidence: () => ({ cliState: 'idle', eventSeq: fixture.submit.mock.calls.length, lastPromptSubmitSeq: fixture.submit.mock.calls.length, lastEventFromTool: false }) }) }));
 vi.mock('@/lib/lease-store', () => ({ readLeaseEvidence: vi.fn(async () => ({ known: true, leases: [] })) }));
 vi.mock('@/lib/standup-store', () => ({ readLatestStandupEvidence: vi.fn(async () => ({ known: true, standup: { state: 'done' } })) }));
 vi.mock('@/lib/liveness-store', () => ({ readLivenessEvidence: vi.fn(async () => ({ known: true, data: { jobs: [] } })) }));

@@ -169,6 +169,8 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'target-changed': EXIT.GONE,
   'readiness-timeout': EXIT.NOT_READY,
   'startup-prompt': EXIT.NOT_READY,
+  'typed-not-submitted': EXIT.UNEXPECTED,
+  'submit-unconfirmed': EXIT.UNEXPECTED,
   'server-unreachable': EXIT.UNREACHABLE,
   'routes-absent': EXIT.UNREACHABLE,
   'remote-host-unreachable': EXIT.UNREACHABLE,
@@ -235,6 +237,8 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'remote-kit-broken': "the CLI kit does not run on the remote host; no agent started — a retry fails the same way until a person repairs the kit or the host",
   'wip-cap': "refused by state — close an agent tab first; only the workspace's orchestrator may pass --over-cap --reason",
   'tab-busy': 'the tab is mid-turn — retry when it is idle, or restart with --interrupt to abandon the turn',
+  'typed-not-submitted': 'the text is in the composer; do not resend; inspect the tab',
+  'submit-unconfirmed': 'the text was typed and no turn was seen; do not resend; inspect the tab',
   'restart-not-confirmed': 'a process or the session outlived the reap; nothing was relaunched — inspect the tab before a retry',
   'pool-timeout': 'the pool did not answer in 2 s — do what you do without the pool and log it (a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here); a lease the late answer took expires at its TTL',
   'pool-full': 'no host has the budget, the memory or the disk — wait for a release, or ask with --queue; a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here',
@@ -247,12 +251,17 @@ const exitFor = (code) => (code && Object.hasOwn(CODE_EXIT, code) ? CODE_EXIT[co
 const hintFor = (code, detail) => {
   if (code === 'readiness-timeout' && Number.isFinite(detail?.waitedMs)) {
     const state = detail.cliState ? `, cliState ${detail.cliState}` : '';
-    return `not ready after ${detail.waitedMs} ms${state} — retry, bounded`;
+    const screen = typeof detail.screen === 'string' && detail.screen ? `, screen ${detail.screen}` : '';
+    return `not ready after ${detail.waitedMs} ms${state}${screen} — retry, bounded`;
   }
   // The server names the dialog and the fix (D14); a retry cannot help until someone answers it.
   if (code === 'startup-prompt') {
     const served = typeof detail?.detail === 'string' && detail.detail ? detail.detail : 'the agent waits at a Claude Code startup prompt';
     return `${served} — nothing was typed; a retry cannot help until the prompt is answered`;
+  }
+  // Refused before the typing (vel-RETRO-R3, review r1 F4): the server holds no status to prove a turn against.
+  if (code === 'submit-unconfirmed' && detail?.typed === false) {
+    return 'nothing was typed: the server holds no status for the tab to prove a turn against; inspect the tab';
   }
   if (code && Object.hasOwn(CODE_HINT, code)) return CODE_HINT[code];
   return EXIT_HINT[exitFor(code)];
@@ -2228,6 +2237,10 @@ const cmdTabSend = async (args) => {
     },
   );
   out(body);
+  // The text was typed and no turn was proven (vel-RETRO-R3): a resend would type it twice.
+  if (typeof body?.notSubmitted === 'string' && body.notSubmitted) {
+    fail(body.notSubmitted, `tab ${tabId}${body.resubmitted ? ' (Enter was pressed once more)' : ''}`);
+  }
 };
 
 const cmdTabStatus = async (args) => {
@@ -3508,6 +3521,9 @@ Commands:
                                            refused at once with exit 5 (startup-prompt): answer the prompt.
                                            Exit 4 (tab-not-found, session-not-running, target-changed) means
                                            the tab is gone: never retry it, and never loop on it.
+                                           An agent tab must then show a turn start: one more Enter for text
+                                           left in the composer, else exit 1 (typed-not-submitted,
+                                           submit-unconfirmed). The text was typed: never resend it.
            [-f FILE | -f -]                Send file contents (or stdin with '-') — use for multi-line briefs
            [--raw]                         Into a terminal tab, text with more than one line exits 2
                                            (terminal-not-command-line): a shell runs each line as a command.
@@ -3828,6 +3844,8 @@ Exit codes:
      3  conflict: held by another holder, or refused by state        only after the state changes
      4  target gone: tab-not-found, session-not-running,             never
         target-changed
+     1  typed, no turn proven: typed-not-submitted,                  never resend; inspect the tab
+        submit-unconfirmed
      5  not ready yet: readiness-timeout                             yes, bounded
      6  server unreachable (refused, no port, read interrupted)      yes, bounded
         routes-absent: 404 without JSON — no such route (an older    no, until the cause

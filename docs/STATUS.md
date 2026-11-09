@@ -157,8 +157,9 @@ A Zustand store that manages all tab state as `Record<tabId, ITabState>`.
 | `agentInstalled` | `boolean` | Timeline WS | Gate for "not installed" screen |
 | `sessionView` | `TSessionView` | User action / auto-transition | Which screen to show |
 | `cliState` | `TCliState` | Server WS (`status:update` / hook derivation) | Work state, tab indicator |
-| `lastEvent` | `ILastEvent \| null` | Server WS (`status:hook-event`) | Track event order, trigger PermissionPrompt re-fetch |
+| `lastEvent` | `ILastEvent \| null` | Server WS (`status:hook-event`) | Track event order, trigger PermissionPrompt re-fetch. `fromTool: true` marks a Codex tool `prompt-submit` (shows a running turn, starts none); `tab send` never counts it as proof of a submission (vel-RETRO-R3) |
 | `eventSeq` | `number` | Server WS | Monotonic counter to prevent reordering |
+| `lastPromptSubmit` | `{ seq, at } \| null` | Server (hook `prompt-submit`, not `fromTool`) | The `eventSeq` of the last turn-starting submit; `tab send` proves a submission by a seq above the one it read before typing, which a fast `stop` cannot hide (vel-RETRO-R3). Runtime only |
 | `isTimelineLoading` | `boolean` | Timeline WS init received | Whether timeline data is still loading |
 | `compactingSince` | `number \| null` | `pre-compact`/`post-compact` hooks | Drives the timeline compacting indicator |
 

@@ -283,6 +283,77 @@ describe('tab send — permanent and retryable failures are distinct', () => {
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual({ status: 'sent', submitted: true, cliState: 'idle' });
   });
+
+  it('exits 0 for a submission the server proved (vel-RETRO-R3)', async () => {
+    reply = json(200, { status: 'sent', submitted: true, cliState: 'idle', confirmation: 'prompt-submit', resubmitted: false });
+
+    const { code, stderr } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+  });
+
+  it.each([
+    ['typed-not-submitted', 'the text is in the composer; do not resend; inspect the tab'],
+    ['submit-unconfirmed', 'the text was typed and no turn was seen; do not resend; inspect the tab'],
+  ])('exits 1 for %s, prints the body, and says not to resend (vel-RETRO-R3)', async (notSubmitted, hint) => {
+    const body = { status: 'sent', submitted: false, cliState: 'idle', confirmation: null, resubmitted: true, notSubmitted };
+    reply = json(200, body);
+
+    const { code, stdout, stderr } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+
+    expect(code).toBe(1);
+    expect(JSON.parse(stdout)).toEqual(body);
+    expect(stderr).toBe(`error: ${notSubmitted} (${hint}) — tab tab-x (Enter was pressed once more)\n`);
+  });
+
+  it('names the screen reading of a readiness timeout (vel-RETRO-R3)', async () => {
+    reply = json(409, {
+      error: 'agent-not-ready', code: 'readiness-timeout', tabId: 'tab-x', cliState: 'idle', detail: 'readiness-timeout', waitedMs: 60000, screen: 'composer-not-empty',
+    });
+
+    const { code, stderr } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+
+    expect(code).toBe(5);
+    expect(stderr).toContain('not ready after 60000 ms, cliState idle, screen composer-not-empty');
+  });
+});
+
+describe('tab send exit codes match the labels of a caller that retries (maintenance.sh deliver, review r1 F5)', () => {
+  // The library's maintenance.sh reads tab send as: 0 sent (then reads `submitted`), 4 gone (never retried),
+  // 5 and 6 retried in the next round, anything else failed:exit-<rc> once. A typed send without proof must
+  // land in the last label: a 5 or 6 would type the brief twice.
+  const reasons = Object.freeze({ 0: 'sent', 4: 'gone', 5: 'retried', 6: 'retried' } as Record<number, string>);
+  const label = (rc: number): string => reasons[rc] ?? `failed:exit-${rc}`;
+
+  it.each<[string, () => TStubReply, number, string]>([
+    ['a proven submission', () => json(200, { status: 'sent', submitted: true, cliState: 'idle', confirmation: 'prompt-submit', resubmitted: false }), 0, 'sent'],
+    ['typed-not-submitted', () => json(200, { status: 'sent', submitted: false, cliState: 'idle', confirmation: null, resubmitted: true, notSubmitted: 'typed-not-submitted' }), 1, 'failed:exit-1'],
+    ['submit-unconfirmed after the typing', () => json(200, { status: 'sent', submitted: false, cliState: 'idle', confirmation: null, resubmitted: false, notSubmitted: 'submit-unconfirmed' }), 1, 'failed:exit-1'],
+    ['submit-unconfirmed before the typing', () => json(409, { error: 'submit-unconfirmed', code: 'submit-unconfirmed', tabId: 'tab-x', typed: false, detail: 'no-submit-evidence' }), 1, 'failed:exit-1'],
+    ['tab-not-found', () => json(404, { error: 'tab-not-found', code: 'tab-not-found' }), 4, 'gone'],
+    ['session-not-running', () => json(409, { error: 'agent-not-ready', code: 'session-not-running', tabId: 'tab-x' }), 4, 'gone'],
+    ['target-changed', () => json(409, { error: 'target-changed', code: 'target-changed', tabId: 'tab-x' }), 4, 'gone'],
+    ['readiness-timeout', () => json(409, { error: 'agent-not-ready', code: 'readiness-timeout', tabId: 'tab-x', cliState: 'busy', waitedMs: 100 }), 5, 'retried'],
+    ['remote-host-unreachable', () => json(503, { error: 'remote-host-unreachable', code: 'remote-host-unreachable', host: 'h' }), 6, 'retried'],
+  ])('%s exits %i (%s)', async (_name, served, expected, expectedLabel) => {
+    reply = served();
+
+    const { code } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+
+    expect(code).toBe(expected);
+    expect(label(code)).toBe(expectedLabel);
+  });
+
+  it('says nothing was typed for a send refused before the typing (review r1 F4)', async () => {
+    reply = json(409, { error: 'submit-unconfirmed', code: 'submit-unconfirmed', tabId: 'tab-x', typed: false, detail: 'no-submit-evidence' });
+
+    const { code, stderr } = await cli(['tab', 'send', '-w', 'WS', 'tab-x', 'hi']);
+
+    expect(code).toBe(1);
+    expect(stderr).toContain('submit-unconfirmed (nothing was typed: the server holds no status for the tab to prove a turn against; inspect the tab)');
+    expect(stderr).not.toContain('do not resend');
+  });
 });
 
 describe('the code → exit table', () => {
