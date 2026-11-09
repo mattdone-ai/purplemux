@@ -265,8 +265,15 @@ class Instance {
       }
     }
 
-    const shell = await this.isolatedShellState(session);
-    const shellEvidence = this.persistFixtureObservation('shell-control', { sessionName: session, observation: shell });
+    // The shell can be briefly out of the foreground when a step arrives (a process the caller just ended, or a child the
+    // shell forked after its last command); under host load that refused a correct step. Poll, read-only, for the shell to
+    // settle; nothing is typed until it is proven. The evidence records the first failed observation and the wait.
+    let shell = await this.isolatedShellState(session);
+    const firstObservation = shell.ok ? null : shell;
+    const settleStart = Date.now();
+    if (!shell.ok) await within(SHELL_SETTLE_MS, async () => (shell = await this.isolatedShellState(session)).ok);
+    const settle = firstObservation ? { waitedMs: Date.now() - settleStart, firstObservation } : null;
+    const shellEvidence = this.persistFixtureObservation('shell-control', { sessionName: session, observation: shell, settle });
     if (!shell.ok) return { rc: -1, out: '', err: `foreground shell not proven; evidence ${shellEvidence}`, shell };
 
     const tag = crypto.randomBytes(4).toString('hex');
@@ -914,6 +921,9 @@ const wave1 = async (inst, { bashGuard }) => {
   await story15(inst, { nonce, wsB, pass, fail, check });
   return results;
 };
+
+/** How long a shell step waits for its tab's shell to return to the foreground before it refuses. */
+const SHELL_SETTLE_MS = 10000;
 
 /** Poll `probe` every POLL_MS until it returns a truthy value or `ms` passes. */
 const within = async (ms, probe) => {
