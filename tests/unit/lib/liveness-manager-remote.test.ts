@@ -409,12 +409,19 @@ describe('parseRemoteJobProbe: only one complete frame with this nonce is a repl
 });
 
 describe('REMOTE_JOB_PROBE_SCRIPT on a real procfs', () => {
-  it.each(['tail', 'base64'])('reads a file as unreadable, not empty, when %s fails on the host', (tool) => {
+  // Each stand-in fails the way the real tool does and reads only what the real tool reads. The probe runs as
+  // `sh -s`, so its stdin is the script itself: where /bin/sh is bash (Amazon Linux 2023) the script is read
+  // as it runs, and a stand-in `tail` that drained stdin would eat the rest of it, `end` line included. The
+  // real `tail -c N -- FILE` never reads stdin; `base64` reads the pipe from tail, which its stand-in drains.
+  it.each([
+    ['tail', '#!/bin/sh\necho "tail: cannot read" >&2\nexit 1\n'],
+    ['base64', '#!/bin/sh\ncat >/dev/null 2>&1\nexit 1\n'],
+  ])('reads a file as unreadable, not empty, when %s fails on the host', (tool, body) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmux-remote-job-'));
     try {
       const bin = path.join(dir, 'bin');
       fs.mkdirSync(bin);
-      fs.writeFileSync(path.join(bin, tool), '#!/bin/sh\ncat >/dev/null 2>&1\nexit 1\n', { mode: 0o755 });
+      fs.writeFileSync(path.join(bin, tool), body, { mode: 0o755 });
       fs.writeFileSync(path.join(dir, 'exit'), '0\n');
       const stdout = execFileSync('/bin/sh', ['-c', remoteJobProbeCommand('n9', [job({ pid: 2 ** 22 + 11, exitCodeFile: path.join(dir, 'exit') })])], {
         input: REMOTE_JOB_PROBE_SCRIPT,

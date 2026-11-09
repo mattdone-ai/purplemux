@@ -15,7 +15,9 @@
 # Leak check: the live socket (`tmux -L purple` under ACCEPT_LIVE_TMUX_TMPDIR, default
 # ${TMUX_TMPDIR:-/tmp}) must hold no session of the isolated workspaces. A session COUNT is not
 # compared: agents on the live host open and close tabs while the gate runs. No live tmux server at
-# all is a pass that says so; any other read failure is a FAIL, never a silent pass.
+# all is a pass that says so: tmux answers `no server running` (a stale socket), or it names a socket
+# path that lstat reports ENOENT (a host with no live purplemux, so no socket file or directory).
+# Any other read failure is a FAIL, never a silent pass.
 #
 # deploy-live.sh runs this against the built release directory before it touches the live service.
 
@@ -27,6 +29,21 @@ CHECKS="${ACCEPT_CHECKS:-$HERE/checks.cjs}"
 NODE="${ACCEPT_NODE:-$(command -v node || true)}"
 TMUX_BIN="${ACCEPT_TMUX:-tmux}"
 LIVE_TMUX_TMPDIR="${ACCEPT_LIVE_TMUX_TMPDIR:-${TMUX_TMPDIR:-/tmp}}"
+
+# socket_absent ERR: when tmux's first stderr line is `error connecting to PATH (...)` and lstat of
+# that PATH fails with ENOENT, print PATH and return 0. The errno comes from lstat, never from the
+# message text (strerror is localised), and the path is the one tmux tried (it falls back to /tmp
+# when TMUX_TMPDIR does not resolve). Any other stat result, or any other message, returns 1.
+socket_absent() {
+  local line="${1%%$'\n'*}" path
+  [[ "$line" == "error connecting to "*" ("*")" ]] || return 1
+  path="${line#error connecting to }"
+  path="${path% (*}"
+  [[ -n "$path" ]] || return 1
+  "$NODE" -e 'try{require("fs").lstatSync(process.argv[1]);process.exit(1)}catch(e){process.exit(e.code==="ENOENT"?0:1)}' "$path" \
+    || return 1
+  printf '%s' "$path"
+}
 
 usage() { echo "usage: run.sh --candidate DIR [--log FILE] [--bash-guard PATH] [--require-bash-guard] [--keep]" >&2; exit 2; }
 
@@ -86,12 +103,16 @@ sessions="$(env -u TMUX TMUX_TMPDIR="$LIVE_TMUX_TMPDIR" "$TMUX_BIN" -L purple ls
 tmux_rc=$?
 tmux_err="$(cat "$state.tmux-err" 2>/dev/null)"
 rm -f "$state.tmux-err"
-if ((tmux_rc != 0)) && [[ "$tmux_err" != *"no server running"* ]]; then
+absent_sock=""
+if ((tmux_rc != 0)) && [[ "$tmux_err" != *"no server running"* ]] && ! absent_sock="$(socket_absent "$tmux_err")"; then
   say "FAIL live-socket-untouched — the live tmux socket could not be read — measured: exit $tmux_rc ${tmux_err%%$'\n'*} — expected: a session list (or no server)"
 else
   leaked="$(printf '%s\n' "$sessions" | grep -E "^pt-(${ws_a}|${ws_b})-" || true)"
   if [[ -n "$leaked" ]]; then
     say "FAIL live-socket-untouched — isolated sessions reached the live tmux socket — measured: ${leaked//$'\n'/ } — expected: none"
+  elif [[ -n "$absent_sock" ]]; then
+    say "PASS live-socket-untouched — no live tmux server: the socket $absent_sock does not exist (ENOENT), so no session can have reached it"
+    live_ok=1
   elif ((tmux_rc != 0)); then
     say "PASS live-socket-untouched — no live tmux server is running, so no session can have reached it"
     live_ok=1

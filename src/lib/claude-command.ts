@@ -1,3 +1,4 @@
+import path from 'path';
 import { getDangerouslySkipPermissions } from '@/lib/config-store';
 import { HOOK_SETTINGS_PATH } from '@/lib/hook-settings';
 import { getClaudePromptPath, writeClaudePromptFile } from '@/lib/claude-prompt';
@@ -47,7 +48,21 @@ export const buildClaudeFlags = async (workspaceId?: string, opts?: IClaudeFlagO
   return parts.join(' ');
 };
 
-/** The Claude launch of a remote tab (ADR-0022): the kit's hooks, prompt and CLI on the host. */
+/**
+ * The workspace's absolute directories, for the remote seed's trust check. A record that cannot be read gives
+ * none: the launch then seeds the first run and trusts nothing, so the folder-trust dialog shows.
+ */
+const remoteSeedDirectories = async (workspaceId: string): Promise<string[]> => {
+  const { workspaceDirectories } = await import('@/lib/workspace-home');
+  try {
+    return [...new Set((await workspaceDirectories(workspaceId)).filter((dir) => path.posix.isAbsolute(dir)).map((dir) => path.posix.resolve(dir)))];
+  } catch (err) {
+    log.warn(`remote seed for ${workspaceId} trusts no directory: ${err instanceof Error ? err.message : err}`);
+    return [];
+  }
+};
+
+/** The Claude launch of a remote tab (ADR-0022): the kit's first-run seed, then its hooks, prompt and CLI on the host. */
 export const buildRemoteClaudeLaunch = async (workspaceId: string, opts?: { model?: string; effort?: string }): Promise<string> => {
   const { buildRemoteClaudeCommand } = await import('@/lib/remote-kit');
   return buildRemoteClaudeCommand({
@@ -55,6 +70,7 @@ export const buildRemoteClaudeLaunch = async (workspaceId: string, opts?: { mode
     ...(opts?.model && isValidModelName(opts.model) ? { model: opts.model } : {}),
     ...(opts?.effort && isValidClaudeEffort(opts.effort) ? { effort: opts.effort } : {}),
     skipPermissions: await getDangerouslySkipPermissions(),
+    workspaceDirectories: await remoteSeedDirectories(workspaceId),
   });
 };
 

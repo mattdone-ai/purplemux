@@ -42,6 +42,7 @@ import {
   RemoteKitBrokenError,
   buildRemoteCreateScript,
   buildRemoteKitProbeScript,
+  buildRemotePromptScript,
   readRemoteCliModules,
   remoteKitFiles,
   remoteKitPath,
@@ -212,6 +213,18 @@ export const probeRemoteKit = async (name: string): Promise<void> => {
 };
 
 /**
+ * Rewrite one workspace's prompt copy in the kit on `host` (D32): the next Claude launch there loads `prompt`. One
+ * `ssh … sh -s` run, the content on stdin; no session is started or touched. Throws an Error that names the host.
+ */
+export const pushRemotePrompt = async (host: string, workspaceId: string, prompt: string): Promise<void> => {
+  try {
+    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: buildRemotePromptScript(workspaceId, prompt) });
+  } catch (err) {
+    throw new Error(`the prompt copy of ${workspaceId} on ${host} was not written (${describeRemoteFailure(err)})`);
+  }
+};
+
+/**
  * A remote tab's session (ADR-0022 §8; slice b). One `ssh … sh -s` run writes
  * the kit (tmux.conf, the Claude hook and hooks.json, this server's CLI, the
  * workspace prompt) and the tab's one-shot env file, then starts the session.
@@ -250,7 +263,7 @@ const createRemoteSession = async (
   const nonce = nanoid(16);
   const script = buildRemoteCreateScript({
     nonce,
-    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv, trustSeed: !!trust }),
+    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv }),
     session: name,
     cols,
     rows,

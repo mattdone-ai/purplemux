@@ -252,7 +252,7 @@ describe('who changes which orders, and what a change reaches (story 14 AC 1, AC
     const result = await strikeStandingOrder(f.deps(), ADMIN, 'SO-7', 'replaced by the board push');
     expect(f.prompts).toEqual(['ws-a', 'ws-b']);
     expect(f.routed.map((r) => [r.tabId, r.class, r.text])).toEqual(f.tabs.map((t) => [t.tabId, 'urgent',
-      '[purplemux standing order] SO-7 struck (fleet): Answer a bare status ask with `purplemux board show --line` and the board URL. — it no longer holds']));
+      '[purplemux standing order] SO-7 struck (fleet): Answer a bare status ask with `purplemux board show --line` and the board URL. — it no longer holds, even where your session prompt still lists it; purplemux so list is the authority']));
     expect(result).toMatchObject({ promptsWritten: 2, tabsNotified: 3 });
   });
 
@@ -306,5 +306,92 @@ describe('the workspace prompt file carries the active orders at every launch (s
     await fs.writeFile(orderFilePath('fleet'), '# Standing orders: fleet\n\n## SO-x\n');
     await writeClaudePromptFile({ id: 'ws-a' });
     expect(await fs.readFile(getClaudePromptPath('ws-a'), 'utf-8')).toMatch(/The standing orders could not be read \(.*"## SO-x" is not an order id/);
+  });
+});
+
+describe('D32: a struck order leaves every prompt it reached, and the section names its time and its authority', () => {
+  const AUTHORITY = 'Rendered 2026-11-03T10:00:00Z. `purplemux so list` is the authority; an order missing there is struck.';
+
+  it('(a) the section states when it was rendered, that so list is the authority, and that a running session keeps its copy', async () => {
+    const { promptSectionFor } = await lib();
+    const section = await promptSectionFor('ws-a', T0);
+    expect(section.split('\n').slice(0, 3)).toEqual(['## Standing orders', '', AUTHORITY]);
+    expect(section).toContain('This session loaded the list below at launch, and a later add or strike does not change it');
+    expect(section).toContain('Before an order makes you hold, ask, or refuse work, run\n`purplemux so list`.');
+    expect(section).toContain('- **SO-1** (fleet; check: prose)');
+  });
+
+  it('(a) the prompt file a launch loads carries the rendered time, and a file that cannot be read still names the authority', async () => {
+    const { orderFilePath } = await lib();
+    const { writeClaudePromptFile, getClaudePromptPath } = await import('@/lib/claude-prompt');
+    await writeClaudePromptFile({ id: 'ws-a' });
+    expect(await fs.readFile(getClaudePromptPath('ws-a'), 'utf-8')).toMatch(/^Rendered \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\. `purplemux so list` is the authority; an order missing there is struck\.$/m);
+    await fs.writeFile(orderFilePath('fleet'), '# Standing orders: fleet\n\n## SO-x\n');
+    const { promptSectionFor } = await lib();
+    expect(await promptSectionFor('ws-a', T0)).toMatch(/^## Standing orders\n\nRendered 2026-11-03T10:00:00Z\. The standing orders could not be read [^]* it is the authority\.\n$/);
+  });
+
+  it('(a) with every order struck the section stays, says none is active, and keeps the authority line', async () => {
+    const { strikeOrder, promptSectionFor, seed } = await lib();
+    for (const order of seed) await strikeOrder(order.id, 'test', () => {}, T0);
+    const section = await promptSectionFor('ws-a', T0);
+    expect(section).toContain(AUTHORITY);
+    expect(section).toContain('No standing order was active when this list was rendered.');
+    expect(section).not.toMatch(/- \*\*SO-\d+\*\*/);
+  });
+
+  it('(a) the 8 KB budget measures the section with its header, whatever the instant', async () => {
+    const { sectionBytes, renderPromptSection, readOrderFile } = await lib();
+    const fleet = (await readOrderFile('fleet')).orders;
+    expect(sectionBytes(fleet, [])).toBe(Buffer.byteLength(renderPromptSection(fleet, [], T0)));
+    expect(sectionBytes(fleet, [])).toBe(Buffer.byteLength(renderPromptSection(fleet, [], Date.UTC(2099, 11, 31, 23, 59, 59))));
+  });
+
+  const refreshDeps = (pushed: Array<{ host: string; ws: string; prompt: string }>, hosts: Record<string, string[]>, failOn: string | null = null) => ({
+    writeLocal: async (ws: string) => (await import('@/lib/claude-prompt')).writeClaudePromptFile({ id: ws }),
+    readLocal: async (ws: string) => fs.readFile((await import('@/lib/claude-prompt')).getClaudePromptPath(ws), 'utf-8'),
+    remoteHosts: async (ws: string) => hosts[ws] ?? [],
+    push: async (host: string, ws: string, prompt: string) => {
+      if (host === failOn) throw new Error('ssh: connect to host timed out');
+      pushed.push({ host, ws, prompt });
+    },
+  });
+
+  it('(b) a fleet strike rewrites the prompt file of every workspace it reached, and the kit copy on each remote host', async () => {
+    const { strikeStandingOrder } = await lib();
+    const { refreshWorkspacePrompt } = await import('@/lib/workspace-prompt-refresh');
+    const { writeClaudePromptFile, getClaudePromptPath } = await import('@/lib/claude-prompt');
+    for (const ws of ['ws-a', 'ws-b']) await writeClaudePromptFile({ id: ws });
+    for (const ws of ['ws-a', 'ws-b']) expect(await fs.readFile(getClaudePromptPath(ws), 'utf-8')).toContain('- **SO-7** (fleet');
+    const pushed: Array<{ host: string; ws: string; prompt: string }> = [];
+    const f = new Fanout();
+    const rdeps = refreshDeps(pushed, { 'ws-b': ['ai-server', 'mdserver1', 'ai-server'] });
+    const result = await strikeStandingOrder({ ...f.deps(), refreshPrompt: (ws) => refreshWorkspacePrompt(ws, rdeps) }, ADMIN, 'SO-7', 'replaced');
+    expect(result).toMatchObject({ promptsWritten: 2, tabsNotified: 3 });
+    for (const ws of ['ws-a', 'ws-b']) {
+      const prompt = await fs.readFile(getClaudePromptPath(ws), 'utf-8');
+      expect(prompt).not.toContain('SO-7');
+      expect(prompt).toContain('- **SO-6** (fleet');
+    }
+    // Each host once, with the text of the local file: a new launch there loads the order list as it is now.
+    expect(pushed.map((p) => `${p.host}:${p.ws}`)).toEqual(['ai-server:ws-b', 'mdserver1:ws-b']);
+    const local = await fs.readFile(getClaudePromptPath('ws-b'), 'utf-8');
+    expect(pushed.every((p) => p.prompt === local)).toBe(true);
+  });
+
+  it('(b) a remote copy that is not written is said, by host, and the local file and the other hosts stay written', async () => {
+    const { strikeStandingOrder } = await lib();
+    const { refreshWorkspacePrompt } = await import('@/lib/workspace-prompt-refresh');
+    const { getClaudePromptPath } = await import('@/lib/claude-prompt');
+    const pushed: Array<{ host: string; ws: string; prompt: string }> = [];
+    const rdeps = refreshDeps(pushed, { 'ws-a': ['ai-server', 'ai-2'] }, 'ai-server');
+    await expect(refreshWorkspacePrompt('ws-a', rdeps)).rejects.toThrow(
+      'the local prompt file of ws-a is written; the remote copy is not, on 1 of 2 hosts: ai-server: ssh: connect to host timed out');
+    expect(pushed.map((p) => p.host)).toEqual(['ai-2']);
+    const f = new Fanout();
+    const result = await strikeStandingOrder({ ...f.deps(), refreshPrompt: (ws) => refreshWorkspacePrompt(ws, rdeps) }, ADMIN, 'SO-3', 'test');
+    expect(await fs.readFile(getClaudePromptPath('ws-a'), 'utf-8')).not.toContain('SO-3');
+    // ws-a counts as not written; ws-b, with no remote host, is.
+    expect(result.promptsWritten).toBe(1);
   });
 });

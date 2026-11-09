@@ -17,6 +17,7 @@ import {
   type IOrderInput,
   type IStandingOrder,
   type IStandingOrderFile,
+  utcSecond,
 } from '@/lib/standing-orders';
 
 // The files (ADR-0041): `~/.purplemux/standing-orders.md` for the fleet and
@@ -150,13 +151,16 @@ const readAllOrderFilesLocked = async (): Promise<IStandingOrderFile[]> => {
   return Promise.all(owners.map(readOrderFileLocked));
 };
 
-/** The prompt section one workspace's tabs load; a file that cannot be read is said, never silently dropped. */
-export const promptSectionFor = async (workspaceId: string): Promise<string> => {
+/**
+ * The prompt section one workspace's tabs load, rendered at `now`; a file that cannot be read is said, never silently
+ * dropped.
+ */
+export const promptSectionFor = async (workspaceId: string, now: number = Date.now()): Promise<string> => {
   try {
     const [fleet, own] = await Promise.all([readOrderFile(FLEET), readOrderFile(workspaceId)]);
-    return renderPromptSection(fleet.orders, own.orders);
+    return renderPromptSection(fleet.orders, own.orders, now);
   } catch (err) {
-    return `## Standing orders\n\nThe standing orders could not be read (${err instanceof Error ? err.message : String(err)}). Run \`purplemux so list\` before you ask the owner anything.\n`;
+    return `## Standing orders\n\nRendered ${utcSecond(now)}. The standing orders could not be read (${err instanceof Error ? err.message : String(err)}). Run \`purplemux so list\` before you ask the owner anything: it is the authority.\n`;
   }
 };
 

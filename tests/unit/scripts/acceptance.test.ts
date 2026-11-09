@@ -1367,12 +1367,43 @@ exit 0`,
   });
 
   it('an unreadable live socket is a FAIL, never a silent pass; no live server at all is a pass that says so', () => {
-    const unreadable = runGate({ tmuxRc: 1, tmuxErr: 'error connecting to /tmp/tmux-1000/purple (Permission denied)' });
-    expect(unreadable.status).toBe(1);
-    expect(unreadable.log).toContain('FAIL live-socket-untouched — the live tmux socket could not be read');
+    // A socket directory the gate cannot search: lstat answers EACCES, not ENOENT.
+    const sockDir = path.join(root, 'tmux-1000');
+    fs.mkdirSync(sockDir, { mode: 0o000 });
+    try {
+      const unreadable = runGate({ tmuxRc: 1, tmuxErr: `error connecting to ${sockDir}/purple (Permission denied)` });
+      expect(unreadable.status).toBe(1);
+      expect(unreadable.log).toContain('FAIL live-socket-untouched — the live tmux socket could not be read');
+    } finally {
+      fs.chmodSync(sockDir, 0o700);
+    }
     const none = runGate({ tmuxRc: 1, tmuxErr: 'no server running on /tmp/tmux-1000/purple' });
     expect(none.status).toBe(0);
     expect(none.log).toContain('PASS live-socket-untouched — no live tmux server is running');
+  });
+
+  it('a host with no live purplemux (no socket file, ENOENT) is a pass that names the absent socket', () => {
+    // Measured on a fresh host (2026-11-09): no /tmp/tmux-<uid> at all, so tmux exits 1 with ENOENT.
+    const sock = path.join(root, 'no-live', 'tmux-1002', 'purple');
+    const r = runGate({ tmuxRc: 1, tmuxErr: `error connecting to ${sock} (No such file or directory)` });
+    expect(r.status, r.log).toBe(0);
+    expect(r.log).toContain(`PASS live-socket-untouched — no live tmux server: the socket ${sock} does not exist (ENOENT)`);
+    expect(r.log).toMatch(/^ACCEPTANCE=PASS log=/m);
+  });
+
+  it('ENOENT is read from lstat, never from the message: a socket path that exists still fails', () => {
+    const sock = path.join(root, 'purple');
+    fs.writeFileSync(sock, '');
+    const r = runGate({ tmuxRc: 1, tmuxErr: `error connecting to ${sock} (No such file or directory)` });
+    expect(r.status).toBe(1);
+    expect(r.log).toContain('FAIL live-socket-untouched — the live tmux socket could not be read');
+    expect(r.log).toMatch(/live_socket=fail/);
+  });
+
+  it('any other tmux read failure still fails, whatever the socket state', () => {
+    const r = runGate({ tmuxRc: 1, tmuxErr: 'server exited unexpectedly' });
+    expect(r.status).toBe(1);
+    expect(r.log).toContain('FAIL live-socket-untouched — the live tmux socket could not be read — measured: exit 1 server exited unexpectedly');
   });
 });
 

@@ -82,6 +82,39 @@ describe('remote Claude hook script (ADR-0022)', () => {
     expect((fs.statSync(spoolDir()).mode & 0o777)).toBe(0o700);
   });
 
+  // The server cannot have received a request that curl never sent. Measured 2026-11-09: the
+  // callback name did not resolve on the remote host, curl exited 6, and every event was lost.
+  it.each([
+    ['6 (the callback host name did not resolve)', { out: '000 0.000000', exit: 6 }],
+    ['5 (the proxy name did not resolve)', { out: '000 0.000000', exit: 5 }],
+    ['7 (the connect was refused)', { out: '000 0.000000', exit: 7 }],
+    ['28 before the connect', { out: '000 0.000000', exit: 28 }],
+    ['35 (the TLS handshake failed)', { out: '000 0.000140', exit: 35 }],
+    ['60 (the TLS peer certificate failed verification)', { out: '000 0.000140', exit: 60 }],
+    ['a 5xx answer', { out: '503 0.000200', exit: 0 }],
+  ])('spools when curl exits %s', (_label, curl) => {
+    run('stop', '{"session_id":"0f9e"}', curl);
+    const files = spooled();
+    expect(files).toHaveLength(1);
+    const hook = parseSpooledHook(fs.readFileSync(path.join(spoolDir(), files[0]), 'utf-8'));
+    expect(hook?.body).toEqual({ session_id: '0f9e' });
+    expect(spooledHookQuery(hook!.query)).toMatchObject({ remote: 'claude', event: 'stop', session: SESSION });
+  });
+
+  // The server received these requests and may have applied them: a replay would repeat them.
+  it.each([
+    ['a 2xx answer', { out: '204 0.000100', exit: 0 }],
+    ['a 4xx refusal', { out: '403 0.000200', exit: 0 }],
+    ['a 404 answer', { out: '404 0.000200', exit: 0 }],
+    ['28 after the connect', { out: '000 0.000180', exit: 28 }],
+    ['52 (empty reply: the server cut the connection)', { out: '000 0.000150', exit: 52 }],
+    ['56 (receive failure)', { out: '000 0.000150', exit: 56 }],
+  ])('does not spool on %s', (_label, curl) => {
+    run('stop', '{"session_id":"0f9e"}', curl);
+    expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(true);
+    expect(spooled()).toEqual([]);
+  });
+
   it('spools when no callback URL or token is set, and never posts without a token', () => {
     run('stop', '{}', { out: '204 0.000100', exit: 0 }, { PMUX_TAB_TOKEN: '' });
     expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(false);

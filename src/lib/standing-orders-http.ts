@@ -5,6 +5,7 @@ import { getStatusManager } from '@/lib/status-manager';
 import type { StandingOrderError, TStandingOrderErrorCode } from '@/lib/standing-orders';
 import type { IStandingOrderDeps } from '@/lib/standing-orders-service';
 import { getWorkspaces } from '@/lib/workspace-store';
+import { defaultPromptRefreshDeps, refreshWorkspacePrompt } from '@/lib/workspace-prompt-refresh';
 
 const log = createLogger('standing-orders');
 
@@ -31,10 +32,8 @@ export const sendStandingOrderError = (res: NextApiResponse, err: unknown): void
 export const standingOrderDeps = (): IStandingOrderDeps => ({
   now: () => Date.now(),
   workspaceIds: async () => (await getWorkspaces()).workspaces.map((ws) => ws.id),
-  refreshPrompt: async (workspaceId) => {
-    const { writeClaudePromptFile } = await import('@/lib/claude-prompt');
-    await writeClaudePromptFile({ id: workspaceId });
-  },
+  // The local file and each remote kit copy (D32), so the next launch anywhere loads the orders as they are now.
+  refreshPrompt: (workspaceId) => refreshWorkspacePrompt(workspaceId, defaultPromptRefreshDeps()),
   liveAgentTabs: (workspaceId) => getStatusManager().liveAgentTabs(workspaceId),
   route: (event) => getStatusManager().routeTabEvent(event),
 });

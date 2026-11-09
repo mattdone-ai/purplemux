@@ -129,6 +129,8 @@ describe('hook scripts spool an event no server answered (ADR-0020)', () => {
   it.each([
     ['a 5xx answer', { out: '503 0.000200', exit: 0 }],
     ['a connect timeout (exit 28, never connected)', { out: '000 0.000000', exit: 28 }],
+    ['an unresolved host name (exit 6)', { out: '000 0.000000', exit: 6 }],
+    ['a failed TLS handshake (exit 35)', { out: '000 0.000140', exit: 35 }],
   ])('spools on %s', (_label, curl: ICurlBehaviour) => {
     run(HOOK_SCRIPT_CONTENT, ['prompt-submit'], '{}', curl);
     expect(readOnly().body).toEqual({ event: 'prompt-submit', session: SESSION });

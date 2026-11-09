@@ -8,7 +8,8 @@ import { buildRemoteLoginShellCommand } from '@/lib/shell-env';
  * `$HOME/.purplemux-remote/<origin>/`: the tmux config, the Claude hook script
  * and its hooks.json, this server's CLI (`bin/purplemux`, so a worker's
  * `purplemux` reaches this server through `PMUX_URL`), each workspace's Claude
- * prompt, and a tab's one-shot env file. Pure text builders: `tmux.ts` sends
+ * prompt, the seed script for Claude Code's trust and first-run state
+ * (`trust-seed.py`), and a tab's one-shot env file. Pure text builders: `tmux.ts` sends
  * them in one `ssh … sh -s` run.
  */
 
@@ -17,6 +18,8 @@ export const remoteKitPath = (relative = ''): string =>
   `"$HOME/.purplemux-remote/${originName()}${relative ? `/${relative}` : ''}"`;
 
 const kitPathUnquoted = (relative: string): string => `$HOME/.purplemux-remote/${originName()}/${relative}`;
+
+export const REMOTE_TRUST_SEED_RELATIVE = 'trust-seed.py';
 
 export const REMOTE_CLI_WRAPPER = `#!/bin/sh
 exec node "$(dirname "$0")/cli.js" "$@"
@@ -43,34 +46,61 @@ export const remoteTabEnvFile = (vars: Record<string, string>): string =>
  * The Claude launch for a remote tab: the kit's `bin` first on PATH (the
  * worker's `purplemux`), the kit's hooks.json, the workspace prompt when the
  * kit always has (empty when this host has none). Typed into the remote pane, whose shell expands `$HOME`.
+ *
+ * The first-run seed runs first, in the same typed line (`;`, so a seed that fails or a host without python3
+ * still starts claude): a Claude process that exits writes its in-memory `~/.claude.json` back (measured
+ * 2026-11-09), so a seed written at session create can be lost before this launch reads it. `$PWD` is the
+ * pane's cwd when the line runs, which is the directory claude starts in.
  */
 export const buildRemoteClaudeCommand = (opts: {
   workspaceId?: string;
   model?: string;
   effort?: string;
   skipPermissions?: boolean;
+  /** The workspace's directories on this server's record: the seed trusts the cwd only under one of them. */
+  workspaceDirectories?: readonly string[];
 }): string => {
+  const seed = [
+    'python3', remoteKitPath(REMOTE_TRUST_SEED_RELATIVE), '--first-run',
+    ...(opts.skipPermissions ? ['--bypass-permissions'] : []),
+    '"$PWD"', ...(opts.workspaceDirectories ?? []).map(shQuote),
+  ].join(' ');
   const parts = [`PATH=${remoteKitPath('bin')}:"$PATH"`, 'claude', '--settings', remoteKitPath('hooks.json')];
   if (opts.workspaceId) parts.push('--append-system-prompt-file', remoteKitPath(remotePromptRelative(opts.workspaceId)));
   if (opts.model) parts.push('--model', opts.model);
   if (opts.effort) parts.push('--effort', opts.effort);
   if (opts.skipPermissions) parts.push('--dangerously-skip-permissions');
-  return parts.join(' ');
+  return `command -v python3 >/dev/null 2>&1 && ${seed} >/dev/null 2>&1; ${parts.join(' ')}`;
 };
 
 /**
- * The remote half of the pre-trust (D14, ruling R-05, story 05 consult ruling): the same keys as
- * workspace-trust.ts (each key only when its REAL path is inside the workspace directory's real path),
- * written into the remote user's `~/.claude.json` for the tab's cwd by an atomic
- * read-modify-write (a temporary in the same directory, then one rename). A remote tab has no claude home
- * of its own (ADR-0022), so its Claude reads that file. Python, not node: `ssh … sh -s` reads no login
- * profile, and on the pool hosts `node` is on PATH only in a login shell (measured on mdserver1). Exit 0:
- * written or nothing to change; 3: the cwd is outside the workspace directory; 4: the file is unreadable
- * and is left as it is. The create script ignores every exit: a lost seed shows the dialog, which the
- * status reader reports as `startup-prompt`.
+ * The remote user's Claude Code state, written by one script (`trust-seed.py`) with an atomic read-modify-write
+ * per file: a temporary in the same directory, then one rename, every other key kept. A remote tab has no claude
+ * home of its own (ADR-0022), so its Claude reads `~/.claude.json` and `~/.claude/settings.json` there. Python, not
+ * node: `ssh … sh -s` reads no login profile, and on the pool hosts `node` is on PATH only in a login shell
+ * (measured on mdserver1).
+ *
+ * `trust-seed.py [--first-run] [--bypass-permissions] <cwd> [<workspace directory>...]`
+ *
+ * - Always: the pre-trust (D14, ruling R-05, story 05 consult ruling), the same keys as workspace-trust.ts for the
+ *   cwd, its git root and its main repository root, each only when its REAL path is inside the deepest workspace
+ *   directory that holds the cwd's real path.
+ * - `--first-run`: the onboarding a new host asks for before the first prompt (measured 2026-11-09 on two new
+ *   hosts: the theme picker, then the project onboarding): `hasCompletedOnboarding`, a `theme` when none is set,
+ *   and `hasCompletedProjectOnboarding` on each trusted project.
+ * - `--bypass-permissions`: `skipDangerousModePermissionPrompt` in `~/.claude/settings.json`, for a launch with
+ *   `--dangerously-skip-permissions` (the warning was the second stop on those hosts).
+ *
+ * Exit 0: written or nothing to change; 2: an unknown flag, nothing written; 3: the cwd is outside every workspace
+ * directory (the first-run keys are still written); 4: a file is unreadable and is left as it is (the other file is
+ * still written). Every caller ignores the exit: a lost seed shows the dialog, which the status reader reports as
+ * `startup-prompt`.
  */
 export const REMOTE_TRUST_SEED_SCRIPT = `import json, os, sys, tempfile
 TRUST_KEYS = ('hasTrustDialogAccepted', 'hasClaudeMdExternalIncludesApproved', 'hasClaudeMdExternalIncludesWarningShown')
+FIRST_RUN_PROJECT_KEYS = ('hasCompletedProjectOnboarding',)
+FLAGS = ('--first-run', '--bypass-permissions')
+DEFAULT_THEME = 'dark'
 
 def within(child, root):
     return child == root or child.startswith(root.rstrip('/') + '/')
@@ -94,12 +124,16 @@ def main_repository_root(git_root):
     common_dir = os.path.realpath(os.path.join(git_dir, common))
     return os.path.dirname(common_dir) if os.path.basename(common_dir) == '.git' else None
 
-def main(cwd, workspace_dir):
+def trust_keys(cwd, workspace_dirs):
     # Real paths only (review r1 BLOCK): a symlink inside the workspace that points out of it, or a
     # <ws>/link/.. form, leaves the workspace when the process resolves it; a lexical match never counts.
-    real_cwd, real_ws = os.path.realpath(cwd), os.path.realpath(workspace_dir)
-    if not os.path.isdir(real_cwd) or not within(real_cwd, real_ws):
-        return 3
+    real_cwd = os.path.realpath(cwd)
+    if not os.path.isdir(real_cwd):
+        return None
+    holding = [real for real in (os.path.realpath(d) for d in workspace_dirs) if within(real_cwd, real)]
+    if not holding:
+        return None
+    real_ws = max(holding, key=len)
     candidates = [os.path.abspath(cwd), real_cwd]
     current = real_cwd
     while True:
@@ -117,20 +151,54 @@ def main(cwd, workspace_dir):
     for key in candidates:
         if key not in keys and os.path.exists(key) and within(os.path.realpath(key), real_ws):
             keys.append(key)
-    target = os.path.realpath(os.path.join(os.path.expanduser('~'), '.claude.json'))
+    return keys
+
+def read_object(target):
     try:
         with open(target, encoding='utf-8') as handle:
             data = json.load(handle)
     except FileNotFoundError:
-        data = {}
+        return {}
     except (OSError, ValueError):
-        return 4
-    if not isinstance(data, dict):
-        return 4
+        return None
+    return data if isinstance(data, dict) else None
+
+def write_object(target, data, mode=None):
+    # mode None keeps the file's own mode; a new file gets 0600.
+    directory = os.path.dirname(target)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    if mode is None:
+        try:
+            mode = os.stat(target).st_mode & 0o777
+        except FileNotFoundError:
+            mode = 0o600
+    fd, temporary = tempfile.mkstemp(prefix='.' + os.path.basename(target) + '.', dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    except BaseException:
+        os.unlink(temporary)
+        raise
+
+def seed_state(keys, first_run):
+    target = os.path.realpath(os.path.join(os.path.expanduser('~'), '.claude.json'))
+    data = read_object(target)
+    if data is None:
+        return False
+    changed = False
+    if first_run:
+        if data.get('hasCompletedOnboarding') is not True:
+            data['hasCompletedOnboarding'] = True
+            changed = True
+        if not isinstance(data.get('theme'), str) or not data.get('theme'):
+            data['theme'] = DEFAULT_THEME
+            changed = True
     projects = data.get('projects')
     if not isinstance(projects, dict):
         projects = {}
-    changed = False
+    names = TRUST_KEYS + (FIRST_RUN_PROJECT_KEYS if first_run else ())
     for key in keys:
         entry = projects.get(key)
         if entry is not None and not isinstance(entry, dict):
@@ -138,32 +206,48 @@ def main(cwd, workspace_dir):
         following = dict(entry or {})
         declined = following.get('hasClaudeMdExternalIncludesApproved') is False and following.get('hasClaudeMdExternalIncludesWarningShown') is True
         touched = entry is None
-        for name in TRUST_KEYS:
+        for name in names:
             if following.get(name) is True or (declined and name == 'hasClaudeMdExternalIncludesApproved'):
                 continue
             following[name] = True
             touched = True
         if touched:
             projects[key] = following
+            data['projects'] = projects
             changed = True
-    if not changed:
-        return 0
-    data['projects'] = projects
-    fd, temporary = tempfile.mkstemp(prefix='.claude.json.', dir=os.path.dirname(target))
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, target)
-    except BaseException:
-        os.unlink(temporary)
-        raise
-    return 0
+    if changed:
+        # 0600 whatever the file had: it holds the account.
+        write_object(target, data, 0o600)
+    return True
 
-sys.exit(main(sys.argv[1], sys.argv[2]))
+def seed_settings():
+    target = os.path.realpath(os.path.join(os.path.expanduser('~'), '.claude', 'settings.json'))
+    data = read_object(target)
+    if data is None:
+        return False
+    if data.get('skipDangerousModePermissionPrompt') is not True:
+        data['skipDangerousModePermissionPrompt'] = True
+        write_object(target, data)
+    return True
+
+def main(argv):
+    flags = []
+    while argv and argv[0].startswith('--'):
+        flags.append(argv.pop(0))
+    if any(flag not in FLAGS for flag in flags) or not argv:
+        return 2
+    first_run, bypass = '--first-run' in flags, '--bypass-permissions' in flags
+    keys = trust_keys(argv[0], argv[1:])
+    readable = seed_state(keys or [], first_run)
+    if bypass:
+        readable = seed_settings() and readable
+    if not readable:
+        return 4
+    return 3 if keys is None else 0
+
+sys.exit(main(sys.argv[1:]))
 `;
 
-export const REMOTE_TRUST_SEED_RELATIVE = 'trust-seed.py';
 
 export interface IRemoteKitFile {
   /** Relative to the kit directory; `[A-Za-z0-9._/-]` only. */
@@ -210,8 +294,6 @@ export const remoteKitFiles = (opts: {
   workspaceId?: string;
   prompt: string | null;
   tabEnv?: { tabId: string; content: string };
-  /** Ship the pre-trust script (a tab whose cwd is inside a workspace directory). */
-  trustSeed?: boolean;
 }): IRemoteKitFile[] => [
   { path: 'tmux.conf', content: opts.tmuxConf, mode: 0o600 },
   { path: 'status-hook.sh', content: REMOTE_HOOK_SCRIPT_CONTENT, mode: 0o700 },
@@ -225,7 +307,8 @@ export const remoteKitFiles = (opts: {
   // Always present for a workspace tab: the launch names it whether or not this host wrote one yet.
   ...(opts.workspaceId ? [{ path: remotePromptRelative(opts.workspaceId), content: opts.prompt ?? '', mode: 0o600 as const }] : []),
   ...(opts.tabEnv ? [{ path: remoteTabEnvRelative(opts.tabEnv.tabId), content: opts.tabEnv.content, mode: 0o600 as const }] : []),
-  ...(opts.trustSeed ? [{ path: REMOTE_TRUST_SEED_RELATIVE, content: REMOTE_TRUST_SEED_SCRIPT, mode: 0o600 as const }] : []),
+  // Every kit: the Claude launch line runs it whether or not the create pre-trusted the cwd.
+  { path: REMOTE_TRUST_SEED_RELATIVE, content: REMOTE_TRUST_SEED_SCRIPT, mode: 0o600 },
 ];
 
 /** The create script exits with this when the kit's CLI does not run on the host (story 12): no session was started. */
@@ -348,6 +431,13 @@ export const buildRemoteKitProbeScript = (files: readonly IRemoteKitFile[]): str
   const cliModules = kitCliModules(cli, 'a remote kit probe');
   return `${['set -e', ...kitWriteLines(cli, ['bin']), ...remoteKitProbeLines(cliModules)].join('\n')}\n`;
 };
+
+/**
+ * The workspace prompt alone (D32): a standing order changed, so the kit's copy is rewritten for the next launch on
+ * the host. Writes one file (base64, a temporary, one rename); starts no session and touches no live one.
+ */
+export const buildRemotePromptScript = (workspaceId: string, prompt: string): string =>
+  `${['set -e', ...kitWriteLines([{ path: remotePromptRelative(workspaceId), content: prompt, mode: 0o600 }], [])].join('\n')}\n`;
 
 /**
  * One `sh -s` script: refuse a session name that exists (exit 17, before any

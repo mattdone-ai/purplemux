@@ -40,10 +40,20 @@ export const HOOK_TMUX_TIMEOUT_SECONDS = 1;
 
 /**
  * Shared shell functions. `post_hook TARGET BODY [curl options]` POSTs one
- * event; when no server answers — no port file, a refused or timed-out
- * connect, or a 5xx — the event goes to `hook-spool/` as one JSON file, written
- * to a dot-named temporary and renamed, which the next server replays in time
- * order. A server that answered (2xx-4xx), or a timeout after the connect, is
+ * event; when no server answers — no port file, a 5xx, or a curl failure
+ * before the request left this host — the event goes to `hook-spool/` as one
+ * JSON file, written to a dot-named temporary and renamed, which the next
+ * server replays in time order.
+ *
+ * The rule: spool exactly when the server cannot have received the request.
+ * The curl exits that prove it are 5 and 6 (the proxy or the host name did not
+ * resolve), 7 (the connect was refused or failed), 28 with a zero
+ * `time_connect` (the timeout fired before the connect), 35 (the TLS handshake
+ * failed) and 60 (the TLS peer certificate failed verification). In each of
+ * them curl sent no HTTP request. A 5xx also spools: the server could not
+ * apply the event. Measured 2026-11-09 on a remote host whose callback name
+ * did not resolve: curl exited 6, nothing spooled, and every event of the tab
+ * was lost. A server that answered (2xx-4xx), or a timeout after the connect, is
  * never spooled: the server may have applied it. So is a connection the
  * server cut while it exited (curl 52/56): it may have applied the event, and a
  * replay would repeat it on a tab whose floor that server never persisted.
@@ -110,7 +120,7 @@ HOOK_HEADERS
   HOOK_RC=$?
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
-    7:*|*:5[0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
+    5:*|6:*|7:*|35:*|60:*|*:5[0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
     28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
   esac
   return 0
