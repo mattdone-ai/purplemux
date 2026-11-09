@@ -173,6 +173,16 @@ describe('POST /api/cli/tabs with a host (ADR-0022)', () => {
     expect(layout.addTabToPane).toHaveBeenCalledTimes(1);
   });
 
+  it('vel-PMX-FU: the creator\'s own --cwd of a remote tab is its trustCwd; a defaulted cwd is not', async () => {
+    registry.hosts = ['host-a'];
+    const named = await call('POST', { workspaceId: 'ws-a', host: 'host-a', cwd: '/srv/elsewhere/repo' });
+    expect(named.statusCode).toBe(201);
+    expect(layout.addTabToPane.mock.calls[0][6]).toMatchObject({ host: 'host-a', trustCwd: '/srv/elsewhere/repo' });
+    const defaulted = await call('POST', { workspaceId: 'ws-a', host: 'host-a' });
+    expect(defaulted.statusCode).toBe(201);
+    expect(layout.addTabToPane.mock.calls[1][6]).not.toHaveProperty('trustCwd');
+  });
+
   it.each(['relative/dir', '', '/x\ny', 7])('refuses a --cwd that is not an absolute path: %j', async (cwd) => {
     const state = await call('POST', { workspaceId: 'ws-a', host: 'ai-server', cwd });
     expect(state.statusCode).toBe(400);

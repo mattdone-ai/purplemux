@@ -292,4 +292,23 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     const { knownRemoteHosts } = await import('@/lib/session-host');
     expect(knownRemoteHosts()).toEqual([]);
   });
+
+  it('vel-PMX-FU: a remote tab keeps the cwd its creator named, creates with it, and restarts with it; a local tab never gets one', async () => {
+    await writeLayout('ws-a', baseLayout([]));
+    const { addTabToPane, restartTabSession } = await import('@/lib/layout-store');
+    const tab = await addTabToPane('ws-a', 'pane-1', 'w1', '/srv/elsewhere/repo', 'claude-code', undefined, { host: 'host-a', trustCwd: '/srv/elsewhere/repo' });
+    expect(tab?.trustCwd).toBe('/srv/elsewhere/repo');
+    expect(tmux.createSession.mock.calls[0][5]).toEqual({ trustCwd: '/srv/elsewhere/repo' });
+    const saved = JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8')) as ILayoutData;
+    expect((saved.root as { tabs: Array<{ trustCwd?: string }> }).tabs[0].trustCwd).toBe('/srv/elsewhere/repo');
+
+    const local = await addTabToPane('ws-a', 'pane-1', 'l1', '/srv/local', 'terminal', undefined, { trustCwd: '/srv/local' });
+    expect(local?.trustCwd).toBeUndefined();
+    expect(tmux.createSession.mock.calls[1]).toHaveLength(5);
+
+    tmux.hasSessionOrUnreachable.mockResolvedValueOnce(false);
+    expect(await restartTabSession('ws-a', 'pane-1', tab!.id)).toBe(true);
+    // A revival keeps the HOME fallback for a cwd the host lost (review r4).
+    expect(tmux.createSession.mock.calls.at(-1)?.[5]).toEqual({ trustCwd: '/srv/elsewhere/repo', revival: true });
+  });
 });

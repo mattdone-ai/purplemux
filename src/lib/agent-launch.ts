@@ -20,6 +20,8 @@ export interface IAgentLaunchTab {
   panelType?: TPanelType;
   /** A remote tab (ADR-0022) launches claude through the remote kit. */
   host?: string;
+  /** A remote tab's creator-named cwd: the launch seed pre-trusts it by name (vel-PMX-FU). */
+  trustCwd?: string;
   agentLaunchConfig?: IAgentLaunchConfig;
   /** Every launch of an evaluator tab carries its tool configuration (ADR-0040). */
   role?: TTabRole;
@@ -67,7 +69,7 @@ export const buildFreshLaunchCommand = async (workspaceId: string, tab: IAgentLa
     // The remote kit has no evaluator tool configuration: refuse rather than launch it unrestricted (ADR-0040).
     if (tab.host && role) throw new Error(`a ${role} tab cannot run on remote host ${tab.host} (ADR-0040)`);
     return tab.host
-      ? buildRemoteClaudeLaunch(workspaceId, { model, effort })
+      ? buildRemoteClaudeLaunch(workspaceId, { model, effort, ...(tab.trustCwd ? { trustCwd: tab.trustCwd } : {}) })
       : claudeCommand(await buildClaudeFlags(workspaceId, { model, effort, role, previewOrigin }), { role, pgService });
   }
   // The catch-all used to be codex, which launched codex inside a grok tab.

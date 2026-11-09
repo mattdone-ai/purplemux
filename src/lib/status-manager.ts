@@ -5,7 +5,8 @@ import { readLayoutFile, resolveLayoutFile, collectAllTabs, updateTabCliStatus, 
 import { HOOK_REPLAY_WINDOW_MS, HOOK_SPOOL_DIR, type IHookSpoolDrainResult } from '@/lib/hook-spool';
 import { HookFloorStore } from '@/lib/hook-floors';
 import { onTabClosed, onTabClosing, onTabRestart, RESTART_WINDOW_MS, type ITabRestartEvent } from '@/lib/tab-lifecycle';
-import { capturePaneContent, getAllPanesInfo, getListeningPorts, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid, observeRemoteProviderProcess } from '@/lib/tmux';
+import { captureRemotePanes, capturePaneContent, getAllPanesInfo, getListeningPorts, SAFE_SHELLS, getPaneTitle, getSessionCwd, getSessionPanePid, observeRemoteProviderProcess } from '@/lib/tmux';
+import { RemotePaneCaptures } from '@/lib/remote-pane-captures';
 import { sessionHostOf } from '@/lib/session-host';
 import { RemoteProofScheduler, type IRemoteProofRequest, type TRemoteProofWant } from '@/lib/remote-proof-scheduler';
 import { getChildPids } from '@/lib/process-utils';
@@ -209,6 +210,8 @@ const TAB_SCOPE_TTL_MS = 5 * 60_000;
 const POLL_INTERVAL_SMALL = 30_000;
 /** A poll running longer than this many poll intervals is taken as hung (vel-D61 review r2). */
 export const POLL_MAX_AGE_INTERVALS = 10;
+/** An unread absent proof expires after this many poll intervals (vel-PMX-FU). */
+export const REMOTE_ABSENT_TTL_INTERVALS = 10;
 const POLL_INTERVAL_MEDIUM = 45_000;
 const POLL_INTERVAL_LARGE = 60_000;
 const TAB_COUNT_MEDIUM = 11;
@@ -328,6 +331,15 @@ export class StatusManager {
     observe: (sessionName, want) => observeRemoteProviderProcess(sessionName, want),
     now: () => Date.now(),
     onUnknown: (req, reason) => log.info({ tabId: req.tabId, host: req.host, reason }, 'remote process proof unknown; host proofs back off'),
+    // An unread absent waits for its read, but not for ever (vel-PMX-FU): ten poll intervals.
+    absentTtlMs: () => REMOTE_ABSENT_TTL_INTERVALS * this.pollIntervalMs(),
+  });
+  /** The readiness probe's remote pane captures, one background ssh per host (vel-PMX-FU). */
+  private readonly remoteCaptures = new RemotePaneCaptures({
+    capture: (host, sessions) => captureRemotePanes(host, sessions),
+    now: () => Date.now(),
+    maxAgeMs: () => 2 * this.pollIntervalMs(),
+    onFailure: (host, reason) => log.info({ host, reason }, 'remote readiness capture failed; host captures back off'),
   });
   private currentInterval = 0;
   private clients = new Set<WebSocket>();
@@ -1065,7 +1077,7 @@ export class StatusManager {
     const current = this.pollRun;
     if (current) {
       const runningForMs = Date.now() - current.startedAt;
-      const maxAgeMs = POLL_MAX_AGE_INTERVALS * (this.currentInterval || this.getPollingInterval());
+      const maxAgeMs = POLL_MAX_AGE_INTERVALS * this.pollIntervalMs();
       if (runningForMs < maxAgeMs) {
         if (!this.pollFollowUp) {
           let resolve!: () => void;
@@ -1094,6 +1106,18 @@ export class StatusManager {
       this.startPoll().then(followUp.resolve, followUp.reject);
     });
     return done;
+  }
+
+  /** The poll interval in force, or the one the tab count gives before polling starts. */
+  private pollIntervalMs(): number {
+    return this.currentInterval || this.getPollingInterval();
+  }
+
+  /** A fresh batched capture of the remote pane, taken once; undefined after asking for the next one. */
+  private takeRemoteCapture(host: string, sessionName: string): string | null | undefined {
+    const content = this.remoteCaptures.take(sessionName);
+    if (content === undefined) this.remoteCaptures.request(host, sessionName);
+    return content;
   }
 
   /** False once a newer poll superseded this one: it then stops and applies nothing more. */
@@ -1415,12 +1439,14 @@ export class StatusManager {
     }
 
     current();
-    // Not awaited: the next poll reads what these proofs answer (vel-D61).
+    // Not awaited: the next poll reads what these proofs and captures answer (vel-D61, vel-PMX-FU).
     if (proofRequests.length > 0) void this.remoteProofs.schedule(proofRequests);
+    void this.remoteCaptures.flush();
 
     for (const tabId of tabsBeforePoll) {
       if (!knownTabIds.has(tabId) && this.tabs.has(tabId)) {
         this.remoteProofs.forget(tabId);
+        this.remoteCaptures.forget(this.tabs.get(tabId)!.tmuxSession);
         this.stopJsonlWatch(tabId);
         this.tabs.delete(tabId);
         this.orchestrationPendingLaunches.delete(tabId);
@@ -1444,14 +1470,18 @@ export class StatusManager {
       this.startPolling();
     }
 
+    // A superseded poll stops between the steps too, not only inside the tab loop (vel-PMX-FU, D61 CONFIRM).
+    current();
     await this.runWatchdogTimers(Date.now()).catch((err) => {
       log.warn(`watchdog timers failed: ${err instanceof Error ? err.message : err}`);
     });
 
+    current();
     await this.runOrchestratorKeeper().catch((err) => {
       log.warn(`orchestrator keeper failed: ${err instanceof Error ? err.message : err}`);
     });
 
+    current();
     await getLivenessManager().tick((event) => {
       this.handleLivenessEvent(event).catch((err) => {
         log.warn(`liveness event handling failed: ${err instanceof Error ? err.message : err}`);
@@ -1460,6 +1490,7 @@ export class StatusManager {
       log.warn(`liveness tick failed: ${err instanceof Error ? err.message : err}`);
     });
 
+    current();
     await getLeaseSweeper().sweep().catch((err) => {
       log.warn(`lease sweep failed: ${err instanceof Error ? err.message : err}`);
     });
@@ -2945,7 +2976,9 @@ export class StatusManager {
     if (launch !== undefined && now - launch < READINESS_PROBE_AFTER_MS) return 'unread';
     // The pane at its own size: the marker check needs no width, and a resize
     // would pause a narrow viewer on every poll while a trust prompt waits.
-    const content = await capturePaneContent(entry.tmuxSession, { escapes: true });
+    // A remote pane's screen comes from the host's batched capture, read at the next poll (vel-PMX-FU).
+    const content = entry.host ? this.takeRemoteCapture(entry.host, entry.tmuxSession) : await capturePaneContent(entry.tmuxSession, { escapes: true });
+    if (content === undefined) return 'unread';
     if (!content) return 'other';
     if (paneShowsEmptyComposer(entry.panelType, content)) return 'ready';
     return paneStartupPrompt(entry.panelType, content) ?? 'other';

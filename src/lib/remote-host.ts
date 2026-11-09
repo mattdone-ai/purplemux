@@ -379,6 +379,55 @@ done
 printf 'absent\tno %s process in the pane\n' "$want"
 `;
 
+/**
+ * The readiness captures of several remote panes in one `sh -s -- SOCKET NONCE SESSION...` run (vel-PMX-FU): one ssh
+ * per host, never one per tab. Each pane prints a header line `<nonce> ok <session>` and its visible content
+ * (`capture-pane -p -e`, as the local probe reads it), or `<nonce> gone <session>`; the run ends with `<nonce> end`.
+ * The nonce is random per call, so no pane text can pass as a header.
+ */
+export const REMOTE_CAPTURE_SCRIPT = `sock=$1; nonce=$2; shift 2
+for s in "$@"; do
+  if out=$(tmux -L "$sock" capture-pane -p -e -t "=$s:" 2>/dev/null); then
+    printf '%s ok %s\\n' "$nonce" "$s"
+    printf '%s\\n' "$out"
+  else
+    printf '%s gone %s\\n' "$nonce" "$s"
+  fi
+done
+printf '%s end\\n' "$nonce"
+`;
+
+/** Session → its pane text, or null when tmux could not capture it. Null overall when the run did not finish. */
+export const parseRemoteCaptures = (stdout: string, nonce: string): Map<string, string | null> | null => {
+  const lines = stdout.split('\n');
+  const result = new Map<string, string | null>();
+  let current: string | null = null;
+  let body: string[] = [];
+  const close = () => {
+    if (current !== null) result.set(current, `${body.join('\n')}\n`);
+    current = null;
+    body = [];
+  };
+  for (const line of lines) {
+    if (line === `${nonce} end`) {
+      close();
+      return result;
+    }
+    if (line.startsWith(`${nonce} ok `)) {
+      close();
+      current = line.slice(nonce.length + 4);
+      continue;
+    }
+    if (line.startsWith(`${nonce} gone `)) {
+      close();
+      result.set(line.slice(nonce.length + 6), null);
+      continue;
+    }
+    if (current !== null) body.push(line);
+  }
+  return null;
+};
+
 export type TRemoteProviderObservation =
   | { state: 'present'; paneId: string; panePid: string; pid: string; start: string }
   | { state: 'absent' | 'unknown'; reason: string };

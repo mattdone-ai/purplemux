@@ -9,8 +9,8 @@ import type { TStrictRuntimeObservation } from '@/lib/process-utils';
  *
  * - `present` is kept for `ttlMs` under its key (the session, the pane, its foreground command and the agent's
  *   launch): a new key proves again.
- * - `absent` is kept, with no TTL, until one read takes it: the transition it causes happens at that read, and
- *   a relaunch (a new key) never meets it.
+ * - `absent` is kept until one read takes it, up to `absentTtlMs` (long: the poll sets ten poll intervals): the
+ *   transition it causes happens at that read, and a relaunch (a new key) never meets it.
  * - `unknown` (ssh failed or timed out) is never kept; that host's proofs back off `backoffMs` and its queue is
  *   dropped (the next poll asks again).
  */
@@ -30,6 +30,8 @@ export interface IRemoteProofDeps {
   observe: (sessionName: string, want: TRemoteProofWant) => Promise<TStrictRuntimeObservation>;
   now: () => number;
   onUnknown?: (req: IRemoteProofRequest, reason: string) => void;
+  /** How long an unread absent answer waits for its read; unset waits without limit. */
+  absentTtlMs?: () => number;
 }
 
 export const REMOTE_PROOF_TTL_MS = 60_000;
@@ -67,8 +69,9 @@ export class RemoteProofScheduler {
   read(req: IRemoteProofRequest): boolean | null {
     const result = this.results.get(req.tabId);
     if (!result) return null;
-    // An absent answer has no TTL: it waits for one read, however late the next poll comes (review r3 C2).
-    if (result.key !== req.key || (result.state === 'present' && this.deps.now() - result.at >= this.opts.ttlMs)) {
+    // An absent answer outlives the present TTL: it waits for one read however late the next poll comes (review
+    // r3 C2), up to its own long limit (vel-PMX-FU: ten poll intervals).
+    if (result.key !== req.key || this.expired(result)) {
       this.results.delete(req.tabId);
       return null;
     }
@@ -115,6 +118,11 @@ export class RemoteProofScheduler {
     for (const queue of this.queues.values()) queue.delete(tabId);
   }
 
+  private expired(result: IResult): boolean {
+    const ttl = result.state === 'present' ? this.opts.ttlMs : this.deps.absentTtlMs?.() ?? Number.POSITIVE_INFINITY;
+    return this.deps.now() - result.at >= ttl;
+  }
+
   private inBackoff(host: string): boolean {
     return (this.hostBackoff.get(host) ?? 0) > this.deps.now();
   }
@@ -122,7 +130,7 @@ export class RemoteProofScheduler {
   private needsProof(req: IRemoteProofRequest): boolean {
     if (this.inFlight.has(req.tabId) || this.inBackoff(req.host)) return false;
     const kept = this.results.get(req.tabId);
-    return !(kept && kept.key === req.key && (kept.state === 'absent' || this.deps.now() - kept.at < this.opts.ttlMs));
+    return !(kept && kept.key === req.key && !this.expired(kept));
   }
 
   /** Changed key first, then least recently proven. */

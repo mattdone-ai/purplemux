@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ITabStatusEntry } from '@/types/status';
 import type { TCliState } from '@/types/timeline';
@@ -22,7 +24,9 @@ const ssh = vi.hoisted(() => ({
   scan: (_host: string): TReply | Promise<TReply> => ({ killed: true, code: null, signal: 'SIGTERM' }),
   proof: (_session: string): TReply | Promise<TReply> => ({ killed: true, code: null, signal: 'SIGTERM' }),
   localPanes: '',
-  /** Any other ssh call (not a scan, not a proof). */
+  /** A batched readiness capture: the sessions asked for, and the nonce its reply must carry. */
+  capture: (_sessions: string[], _nonce: string): TReply | Promise<TReply> => ({ killed: true, code: null, signal: 'SIGTERM' }),
+  /** Any other ssh call (not a scan, not a proof, not a capture). */
   other: (_remote: string): TReply | Promise<TReply> => ({ killed: true, code: null, signal: 'SIGTERM' }),
   /** A local pgrep (the pane's descendants, for a local terminal tab's ports); null answers "no children". */
   pgrep: null as null | (() => TReply | Promise<TReply>),
@@ -43,6 +47,9 @@ vi.mock('child_process', async (importOriginal) => {
       ssh.calls.push(call);
       if (call.remote.includes("'list-panes' '-a'")) {
         reply = ssh.scan(call.host);
+      } else if (call.remote.includes("'pmux-cap-")) {
+        const words = call.remote.split(' ').map((w) => w.replace(/'/g, ''));
+        reply = ssh.capture(words.slice(5), words[4]);
       } else if (call.remote.startsWith("'sh' '-s'")) {
         call.session = call.remote.split(' ')[4]?.replace(/'/g, '');
         reply = ssh.proof(call.session ?? '');
@@ -135,8 +142,10 @@ interface IManager {
 const internals = (manager: IManager) => manager as unknown as {
   tabs: Map<string, ITabStatusEntry>;
   remoteProofs: { settled: () => Promise<void> };
+  remoteCaptures: { settled: () => Promise<void> };
 };
 const proofCalls = () => ssh.calls.filter((c) => c.input?.includes('task/*/children'));
+const captureCalls = () => ssh.calls.filter((c) => c.remote.includes("'pmux-cap-"));
 const scanCalls = () => ssh.calls.filter((c) => c.remote.includes("'list-panes' '-a'"));
 
 const remoteTab = (id: string, sessionName: string, host = HOST): ITab =>
@@ -153,6 +162,7 @@ const resetWorld = () => {
   ssh.proof = () => TIMED_OUT;
   ssh.localPanes = '';
   ssh.other = () => TIMED_OUT;
+  ssh.capture = () => TIMED_OUT;
   ssh.pgrep = null;
   state.tabs = [remoteTab('tab-r', SESSION)];
 };
@@ -444,7 +454,7 @@ describe('busy remote tabs read their titles from the scan, never one ssh each (
     return tabs;
   };
   const titledLine = (session: string, title: string) => `${session}\tclaude\t/home/user\t4242\t1794200000\t${title}\n`;
-  const otherSsh = () => ssh.calls.filter((c) => !c.remote.includes("'list-panes' '-a'") && !c.input?.includes('task/*/children'));
+  const otherSsh = () => ssh.calls.filter((c) => !c.remote.includes("'list-panes' '-a'") && !c.input?.includes('task/*/children') && !c.remote.includes("'pmux-cap-"));
 
   for (const count of [5, 11]) {
     it(`${count} busy tabs on a slow host that answers its scan: no per-tab ssh, titles from the scan, the local tab read in the same poll`, async () => {
@@ -535,6 +545,81 @@ describe('a superseded poll writes nothing (review r3 C3)', () => {
   });
 });
 
+describe('the readiness probe of a remote tab: one batched capture per host, never awaited (vel-PMX-FU)', () => {
+  beforeEach(resetWorld);
+  afterEach(() => vi.useRealTimers());
+
+  const fixture = (name: string) => fs.readFileSync(path.join(__dirname, '../../fixtures/panes', name), 'utf-8');
+  const captureReply = (screens: Record<string, string>) => (sessions: string[], nonce: string): TReply => ({
+    stdout: `${sessions.map((session) => (screens[session] === undefined
+      ? `${nonce} gone ${session}\n`
+      : `${nonce} ok ${session}\n${screens[session]}${screens[session].endsWith('\n') ? '' : '\n'}`)).join('')}${nonce} end\n`,
+  });
+  const pollAt = async (manager: IManager, offset: number) => {
+    vi.setSystemTime(T0 + offset);
+    await manager.poll();
+    await internals(manager).remoteCaptures.settled();
+  };
+
+  it('three inactive remote tabs at an empty composer: one capture ssh for all three, read at the next poll, each tab ready', async () => {
+    const tabs = [0, 1, 2].map((i) => remoteTab(`tab-c${i}`, `pt-ws-1-pane-a-tab-c${i}`));
+    state.tabs = tabs;
+    ssh.scan = (host) => ({ stdout: host === HOST ? tabs.map((t) => paneLine(t.sessionName, 'claude')).join('') : '' });
+    ssh.capture = captureReply(Object.fromEntries(tabs.map((t) => [t.sessionName, fixture('claude-empty-composer.ansi')])));
+    const { manager, entry } = await createManager('inactive');
+    await pollAt(manager, 0);
+    await pollAt(manager, 9_000);
+    expect(captureCalls()).toHaveLength(1);
+    expect(captureCalls()[0].remote).toContain(tabs[2].sessionName);
+    for (const tab of tabs) expect(entry(tab.id).cliState).toBe('inactive');
+    await pollAt(manager, 10_000);
+    for (const tab of tabs) expect(entry(tab.id).cliState).toBe('idle');
+    expect(captureCalls()).toHaveLength(1);
+  });
+
+  it('a capture that never answers holds no poll; the tab keeps its state', async () => {
+    ssh.scan = () => pane('claude');
+    ssh.capture = () => new Promise<TReply>(() => {});
+    const { manager, entry } = await createManager('inactive');
+    vi.setSystemTime(T0);
+    await manager.poll();
+    vi.setSystemTime(T0 + 9_000);
+    await manager.poll();
+    vi.setSystemTime(T0 + 10_000);
+    await manager.poll();
+    expect(captureCalls()).toHaveLength(1);
+    expect(entry().cliState).toBe('inactive');
+  });
+
+  it('a trust dialog in the batched capture: startup-prompt, as for a local tab', async () => {
+    ssh.scan = () => pane('claude');
+    ssh.capture = captureReply({ [SESSION]: fixture('claude-trust-prompt.ansi') });
+    const { manager, entry } = await createManager('inactive');
+    await pollAt(manager, 0);
+    await pollAt(manager, 9_000);
+    await pollAt(manager, 10_000);
+    expect(entry().cliState).toBe('startup-prompt');
+    expect(entry().startupPrompt?.kind).toBe('folder-trust');
+  });
+
+  it('a failed capture backs the host off for 30 s; a capture older than two poll intervals is not read', async () => {
+    ssh.scan = () => pane('claude');
+    ssh.capture = () => SSH_255;
+    const { manager, entry } = await createManager('inactive');
+    await pollAt(manager, 0);
+    await pollAt(manager, 9_000);
+    await pollAt(manager, 20_000);
+    expect(captureCalls()).toHaveLength(1);
+    ssh.capture = captureReply({ [SESSION]: fixture('claude-empty-composer.ansi') });
+    await pollAt(manager, 40_000);
+    expect(captureCalls()).toHaveLength(2);
+    // The answer waits 61 s (more than two 30 s intervals): it is dropped unread, and the next poll asks again.
+    await pollAt(manager, 101_000);
+    expect(entry().cliState).toBe('inactive');
+    expect(captureCalls()).toHaveLength(3);
+  });
+});
+
 describe('one poll at a time, coalesced, never wedged (review r1 F1 d, r2 M2 and L-M)', () => {
   beforeEach(resetWorld);
   afterEach(() => vi.useRealTimers());
@@ -596,6 +681,29 @@ describe('one poll at a time, coalesced, never wedged (review r1 F1 d, r2 M2 and
     await expect(manager.poll()).rejects.toThrow('workspace store unreadable');
     await manager.poll();
     expect(hostScans()).toHaveLength(1);
+  });
+
+  it('a poll superseded while in its watchdog timers runs no keeper, liveness tick or lease sweep after it (vel-PMX-FU)', async () => {
+    ssh.scan = () => pane('claude');
+    const { manager } = await createManager('idle');
+    const steps = manager as unknown as { runWatchdogTimers: (now: number) => Promise<void>; runOrchestratorKeeper: () => Promise<void> };
+    let releaseTimers: () => void = () => {};
+    let held = false;
+    const timers = vi.spyOn(steps, 'runWatchdogTimers').mockImplementation(async () => {
+      if (held) return;
+      held = true;
+      await new Promise<void>((resolve) => { releaseTimers = resolve; });
+    });
+    const keeper = vi.spyOn(steps, 'runOrchestratorKeeper').mockResolvedValue(undefined);
+    const stale = manager.poll();
+    await vi.waitFor(() => expect(held).toBe(true));
+    vi.setSystemTime(T0 + 301_000);
+    await manager.poll();
+    expect(timers).toHaveBeenCalledTimes(2);
+    expect(keeper).toHaveBeenCalledTimes(1);
+    releaseTimers();
+    await stale;
+    expect(keeper).toHaveBeenCalledTimes(1);
   });
 
   it('a poll that hangs past 10 intervals is superseded: the next one runs, and the hung one applies nothing when it settles', async () => {

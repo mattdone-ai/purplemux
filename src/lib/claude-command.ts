@@ -63,10 +63,11 @@ const remoteSeedDirectories = async (workspaceId: string): Promise<string[]> => 
 };
 
 /** The Claude launch of a remote tab (ADR-0022): the kit's first-run seed, then its hooks, prompt and CLI on the host. */
-export const buildRemoteClaudeLaunch = async (workspaceId: string, opts?: { model?: string; effort?: string }): Promise<string> => {
+export const buildRemoteClaudeLaunch = async (workspaceId: string, opts?: { model?: string; effort?: string; trustCwd?: string }): Promise<string> => {
   const { buildRemoteClaudeCommand } = await import('@/lib/remote-kit');
   return buildRemoteClaudeCommand({
     workspaceId,
+    ...(opts?.trustCwd ? { namedCwd: opts.trustCwd } : {}),
     ...(opts?.model && isValidModelName(opts.model) ? { model: opts.model } : {}),
     ...(opts?.effort && isValidClaudeEffort(opts.effort) ? { effort: opts.effort } : {}),
     skipPermissions: await getDangerouslySkipPermissions(),

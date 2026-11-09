@@ -245,4 +245,14 @@ describe('the remote seed: Claude Code first-run state', () => {
     const fallback = await buildRemoteClaudeLaunch('ws-a');
     expect(fallback).toContain('--first-run "$PWD" >/dev/null 2>&1; PATH=');
   });
+
+  it('vel-PMX-FU: a named tab\'s launch seeds its recorded cwd literally with --named, never "$PWD"; a relative one throws', async () => {
+    const line = buildRemoteClaudeCommand({ workspaceId: 'ws-a', workspaceDirectories: ['/w'], namedCwd: "/srv/it's/repo" });
+    expect(line).toContain(` --first-run --named '/srv/it'\\''s/repo' '/w' >/dev/null 2>&1; PATH=`);
+    expect(line).not.toContain('"$PWD"');
+    expect(() => buildRemoteClaudeCommand({ workspaceId: 'ws-a', namedCwd: 'srv/repo' })).toThrow(/absolute/);
+    home.workspaceDirectories.mockResolvedValueOnce(['/w']);
+    config.getDangerouslySkipPermissions.mockResolvedValueOnce(false);
+    expect(await buildRemoteClaudeLaunch('ws-a', { trustCwd: '/srv/repo' })).toContain(`--first-run --named '/srv/repo' '/w' >/dev/null`);
+  });
 });

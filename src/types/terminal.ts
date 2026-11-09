@@ -108,6 +108,12 @@ export interface ITab {
   order: number;
   title?: string;
   cwd?: string;
+  /**
+   * A remote tab's cwd as its creator named it (`tab create --host H --cwd DIR`), for the pre-trust on the host
+   * (vel-PMX-FU). Set once at create and never patched: `cwd` can follow the pane, and a directory the agent moved
+   * to is not one the creator chose.
+   */
+  trustCwd?: string;
   panelType?: TPanelType;
   agentState?: IAgentState;
   agentLaunchConfig?: IAgentLaunchConfig;

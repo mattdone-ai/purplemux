@@ -373,7 +373,7 @@ export const deletePane = async (
  */
 export type TTabAdmit = (layout: ILayoutData) => { ok: true } | { ok: false; refusal: Error };
 
-export const addTabToPane = async (wsId: string, paneId: string, name?: string, cwd?: string, panelType?: string, command?: string, opts?: { scope?: string[]; agentLaunchConfig?: IAgentLaunchConfig; reportsTo?: string; reportOn?: TTurnMarkerName[]; host?: string; role?: TTabRole; previewOrigin?: string; pgService?: string; admit?: TTabAdmit; handoffPath?: string; rotateAt?: TRotateAt }): Promise<ITab | null> =>
+export const addTabToPane = async (wsId: string, paneId: string, name?: string, cwd?: string, panelType?: string, command?: string, opts?: { scope?: string[]; agentLaunchConfig?: IAgentLaunchConfig; reportsTo?: string; reportOn?: TTurnMarkerName[]; host?: string; role?: TTabRole; previewOrigin?: string; pgService?: string; admit?: TTabAdmit; handoffPath?: string; rotateAt?: TRotateAt; trustCwd?: string }): Promise<ITab | null> =>
   withLock(async () => {
     const filePath = resolveLayoutFile(wsId);
     const layout = await readLayoutFile(filePath);
@@ -389,11 +389,14 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
     const tabId = generateTabId();
     const sessionName = workspaceSessionName(wsId, paneId, tabId);
     const host = !isWebBrowser ? opts?.host : undefined;
+    const trustCwd = host && opts?.trustCwd ? opts.trustCwd : undefined;
     if (!isWebBrowser) {
       // Before the session exists: every tmux call for it must already go to its host.
       if (host) registerSessionHost(sessionName, host);
       try {
-        await createSession(sessionName, 80, 24, cwd, { workspaceId: wsId, tabId });
+        await (trustCwd
+          ? createSession(sessionName, 80, 24, cwd, { workspaceId: wsId, tabId }, { trustCwd })
+          : createSession(sessionName, 80, 24, cwd, { workspaceId: wsId, tabId }));
       } catch (err) {
         if (host) forgetSessionHost(sessionName);
         throw err;
@@ -404,7 +407,7 @@ export const addTabToPane = async (wsId: string, paneId: string, name?: string, 
     const defaultName = defaultTabNameForPanelType(panelType as ITab['panelType']);
     const tabName = name?.trim() || defaultName;
     const scope = opts?.scope?.map((s) => s.trim()).filter(Boolean);
-    const tab: ITab = { id: tabId, sessionName, name: tabName, order: nextOrder, ...(cwd ? { cwd } : {}), ...(panelType ? { panelType: panelType as ITab['panelType'] } : {}), ...(scope?.length ? { scope } : {}), ...(opts?.agentLaunchConfig ? { agentLaunchConfig: opts.agentLaunchConfig } : {}), ...(opts?.reportsTo ? { reportsTo: opts.reportsTo } : {}), ...(opts?.reportOn?.length ? { reportOn: [...opts.reportOn] } : {}), ...(host ? { host } : {}), ...(opts?.role ? { role: opts.role } : {}), ...(opts?.previewOrigin ? { previewOrigin: opts.previewOrigin } : {}), ...(opts?.pgService ? { pgService: opts.pgService } : {}), ...(opts?.handoffPath ? { handoffPath: opts.handoffPath } : {}), ...(opts?.rotateAt !== undefined ? { rotateAt: opts.rotateAt } : {}) };
+    const tab: ITab = { id: tabId, sessionName, name: tabName, order: nextOrder, ...(cwd ? { cwd } : {}), ...(panelType ? { panelType: panelType as ITab['panelType'] } : {}), ...(scope?.length ? { scope } : {}), ...(opts?.agentLaunchConfig ? { agentLaunchConfig: opts.agentLaunchConfig } : {}), ...(opts?.reportsTo ? { reportsTo: opts.reportsTo } : {}), ...(opts?.reportOn?.length ? { reportOn: [...opts.reportOn] } : {}), ...(host ? { host } : {}), ...(trustCwd ? { trustCwd } : {}), ...(opts?.role ? { role: opts.role } : {}), ...(opts?.previewOrigin ? { previewOrigin: opts.previewOrigin } : {}), ...(opts?.pgService ? { pgService: opts.pgService } : {}), ...(opts?.handoffPath ? { handoffPath: opts.handoffPath } : {}), ...(opts?.rotateAt !== undefined ? { rotateAt: opts.rotateAt } : {}) };
 
     if (command && !isWebBrowser) prepareOrchestrationLaunch(tab);
     pane.tabs.push(tab);
@@ -580,7 +583,10 @@ export const restartTabSessionUnguarded = async (wsId: string, paneId: string, t
     const effectiveCwd = tab.host ? tab.cwd : await resolveExistingDir(tab.cwd);
     const cwdLost = Boolean(tab.cwd && tab.cwd !== effectiveCwd);
 
-    await createSession(tab.sessionName, 80, 24, effectiveCwd, { workspaceId: wsId, tabId: tab.id });
+    // A revival: a named cwd the host lost starts in HOME (logged), never a refusal (review r4).
+    await (tab.trustCwd
+      ? createSession(tab.sessionName, 80, 24, effectiveCwd, { workspaceId: wsId, tabId: tab.id }, { trustCwd: tab.trustCwd, revival: true })
+      : createSession(tab.sessionName, 80, 24, effectiveCwd, { workspaceId: wsId, tabId: tab.id }));
     if (command && !cwdLost) {
       prepareOrchestrationLaunch(tab);
       layout.updatedAt = new Date().toISOString();

@@ -2,7 +2,7 @@ import { execFile, execFileSync, spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { promisify } from 'util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { REMOTE_PROVIDER_SCRIPT, REMOTE_REAP_SCRIPT, isTmuxAbsence, parseRemoteProviderObservation, parseRemoteReap } from '@/lib/remote-host';
+import { REMOTE_CAPTURE_SCRIPT, REMOTE_PROVIDER_SCRIPT, REMOTE_REAP_SCRIPT, isTmuxAbsence, parseRemoteCaptures, parseRemoteProviderObservation, parseRemoteReap } from '@/lib/remote-host';
 import { buildRemoteShellLaunchCommand } from '@/lib/shell-env';
 import fs from 'fs';
 import os from 'os';
@@ -159,6 +159,21 @@ describe.skipIf(!supported)('remote reap script, run for real (ADR-0022 §9)', {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('the batched readiness capture: one run frames each pane by the nonce, and a pane tmux does not know is gone (vel-PMX-FU)', async () => {
+    const other = `${session}-b`;
+    await run('tmux', ['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', session, '-x', '80', '-y', '24', 'printf "first pane\\n"; exec sleep 300']);
+    await run('tmux', ['-L', sock, '-f', '/dev/null', 'new-session', '-d', '-s', other, '-x', '80', '-y', '24', 'printf "second pane\\n"; exec sleep 300']);
+    const nonce = `pmux-cap-${randomBytes(6).toString('hex')}`;
+    let captured: Map<string, string | null> | null = null;
+    await vi.waitFor(async () => {
+      captured = parseRemoteCaptures(await runScript([sock, nonce, session, 'pt-ws-none-pane-x-tab-none', other], REMOTE_CAPTURE_SCRIPT), nonce);
+      expect(captured?.get(other)).toContain('second pane');
+    }, { timeout: 10_000, interval: 100 });
+    expect(captured!.get(session)).toContain('first pane');
+    expect(captured!.get('pt-ws-none-pane-x-tab-none')).toBeNull();
+    expect([...captured!.keys()]).toEqual([session, 'pt-ws-none-pane-x-tab-none', other]);
   });
 
   it('closing the last session on the socket: the server exits, the reap still says gone, and tmux\'s answer reads as absence (review r3 B2)', async () => {

@@ -129,4 +129,19 @@ describe('RemoteProofScheduler', () => {
     advance(1);
     expect(scheduler.read(req('tab-a'))).toBeNull();
   });
+
+  it('an unread absent expires after its own long limit, not the present TTL (vel-PMX-FU)', async () => {
+    let now = 1_000_000;
+    const scheduler = new RemoteProofScheduler({
+      observe: async () => ({ state: 'absent', reason: 'no claude process in the pane' }),
+      now: () => now,
+      absentTtlMs: () => 300_000,
+    });
+    await scheduler.schedule([req('tab-a')]);
+    now += 299_999;
+    expect(scheduler.read(req('tab-a'))).toBe(false);
+    await scheduler.schedule([req('tab-b')]);
+    now += 300_000;
+    expect(scheduler.read(req('tab-b'))).toBeNull();
+  });
 });

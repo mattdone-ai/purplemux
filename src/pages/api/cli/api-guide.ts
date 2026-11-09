@@ -408,7 +408,10 @@ POST /api/cli/tabs
   409 pool-full, 400 pool-invalid, 503 pool-timeout (a re-ask), 503 pool-unreadable. The answer adds "placement": { "host", "local", "reason", "fallback",
   "envelope" }; "fallback" is true when the pool's first answer was not used.
   "cwd" is the tab's start directory, an absolute path that must exist on the tab's host,
-  else 400 { "code": "cwd-missing" } (exit 2).
+  else 400 { "code": "cwd-missing" } (exit 2). On a remote host the create also pre-trusts that
+  cwd for Claude Code there (vel-PMX-FU): the folder-trust key on the cwd itself, never on a
+  parent, and no trust for "/", a top-level directory or the home. A cwd you do not name (the
+  workspace default) is trusted only inside a workspace directory, as before.
   "reportsTo" names a live tab of the SAME workspace that receives this tab's watchdog nudges
   ahead of the workspace orchestrator; anything else is 400 { "code": "reports-to-invalid" }
   (CLI exit 2). It is cleared when that tab closes.

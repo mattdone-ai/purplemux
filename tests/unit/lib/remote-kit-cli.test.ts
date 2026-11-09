@@ -217,7 +217,7 @@ describe('the remote kit probe (harness-flow-loop-2 story 12)', () => {
   it('every create script carries the probe after the last kit file and before the pre-trust and the session; no CLI, no script', async () => {
     const cli = await readRemoteCliModules(readBin);
     const files = remoteKitFiles({ tmuxConf: '', cli, prompt: null });
-    const trust = { cwd: '/w/a', workspaceDirectory: '/w' };
+    const trust = { cwd: '/w/a', workspaceDirectories: ['/w'], named: false };
     const lines = buildRemoteCreateScript({ nonce: 'N0nce', files, session: 'pt-ws-a-pane-p-tab-r', cols: 80, rows: 24, launch: 'sh -l', trust }).split('\n');
     const lastPut = lines.map((l, i) => (l.startsWith('put ') ? i : -1)).filter((i) => i >= 0).at(-1)!;
     const probe = lines.findIndex((l) => l.startsWith('pmux_probe_rc=0;'));

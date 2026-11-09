@@ -30,6 +30,8 @@ import {
   readRemoteHosts,
   remoteTmuxCommand,
   REMOTE_PROVIDER_SCRIPT,
+  REMOTE_CAPTURE_SCRIPT,
+  parseRemoteCaptures,
   REMOTE_REAP_SCRIPT,
   parseRemoteProviderObservation,
   remoteSocketName,
@@ -39,6 +41,9 @@ import {
 } from '@/lib/remote-host';
 import {
   REMOTE_KIT_BROKEN_EXIT,
+  REMOTE_CWD_FALLBACK_NOTE,
+  REMOTE_CWD_MISSING_EXIT,
+  RemoteCwdMissingError,
   RemoteKitBrokenError,
   buildRemoteCreateScript,
   buildRemoteKitProbeScript,
@@ -49,6 +54,7 @@ import {
   remoteKitProbeFailureLine,
   remoteTabEnvFile,
   remoteTabEnvRelative,
+  type IRemoteTrustTarget,
 } from '@/lib/remote-kit';
 import { knownRemoteHosts, remoteHostsInUse, sessionHostOf } from '@/lib/session-host';
 
@@ -149,25 +155,39 @@ const tabEnv = async (sessionName: string, identity?: ITabIdentity): Promise<Rec
 };
 
 /**
- * The workspace directory a remote tab's cwd sits in, for the kit's pre-trust (D14, ruling R-05), or null.
- * Compared as plain paths: the cwd is a path on the remote host, so the remote script resolves symlinks
- * and checks the containment again. A failed read of the workspace costs the seed, never the launch.
+ * What a remote create pre-trusts (D14, ruling R-05), or null for nothing. Compared here as plain paths only to pick
+ * the workspace directory and to match the named cwd; the seed receives the cwd unresolved, as tmux does, and
+ * resolves symlinks and checks the containment on the host.
+ *
+ * - The cwd inside a workspace directory: the D14 seed with that directory.
+ * - The cwd the creator named (`trustCwd`, set once at create from `tab create --cwd`, vel-PMX-FU): `--named` with
+ *   every workspace directory, so D14 is tried first and the named rule (the cwd only) applies outside them.
+ *
+ * A failed read of the workspace costs the D14 half, never the launch and never the named half.
  */
-const remoteTrustTarget = async (
+export const remoteTrustTarget = async (
   name: string,
   identity: ITabIdentity | undefined,
   cwd: string | undefined,
-): Promise<{ cwd: string; workspaceDirectory: string } | null> => {
+  trustCwd?: string,
+): Promise<IRemoteTrustTarget | null> => {
+  if (!cwd || !path.posix.isAbsolute(cwd)) return null;
+  const resolved = path.posix.resolve(cwd);
+  const named = !!trustCwd && path.posix.isAbsolute(trustCwd) && path.posix.resolve(trustCwd) === resolved;
   const wsId = identity?.workspaceId ?? workspaceIdFromSessionName(name);
-  if (!cwd || !wsId || !path.posix.isAbsolute(cwd)) return null;
-  try {
-    const directories = (await workspaceDirectories(wsId)).filter((dir) => path.posix.isAbsolute(dir)).map((dir) => path.posix.resolve(dir));
-    const workspaceDirectory = nearestWorkspaceDirectory(path.posix.resolve(cwd), directories);
-    return workspaceDirectory ? { cwd: path.posix.resolve(cwd), workspaceDirectory } : null;
-  } catch (err) {
-    log.warn(`remote pre-trust for ${name} skipped: ${err instanceof Error ? err.message : err}`);
-    return null;
+  let directories: string[] = [];
+  if (wsId) {
+    try {
+      directories = (await workspaceDirectories(wsId)).filter((dir) => path.posix.isAbsolute(dir)).map((dir) => path.posix.resolve(dir));
+    } catch (err) {
+      log.warn(`remote pre-trust for ${name}: workspace directories unreadable${named ? '; the named cwd only' : '; skipped'}: ${err instanceof Error ? err.message : err}`);
+    }
   }
+  const workspaceDirectory = nearestWorkspaceDirectory(resolved, directories);
+  // The seed gets the cwd exactly as tmux does and resolves it with realpath on the host (review r2 CONFIRM): a lexical
+  // resolve here turns "<link>/.." into the link's parent, a directory the pane never runs in.
+  if (named) return { cwd, workspaceDirectories: workspaceDirectory ? [workspaceDirectory] : directories, named: true };
+  return workspaceDirectory ? { cwd, workspaceDirectories: [workspaceDirectory], named: false } : null;
 };
 
 const kitBroken = (host: string, line: string): RemoteKitBrokenError => {
@@ -238,6 +258,8 @@ const createRemoteSession = async (
   rows: number,
   cwd: string | undefined,
   identity: ITabIdentity | undefined,
+  trustCwd: string | undefined,
+  revival: boolean,
 ): Promise<void> => {
   const env: Record<string, string> = {};
   let tabEnv: { tabId: string; content: string } | undefined;
@@ -259,7 +281,7 @@ const createRemoteSession = async (
     identity ? fs.readFile(getClaudePromptPath(identity.workspaceId), 'utf-8').catch(() => null) : Promise.resolve(null),
   ]);
   const launch = buildRemoteShellLaunchCommand(env, tabEnv ? remoteKitPath(remoteTabEnvRelative(tabEnv.tabId)) : undefined);
-  const trust = await remoteTrustTarget(name, identity, cwd);
+  const trust = await remoteTrustTarget(name, identity, cwd, trustCwd);
   const nonce = nanoid(16);
   const script = buildRemoteCreateScript({
     nonce,
@@ -270,9 +292,13 @@ const createRemoteSession = async (
     cwd,
     launch,
     ...(trust ? { trust } : {}),
+    // A fresh create of a named cwd refuses a cwd the host lacks; a revival keeps the HOME fallback (review r4).
+    cwdMissing: trust?.named && !revival ? 'refuse' : 'home',
   });
   try {
-    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: script });
+    const { stderr } = await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: script });
+    const fallback = stderr.split('\n').find((line) => line.startsWith('pmux: cwd ') && line.endsWith(REMOTE_CWD_FALLBACK_NOTE));
+    if (fallback) log.warn(`remote ${revival ? 'revival' : 'create'} of ${name} on ${host}: ${fallback.slice('pmux: '.length)}`);
   } catch (err) {
     // The guard runs before any file is written: a name that exists leaves everything as it was.
     if ((err as { code?: unknown }).code === REMOTE_SESSION_EXISTS_EXIT) {
@@ -288,6 +314,8 @@ const createRemoteSession = async (
     await runSsh(host, cleanup, { timeoutMs: CMD_TIMEOUT }).catch(() => {});
     // The kit probe runs before new-session (story 12): no session and no agent started.
     if ((err as { code?: unknown }).code === REMOTE_KIT_BROKEN_EXIT) throw kitProbeFailure(host, err);
+    // The named cwd is resolved on the host before any file is written (vel-PMX-FU): nothing to clean up but the above.
+    if ((err as { code?: unknown }).code === REMOTE_CWD_MISSING_EXIT && cwd) throw new RemoteCwdMissingError(host, cwd);
     if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)})`);
     throw new Error(`remote session ${name} on ${host} was not created (${describeRemoteFailure(err)})`);
   }
@@ -300,9 +328,14 @@ export const createSession = async (
   rows: number,
   cwd?: string,
   identity?: ITabIdentity,
+  /**
+   * A remote tab's creator-named cwd, for the pre-trust (vel-PMX-FU), and whether this recreates an existing tab
+   * (a revival keeps the HOME fallback for a cwd the host lost); ignored for a local session.
+   */
+  opts?: { trustCwd?: string; revival?: boolean },
 ): Promise<void> => {
   const host = await sessionHostOf(name);
-  if (host) return createRemoteSession(host, name, cols, rows, cwd, identity);
+  if (host) return createRemoteSession(host, name, cols, rows, cwd, identity, opts?.trustCwd, !!opts?.revival);
   // tmux 서버 global env cache를 우회하기 위해 `env -i $SHELL -l`을 명령으로 직접 넘긴다.
   // execFile의 env 옵션은 tmux 서버가 이미 떠있는 경우 무시되므로 의존하지 않는다.
   const shellCmd = buildShellLaunchCommand(await workspaceEnv(name, identity, cwd));
@@ -553,6 +586,22 @@ export const observeRemoteProviderProcess = async (
   const observed = parseRemoteProviderObservation(stdout);
   if (observed.state !== 'present') return observed;
   return { state: 'present', identity: `remote:${host}:${sessionName}:${observed.paneId}:${observed.panePid}:${observed.pid}:${observed.start}:${provider}` };
+};
+
+/**
+ * The visible content of several panes on one remote host, in one ssh (vel-PMX-FU): the readiness probe's capture
+ * for remote tabs, batched so the poll never asks for it one tab at a time. Throws when ssh fails or the run did
+ * not finish; a pane tmux could not capture maps to null.
+ */
+export const captureRemotePanes = async (host: string, sessions: readonly string[]): Promise<Map<string, string | null>> => {
+  const nonce = `pmux-cap-${nanoid(12)}`;
+  const { stdout } = await runSsh(host, ['sh', '-s', '--', remoteSocketName(), nonce, ...sessions].map(shQuote).join(' '), {
+    timeoutMs: CMD_TIMEOUT,
+    input: REMOTE_CAPTURE_SCRIPT,
+  });
+  const parsed = parseRemoteCaptures(stdout, nonce);
+  if (!parsed) throw new Error(`remote capture on ${host} ended before its last pane`);
+  return parsed;
 };
 
 /**
