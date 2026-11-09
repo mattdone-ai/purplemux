@@ -42,6 +42,7 @@ import {
   RemoteKitBrokenError,
   buildRemoteCreateScript,
   buildRemoteKitProbeScript,
+  buildRemotePromptScript,
   readRemoteCliModules,
   remoteKitFiles,
   remoteKitPath,
@@ -208,6 +209,18 @@ export const probeRemoteKit = async (name: string): Promise<void> => {
     if ((err as { code?: unknown }).code === REMOTE_KIT_BROKEN_EXIT) throw kitProbeFailure(host, err);
     if (isSshFailure(err)) throw new RemoteHostError(host, `remote host ${host} did not answer over ssh (${describeRemoteFailure(err)}); nothing was killed`);
     throw new Error(`the kit probe for ${name} on ${host} failed (${describeRemoteFailure(err)}); nothing was killed`);
+  }
+};
+
+/**
+ * Rewrite one workspace's prompt copy in the kit on `host` (D32): the next Claude launch there loads `prompt`. One
+ * `ssh … sh -s` run, the content on stdin; no session is started or touched. Throws an Error that names the host.
+ */
+export const pushRemotePrompt = async (host: string, workspaceId: string, prompt: string): Promise<void> => {
+  try {
+    await runSsh(host, 'sh -s', { timeoutMs: CMD_TIMEOUT * 2, input: buildRemotePromptScript(workspaceId, prompt) });
+  } catch (err) {
+    throw new Error(`the prompt copy of ${workspaceId} on ${host} was not written (${describeRemoteFailure(err)})`);
   }
 };
 

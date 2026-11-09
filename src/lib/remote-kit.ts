@@ -350,6 +350,13 @@ export const buildRemoteKitProbeScript = (files: readonly IRemoteKitFile[]): str
 };
 
 /**
+ * The workspace prompt alone (D32): a standing order changed, so the kit's copy is rewritten for the next launch on
+ * the host. Writes one file (base64, a temporary, one rename); starts no session and touches no live one.
+ */
+export const buildRemotePromptScript = (workspaceId: string, prompt: string): string =>
+  `${['set -e', ...kitWriteLines([{ path: remotePromptRelative(workspaceId), content: prompt, mode: 0o600 }], [])].join('\n')}\n`;
+
+/**
  * One `sh -s` script: refuse a session name that exists (exit 17, before any
  * file is written), write every kit file (base64, a temporary, one rename),
  * run the kit's CLI once and refuse when it does not run (exit 18, story 12; the files must hold `bin/cli.js` and

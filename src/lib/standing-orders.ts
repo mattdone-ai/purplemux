@@ -145,29 +145,42 @@ export const parseOrderFile = (text: string, owner: string, where: string): ISta
 
 const orderLine = (order: IStandingOrder): string => `- **${order.id}** (${order.scope}; check: ${order.check}) ${order.text}`;
 
-/** The prompt section for one workspace: the active fleet orders, then the workspace's own. Empty when none is active. */
-export const renderPromptSection = (fleet: readonly IStandingOrder[], workspace: readonly IStandingOrder[]): string => {
+/** An instant as the order files write it: UTC to the second, `2026-11-08T22:20:00Z`. */
+export const utcSecond = (at: number): string => new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+/**
+ * The prompt section for one workspace: the active fleet orders, then the workspace's own, under the time it was
+ * rendered (D32). The list is a copy: `purplemux so list` is the authority, and the section says so, because Claude
+ * reads `--append-system-prompt-file` once, at launch. A running session never sees a later rewrite of the file; a
+ * change reaches it only as the `[purplemux standing order]` line.
+ */
+export const renderPromptSection = (fleet: readonly IStandingOrder[], workspace: readonly IStandingOrder[], renderedAt: number): string => {
   const active = [...fleet, ...workspace].filter((order) => order.state === 'active');
-  if (!active.length) return '';
   return [
     '## Standing orders',
+    '',
+    `Rendered ${utcSecond(renderedAt)}. \`purplemux so list\` is the authority; an order missing there is struck.`,
+    'This session loaded the list below at launch, and a later add or strike does not change it: purplemux sends a',
+    '`[purplemux standing order]` line to live tabs instead. Before an order makes you hold, ask, or refuse work, run',
+    '`purplemux so list`.',
     '',
     "The owner's standing orders. Each holds until it is struck: act on it without asking again, and cite it",
     'as SO-<n> when it decides something. `purplemux so list` shows each with its source.',
     '',
-    ...active.map(orderLine),
+    ...(active.length ? active.map(orderLine) : ['No standing order was active when this list was rendered.']),
     '',
   ].join('\n');
 };
 
+/** The bytes of the section; the rendered time is a fixed 20 characters, so any instant measures the same. */
 export const sectionBytes = (fleet: readonly IStandingOrder[], workspace: readonly IStandingOrder[]): number =>
-  Buffer.byteLength(renderPromptSection(fleet, workspace), 'utf8');
+  Buffer.byteLength(renderPromptSection(fleet, workspace, 0), 'utf8');
 
 /** The one line a live tab is sent when an order changes (ADR-HFL-05 decision 4). */
 export const orderChangeLine = (order: IStandingOrder, change: 'added' | 'struck', owner: string): string => {
   const text = order.text.length > 300 ? `${order.text.slice(0, 299)}…` : order.text;
   const tail = change === 'added'
     ? 'it holds until struck; purplemux so list shows every order'
-    : 'it no longer holds';
+    : 'it no longer holds, even where your session prompt still lists it; purplemux so list is the authority';
   return `[purplemux standing order] ${order.id} ${change} (${owner}): ${text} — ${tail}`;
 };

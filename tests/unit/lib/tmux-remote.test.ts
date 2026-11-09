@@ -414,6 +414,27 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(shippedPrompt(calls.list[0].input ?? '')).toContain(`- **${order.id}** (ws-r; check: prose) Ship the remote prompt with every create.`);
   });
 
+  it('D32: rewrites only the kit prompt copy on the host, over stdin, and starts or touches no session', async () => {
+    const { pushRemotePrompt } = await import('@/lib/tmux');
+    const prompt = '## Standing orders\n\nRendered 2026-11-09T02:00:00Z. `purplemux so list` is the authority.\n';
+    await pushRemotePrompt('ai-server', 'ws-r', prompt);
+    expect(calls.list).toHaveLength(1);
+    expect(remoteCommand(calls.list[0])).toBe('sh -s');
+    const script = calls.list[0].input ?? '';
+    const puts = script.split('\n').filter((line) => line.startsWith('put '));
+    expect(puts).toHaveLength(1);
+    const m = puts[0].match(/^put 'workspaces\/ws-r\/claude-prompt\.md' '([A-Za-z0-9+/=]*)' 600$/);
+    expect(m && Buffer.from(m[1], 'base64').toString('utf-8')).toBe(prompt);
+    expect(script).toMatch(/^set -e\nd="\$HOME\/\.purplemux-remote\/[^"]+"\n/);
+    expect(script).not.toMatch(/new-session|kill-session|send-keys|source-file/);
+  });
+
+  it('D32: a host that does not answer is named in the refusal', async () => {
+    const { pushRemotePrompt } = await import('@/lib/tmux');
+    replies.fn = () => ({ code: 255, stderr: 'ssh: connect to host ai-server port 22: Connection timed out' });
+    await expect(pushRemotePrompt('ai-server', 'ws-r', 'x')).rejects.toThrow(/^the prompt copy of ws-r on ai-server was not written \(/);
+  });
+
   // D14 (story 05 AC 2): the kit pre-trusts the cwd before the session starts, only inside a workspace directory.
   it('pre-trusts a cwd under a workspace directory: the seed script ships, and runs after the kit lands and before the session starts', async () => {
     workspaceDirs.map.set('ws-r', ['/home/mdone/code/nomupay', '/home/mdone/code/purplemux']);
