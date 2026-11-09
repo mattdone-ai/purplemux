@@ -118,9 +118,11 @@ to an exit code through one table:
      1  unexpected error (ledger, ADR-0033)      ledger-store-failed                        investigate
      2  usage error (pool, ADR-0039)             pool-invalid                               fix the command
      3  refused by state (pool, ADR-0039)        pool-full, pool-unreadable,                after the state changes, or a local
-                                                 pool-queued, pool-ticket-gone              slot; never for a gate.no-local-
-                                                                                            fallback repository (ADR-0039 §6);
-                                                                                            pool-queued: re-run with --ticket
+                                                 pool-queued, pool-ticket-gone,             slot; never for a gate.no-local-
+                                                 pool-no-pinned-host, pool-ask-cancelled,   fallback repository (ADR-0039 §6);
+                                                 pool-ask-mismatch                          pool-queued: re-run with --ticket;
+                                                                                            pool-no-pinned-host: fix the pin,
+                                                                                            never wait (vel-POOL-ENF)
      6  no answer (pool, ADR-0039)               pool-timeout                               fall back to a local slot, log it;
                                                                                             never for a gate.no-local-
                                                                                             fallback repository (ADR-0039 §6)
@@ -277,20 +279,38 @@ POST /api/cli/pool/acquire   (a tab token, or the admin token)
   "ticket" within its TTL to keep the place (renewed at half its TTL); the admitted ticket becomes
   the slot in one transaction. Order: product, and harness under its share, by arrival; harness at
   its share last. \`pool release pool-queue:<kind>-<n>\` gives a place up.
+  Ask token and pin (vel-POOL-ENF): "ask": "<[a-z0-9][a-z0-9-]{15,63}>", fresh per ask, goes into
+  the slot's (or ticket's) note as "ask=<T>", so only that ask reclaims the slot. "pin": { "hosts":
+  [pool host names], "local": true|false (the server's host), "gateHosts": [containers] } admits
+  only on their union (a gate-host entry matches the hosts whose pool.gate-host names it); any
+  kind. The answer echoes "ask" and "pin" (null when not sent); a pin by gate host also sets
+  "gateHost" to that host's container, local or not. GET /api/cli/pool lists "features":
+  ["ask-token", "host-pin"]; a client relies on either only when it is listed.
   Errors: 409 pool-full { "refusal": "no-known-host"|"no-free-slot"|"no-budget"|"harness-share"|
   "no-memory"|"overloaded"|"disk-full"|"queued-ahead"|"too-large" } with the measured and expected
-  figures per host (exit 3; too-large never queues); 409 pool-ticket-gone (the ticket expired or was
-  released, exit 3); 400 pool-invalid (exit 2); 400 lease-policy (a TTL over 24h, exit 2); 403
-  caller-unresolved (no tab, exit 3).
+  figures per host (exit 3; too-large never queues); 409 pool-no-pinned-host { "refusal":
+  "no-pinned-host" } (the pin matches no pool host the work may use; it names the pin and the hosts;
+  a configuration refusal, never queued, exit 3); 409 pool-ask-cancelled (the ask token was
+  cancelled, exit 3); 409 pool-ticket-gone (the ticket expired or was released, exit 3); 400
+  pool-invalid (exit 2; also a bad ask or pin, or another caller's live ask token); 400 lease-policy
+  (a TTL over 24h, exit 2); 403 caller-unresolved (no tab, exit 3).
   Client rule: the CLI waits 2 s. No answer exits 6 (pool-timeout); the caller does what it does
   without the pool and logs it: a lane uses its local slots, but a repository in
   gate.no-local-fallback never runs here (below). A lease a late answer took expires at its TTL.
   A gate passes --ttl of at least its gate timeout, or renews the lease while it runs.
 
-POST /api/cli/pool/release   Body: { "lease": "pool:<host>/<kind>-<n>" | "pool-queue:<kind>-<n>" }
-  \`purplemux pool release LEASE\`. The holder only (409 lease-held-by-other, exit 3); 404
-  lease-not-found (exit 7); a name that is not a pool slot is 400 pool-invalid.
+POST /api/cli/pool/release   Body: { "lease": "pool:<host>/<kind>-<n>" | "pool-queue:<kind>-<n>", "ask"?: "<T>" }
+  \`purplemux pool release LEASE [--ask T]\`. The holder only (409 lease-held-by-other, exit 3); 404
+  lease-not-found (exit 7); a name that is not a pool slot is 400 pool-invalid. With "ask", the
+  lease is released only when its note carries that token, else 409 pool-ask-mismatch and nothing
+  is released (a reused slot name is never another ask's to free).
   Response: { "released": <lease view> }
+  Body { "ask": "<T>" } alone (\`purplemux pool release --ask T\`) cancels the ask, in one
+  transaction: every slot and ticket of the caller that carries T is released, and the caller's
+  mark "pool-cancel:<hash of the caller and T>" (600 s, no budget) refuses the caller's acquire
+  with T that lands later (409 pool-ask-cancelled). A timed-out acquire is reclaimed this way,
+  never by name. A lease view and a log show a token as its first 8 characters only.
+  Response: { "released": [lease names], "cancelled": "<T>" }
 
 The engineering gate's keys map onto the pool (migration, ADR-0039 §6; gate.sh and remote-gate.sh
 do not change until they read the pool, and every key keeps working until then):

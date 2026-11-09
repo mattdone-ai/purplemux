@@ -27,6 +27,7 @@ describe('lease kind policy table (architecture.md "Lease kinds")', () => {
       epic: [null, 7 * D, false, false, false],
       pool: [60 * M, D, false, false, false],
       'pool-queue': [2 * M, D, false, false, false],
+      'pool-cancel': [10 * M, 10 * M, false, false, false],
       num: [14 * D, 30 * D, true, true, false],
     });
     expect([OTHER_KIND.defaultTtlSeconds, OTHER_KIND.maxTtlSeconds, OTHER_KIND.survivesTab]).toEqual([30 * M, D, false]);

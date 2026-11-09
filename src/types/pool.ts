@@ -259,15 +259,31 @@ export interface IPoolView {
   totals: IPoolTotals;
   queue: IPoolQueueEntry[];
   wouldRefuse: IPoolWouldRefuseView;
+  /** What this server honours (vel-POOL-ENF): a client relies on `ask-token` and `host-pin` only when listed here. */
+  features: readonly TPoolFeature[];
+}
+
+export type TPoolFeature = 'ask-token' | 'host-pin';
+
+/**
+ * The hosts a request may run on (vel-POOL-ENF): their union. `local` is the server's own host; `gateHosts` are the
+ * hosts whose `pool.gate-host.<host>` names one of them. A pin that allows no host is `no-pinned-host`.
+ */
+export interface IPoolPin {
+  hosts: string[];
+  local: boolean;
+  gateHosts: string[];
 }
 
 /**
  * `no-budget`: the shared worker budget (threads or memory) is reserved; `harness-share`: harness work holds its
  * share; `no-memory`: measured free memory; `overloaded`: sustained load; `queued-ahead`: an earlier ticket waits
- * for the host; `too-large`: no allowed host's budget could ever hold the envelope (never queued).
+ * for the host; `too-large`: no allowed host's budget could ever hold the envelope (never queued); `no-pinned-host`:
+ * the pin allows no pool host the request may use (a configuration refusal, never queued).
  */
 export type TPoolRefusalReason =
-  | 'no-known-host' | 'no-free-slot' | 'no-memory' | 'disk-full' | 'no-budget' | 'harness-share' | 'overloaded' | 'queued-ahead' | 'too-large';
+  | 'no-known-host' | 'no-free-slot' | 'no-memory' | 'disk-full' | 'no-budget' | 'harness-share' | 'overloaded' | 'queued-ahead' | 'too-large'
+  | 'no-pinned-host';
 
 export interface IPoolPlacementRequest {
   kind: TPoolKind;
@@ -283,6 +299,8 @@ export interface IPoolPlacementRequest {
   class?: TPoolClass;
   /** Only this host: a create whose --cwd is missing on the host the pool chose first. */
   localOnly?: boolean;
+  /** Only these hosts (vel-POOL-ENF); any kind. */
+  pin?: IPoolPin;
 }
 
 export interface IPoolEnvelopeView {
@@ -310,6 +328,10 @@ export interface IPoolAcquireResult {
   wouldRefuse?: IPoolWouldRefuse;
   /** Set when the caller asked for class control-plane and is not the workspace's enabled orchestrator tab. */
   downgrade?: string;
+  /** The ask token the caller sent, echoed (vel-POOL-ENF); null when none was sent. */
+  ask: string | null;
+  /** The pin the server applied, normalized (vel-POOL-ENF); null when none was asked. */
+  pin: IPoolPin | null;
 }
 
 /** A queued request (vel-D4): re-ask with `ticket` before `expiresAt` to keep the place. */

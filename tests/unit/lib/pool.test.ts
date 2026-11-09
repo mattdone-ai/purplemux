@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   budgetOf, buildPoolView, freeSlotNumber, hostState, leaseClass, leaseEnvelope, memOfLease, orderQueue, parsePoolLeaseName, parsePoolQueueName,
-  parseTicket, placeWork, poolLeaseName, poolLeaseNote, poolModeOf, poolNumberRefusal, poolQueueName, poolQueueNote, requestEnvelope, slotCountCapOf,
+  parseTicket, placeWork, POOL_FEATURES, poolGateHostOf, poolLeaseName, poolLeaseNote, poolModeOf, poolNumberRefusal, poolQueueName, poolQueueNote,
+  requestEnvelope, slotCountCapOf,
   tabLocalOnly, wouldRefuseLine, type IPoolHostTabs, type IPoolTicket, type TConfigValue,
 } from '@/lib/pool';
 import type { ILease } from '@/types/lease';
@@ -537,5 +538,101 @@ describe('the host view serves the tailnet path (vel-RETRO-R2)', () => {
     const req: IPoolPlacementRequest = { kind: 'gate', memGb: 8 };
     expect(place([md({ load1: 30, load5: 30 }), relayed], req)).toEqual(place([md({ load1: 30, load5: 30 }), plain], req));
     expect(place([md({ load1: 30, load5: 30 }), relayed], req)).toMatchObject({ ok: true, host: 'host-b-lan' });
+  });
+});
+
+describe('the host pin and the ask token (vel-POOL-ENF)', () => {
+  // Neutral host names in this block (the repository is public): the file's two measured hosts, renamed.
+  const ctl = (m: Partial<IPoolMetrics> = {}) => known('control-host', true, m);
+  const wk = (m: Partial<IPoolMetrics> = {}) => known('worker-host', false, { threads: 64, memTotalBytes: 373 * GIB, ...m });
+  const gate = (pin: IPoolPlacementRequest['pin']): IPoolPlacementRequest => ({ kind: 'gate', memGb: 0, pin });
+  const replica = cfg({ 'pool.gate-host.worker-host': 'gate-host-b' });
+
+  it('unpinned, the gate goes to the lowest load per thread (worker-host); pinned to a host, it goes there', () => {
+    expect(place([ctl(), wk()], { kind: 'gate', memGb: 0 })).toMatchObject({ ok: true, host: 'worker-host' });
+    expect(place([ctl(), wk()], gate({ hosts: ['control-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: true, host: 'control-host' });
+  });
+
+  it('pin local is the server\'s own host', () => {
+    expect(place([ctl(), wk()], gate({ hosts: [], local: true, gateHosts: [] }))).toMatchObject({ ok: true, host: 'control-host', local: true });
+  });
+
+  it('pin gate hosts are the hosts whose pool.gate-host names one of them', () => {
+    const quietCtl = ctl({ load1: 0, load5: 0 });
+    expect(place([quietCtl, wk()], gate({ hosts: [], local: false, gateHosts: ['gate-host-b'] }), [], {}, replica)).toMatchObject({ ok: true, host: 'worker-host' });
+    expect(poolGateHostOf(replica, 'WORKER-HOST')).toBe('gate-host-b');
+    expect(poolGateHostOf(replica, 'control-host')).toBeNull();
+    expect(poolGateHostOf(cfg({ 'pool.gate-host.worker-host': 'not a host!' }), 'worker-host')).toBeNull();
+  });
+
+  it('the forms are a union: the usual order chooses among every host the pin allows', () => {
+    const both = gate({ hosts: ['control-host'], local: false, gateHosts: ['gate-host-b'] });
+    expect(place([ctl(), wk()], both, [], {}, replica)).toMatchObject({ ok: true, host: 'worker-host' });
+    expect(place([ctl({ load1: 0, load5: 0 }), wk()], both, [], {}, replica)).toMatchObject({ ok: true, host: 'control-host' });
+  });
+
+  it('a pin that names no pool host is no-pinned-host, never queueable; the reason names the pin and the hosts', () => {
+    const r = place([ctl(), wk()], gate({ hosts: ['typo-host'], local: false, gateHosts: ['gatehost-x'] }), [], {}, replica);
+    expect(r).toMatchObject({ ok: false, refusal: 'no-pinned-host', queueable: false });
+    if (r.ok) throw new Error('admitted');
+    expect(r.reason).toContain('hosts typo-host');
+    expect(r.reason).toContain('gate hosts gatehost-x');
+    expect(r.reason).toContain('control-host (gate host none), worker-host (gate host gate-host-b)');
+  });
+
+  it('a pinned host that is known but full is the usual queueable refusal, not no-pinned-host', () => {
+    const full = cfg({ 'pool.slots.control-host.gate': '0' });
+    expect(place([ctl(), wk()], gate({ hosts: ['control-host'], local: false, gateHosts: [] }), [], {}, full)).toMatchObject({ ok: false, refusal: 'no-free-slot', queueable: true });
+    expect(place([ctl(), unknown('worker-host')], gate({ hosts: ['worker-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: false, refusal: 'no-known-host', queueable: true });
+  });
+
+  it('a tab that must stay here meets the pin: the intersection is empty is no-pinned-host', () => {
+    const codex: IPoolPlacementRequest = { kind: 'tab', memGb: 0, panelType: 'codex-cli', pin: { hosts: ['worker-host'], local: false, gateHosts: [] } };
+    expect(place([ctl(), wk()], codex)).toMatchObject({ ok: false, refusal: 'no-pinned-host', queueable: false });
+    expect(place([ctl(), wk()], { ...codex, pin: { hosts: ['worker-host', 'control-host'], local: false, gateHosts: [] } })).toMatchObject({ ok: true, host: 'control-host' });
+  });
+
+  it('the slot note carries the ask token; a ticket note keeps the pin and the token', () => {
+    const e = requestEnvelope({ kind: 'gate', memGb: 8 }, noConfig);
+    expect(poolLeaseNote(e, 'product', '0123456789abcdef0123456789abcdef')).toBe('pool mem=8 threads=8 class=product ask=0123456789abcdef0123456789abcdef');
+    expect(poolLeaseNote(e)).toBe('pool mem=8 threads=8 class=product');
+    const req: IPoolPlacementRequest = { kind: 'gate', memGb: 8, pin: { hosts: ['control-host', 'worker-host'], local: true, gateHosts: ['gate-host-b'] } };
+    const note = poolQueueNote(req, 'ask-token-0000000001');
+    expect(note).toBe('pool-queue class=product mem=8 pin-hosts=control-host,worker-host pin-local=1 pin-gate-hosts=gate-host-b ask=ask-token-0000000001');
+    const t = parseTicket(leaseWith(poolQueueName('gate', 1), note))!;
+    expect(t.req.pin).toEqual(req.pin);
+    expect(t.ask).toBe('ask-token-0000000001');
+    const plain = parseTicket(leaseWith(poolQueueName('gate', 2), poolQueueNote({ kind: 'gate', memGb: 0 })))!;
+    expect(plain.req.pin).toBeUndefined();
+    expect(plain.ask).toBeNull();
+  });
+
+  it('a queued ticket holds back only the hosts its pin allows', () => {
+    const waiting = ticket('gate', 1, { pin: { hosts: ['control-host'], local: false, gateHosts: [] } }, NOW - 5_000);
+    expect(placeWork(states([ctl(), wk()]), { kind: 'gate', memGb: 0 }, { queue: [waiting] })).toMatchObject({ ok: true, host: 'worker-host' });
+  });
+
+  it('the view lists the features a client checks before it relies on them', () => {
+    expect(POOL_FEATURES).toEqual(['ask-token', 'host-pin']);
+    expect(buildPoolView(states([ctl()]), NOW).features).toEqual(['ask-token', 'host-pin']);
+  });
+
+  it('a cancel mark is not a slot: it holds no budget and no slot number', () => {
+    const [s] = states([ctl()], [leaseWith('pool-cancel:0123456789abcdef0123456789abcdef', 'pool-cancel')]);
+    expect(s.view.slots.gate.used).toBe(0);
+    expect(s.ledger.product).toEqual({ threads: 0, memBytes: 0 });
+  });
+
+  it('a control-plane tab is pinned too: a pin without the server\'s host refuses it (review r1 of #64)', () => {
+    const cp = (pin: IPoolPlacementRequest['pin']): IPoolPlacementRequest => ({ kind: 'tab', memGb: 0, class: 'control-plane', pin });
+    expect(place([ctl(), wk()], cp({ hosts: ['worker-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: false, refusal: 'no-pinned-host', queueable: false });
+    expect(place([ctl(), wk()], cp({ hosts: [], local: true, gateHosts: [] }))).toMatchObject({ ok: true, host: 'control-host', local: true });
+  });
+
+  it('a non-agent tab is pinned too: it runs on the server\'s host only when the pin allows it (review r1 of #64)', () => {
+    const term = (pin: IPoolPlacementRequest['pin']): IPoolPlacementRequest => ({ kind: 'tab', memGb: 0, panelType: 'terminal', pin });
+    expect(place([ctl(), wk()], term({ hosts: ['worker-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: false, refusal: 'no-pinned-host', queueable: false });
+    expect(place([ctl(), wk()], term({ hosts: ['control-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: true, host: 'control-host', envelope: null });
+    expect(place([ctl(), wk()], { kind: 'tab', memGb: 0, panelType: 'terminal' })).toMatchObject({ ok: true, host: 'control-host' });
   });
 });

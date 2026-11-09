@@ -1,4 +1,5 @@
 import { isAgentPanelType } from '@/lib/agent-panel-types';
+import { isValidRemoteHostName } from '@/lib/remote-host';
 import { DEFAULT_POOL_PATH_SLOW_MS, POOL_PATH_SLOW_KEY, pathView } from '@/lib/tailnet-path';
 import type { ILease } from '@/types/lease';
 import {
@@ -8,6 +9,7 @@ import {
   type IPoolBudgetView,
   type IPoolEnvelopeView,
   type IPoolHostView,
+  type IPoolPin,
   type IPoolPlacementRequest,
   type IPoolQueueEntry,
   type IPoolSlotUse,
@@ -15,6 +17,7 @@ import {
   type IPoolUse,
   type IPoolView,
   type TPoolClass,
+  type TPoolFeature,
   type TPoolHostRead,
   type TPoolKind,
   type TPoolPlacement,
@@ -68,6 +71,13 @@ export const POOL_ENVELOPE_KEY_PREFIX = 'pool.envelope.';
 export const POOL_HARNESS_SHARE_KEY = 'pool.harness-share-pct';
 /** `shadow` (the default, and the value a stored bad value reads as) or `enforce` (vel-D4 review r1). */
 export const POOL_MODE_KEY = 'pool.mode';
+
+/** What this server honours (vel-POOL-ENF); `pool show --json` lists them, and a client checks before it relies on them. */
+export const POOL_FEATURES: readonly TPoolFeature[] = Object.freeze(['ask-token', 'host-pin']);
+
+/** A pool-cancel mark (vel-POOL-ENF): it refuses a late acquire with its ask token, and holds no budget. */
+export const POOL_CANCEL_LEASE_KIND = 'pool-cancel';
+export const POOL_CANCEL_TTL_SECONDS = 600;
 export const POOL_MODES: readonly TPoolMode[] = ['shadow', 'enforce'];
 export const DEFAULT_POOL_MODE: TPoolMode = 'shadow';
 
@@ -126,6 +136,18 @@ export const poolHostId = (host: string): string => host.toLowerCase();
 
 export const poolLeaseName = (host: string, kind: TPoolKind, n: number): string => `${POOL_LEASE_KIND}:${poolHostId(host)}/${kind}-${n}`;
 export const poolQueueName = (kind: TPoolKind, n: number): string => `${POOL_QUEUE_LEASE_KIND}:${kind}-${n}`;
+/** The cancel mark of one holder's ask: `key` is a hash of the holder and the token, so the name never carries the token
+ * and two holders never share a mark (review r1 of #64). */
+export const poolCancelName = (key: string): string => `${POOL_CANCEL_LEASE_KIND}:${key}`;
+
+/** An ask token as logs and messages show it: a short prefix, never the whole token (review r1 of #64). */
+export const askLabel = (ask: string): string => `${ask.slice(0, 8)}...`;
+
+/** The gate-host container of a pool host (fleet `pool.gate-host.<host>`), else null: an ssh alias only. */
+export const poolGateHostOf = (config: TConfigValue, host: string): string | null => {
+  const value = config(`${POOL_GATE_HOST_KEY_PREFIX}${poolHostId(host)}`)?.trim();
+  return value && isValidRemoteHostName(value) ? value : null;
+};
 
 const LEASE_RE = new RegExp(`^pool:([a-z0-9._-]+)\\/(${KIND_ALT})-([0-9]{1,3})$`);
 const QUEUE_RE = new RegExp(`^pool-queue:(${KIND_ALT})-([0-9]{1,3})$`);
@@ -163,7 +185,7 @@ export const requestEnvelope = (req: Pick<IPoolPlacementRequest, 'kind' | 'memGb
   return { threads: req.threads ?? base.threads, memBytes: Math.max(base.memBytes, req.memGb * GIB) };
 };
 
-const noteField = (note: string | null, field: string): string | null =>
+export const noteField = (note: string | null, field: string): string | null =>
   new RegExp(`(?:^|\\s)${field}=([^\\s]+)`).exec(note ?? '')?.[1] ?? null;
 
 const notePositive = (note: string | null, field: string): number | null => {
@@ -171,9 +193,9 @@ const notePositive = (note: string | null, field: string): number | null => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
-/** A slot lease's note: what it reserves, so the ledger counts it for its whole life. */
-export const poolLeaseNote = (envelope: IPoolEnvelope, cls: TPoolClass = 'product'): string =>
-  `pool mem=${gbOf(envelope.memBytes)} threads=${envelope.threads} class=${cls}`;
+/** A slot lease's note: what it reserves, so the ledger counts it for its whole life, and the ask token (vel-POOL-ENF). */
+export const poolLeaseNote = (envelope: IPoolEnvelope, cls: TPoolClass = 'product', ask: string | null = null): string =>
+  `pool mem=${gbOf(envelope.memBytes)} threads=${envelope.threads} class=${cls}${ask ? ` ask=${ask}` : ''}`;
 
 export const memOfLease = (lease: ILease): number => {
   const gb = notePositive(lease.note, 'mem');
@@ -192,7 +214,7 @@ export const leaseClass = (lease: ILease): TPoolClass => {
 };
 
 /** A ticket's note holds the request, so every waiter's position is computed from the store alone. */
-export const poolQueueNote = (req: IPoolPlacementRequest): string => [
+export const poolQueueNote = (req: IPoolPlacementRequest, ask: string | null = null): string => [
   POOL_QUEUE_LEASE_KIND,
   `class=${req.class ?? 'product'}`,
   `mem=${req.memGb}`,
@@ -200,13 +222,27 @@ export const poolQueueNote = (req: IPoolPlacementRequest): string => [
   ...(req.panelType ? [`panel=${req.panelType}`] : []),
   ...(req.role ? [`role=${req.role}`] : []),
   ...(req.localOnly ? ['local-only=1'] : []),
+  ...(req.pin?.hosts.length ? [`pin-hosts=${req.pin.hosts.join(',')}`] : []),
+  ...(req.pin?.local ? ['pin-local=1'] : []),
+  ...(req.pin?.gateHosts.length ? [`pin-gate-hosts=${req.pin.gateHosts.join(',')}`] : []),
+  ...(ask ? [`ask=${ask}`] : []),
 ].join(' ');
+
+const listField = (note: string | null, field: string): string[] => noteField(note, field)?.split(',').filter(Boolean) ?? [];
+
+/** The pin a ticket's note holds, or undefined when it held none. */
+const notePin = (note: string | null): IPoolPin | undefined => {
+  const pin = { hosts: listField(note, 'pin-hosts'), local: noteField(note, 'pin-local') === '1', gateHosts: listField(note, 'pin-gate-hosts') };
+  return pin.hosts.length || pin.local || pin.gateHosts.length ? pin : undefined;
+};
 
 export interface IPoolTicket {
   name: string;
   kind: TPoolKind;
   n: number;
   req: IPoolPlacementRequest;
+  /** The ask token the waiter sent (vel-POOL-ENF), else null. */
+  ask: string | null;
   lease: ILease;
 }
 
@@ -218,6 +254,7 @@ export const parseTicket = (lease: ILease): IPoolTicket | null => {
   const threads = notePositive(lease.note, 'threads');
   const panelType = noteField(lease.note, 'panel');
   const role = noteField(lease.note, 'role');
+  const pin = notePin(lease.note);
   const req: IPoolPlacementRequest = {
     kind: parsed.kind,
     memGb: Number.isFinite(mem) && mem >= 0 ? mem : 0,
@@ -226,8 +263,9 @@ export const parseTicket = (lease: ILease): IPoolTicket | null => {
     ...(panelType ? { panelType } : {}),
     ...(role ? { role } : {}),
     ...(noteField(lease.note, 'local-only') === '1' ? { localOnly: true } : {}),
+    ...(pin ? { pin } : {}),
   };
-  return { name: lease.name, kind: parsed.kind, n: parsed.n, req, lease };
+  return { name: lease.name, kind: parsed.kind, n: parsed.n, req, ask: noteField(lease.note, 'ask'), lease };
 };
 
 /** `pool.slots.<host>.<kind>`: an optional count cap on top of the budget (a gate host's container slots, ADR-0039 §6). */
@@ -459,9 +497,30 @@ export const tabLocalOnly = (req: IPoolPlacementRequest): string | null => {
   return type === 'claude-code' ? null : `type-local-only: a ${type} tab runs on this host (ADR-0022 §13)`;
 };
 
-/** The hosts a request may run on, placeable or not: this host for a local-only tab, else every host. */
-const allowedHosts = (states: readonly IPoolHostState[], req: IPoolPlacementRequest): IPoolHostState[] =>
-  tabLocalOnly(req) ? states.filter((s) => s.view.local) : [...states];
+/** The hosts a pin names (vel-POOL-ENF), placeable or not: by name, the server's own host, or by gate-host container. */
+const pinnedHosts = (states: readonly IPoolHostState[], pin: IPoolPin): IPoolHostState[] =>
+  states.filter((s) => pin.hosts.includes(poolHostId(s.view.host)) || (pin.local && s.view.local)
+    || pin.gateHosts.includes(poolGateHostOf(s.config, s.view.host) ?? ''));
+
+/** The hosts a request may run on, placeable or not: this host for a local-only tab, else every host; within its pin. */
+const allowedHosts = (states: readonly IPoolHostState[], req: IPoolPlacementRequest): IPoolHostState[] => {
+  const hosts = tabLocalOnly(req) ? states.filter((s) => s.view.local) : [...states];
+  if (!req.pin) return hosts;
+  const pinned = new Set(pinnedHosts(states, req.pin));
+  return hosts.filter((s) => pinned.has(s));
+};
+
+const pinText = (pin: IPoolPin): string =>
+  `hosts ${pin.hosts.join(',') || 'none'}; local ${pin.local ? 'yes' : 'no'}; gate hosts ${pin.gateHosts.join(',') || 'none'}`;
+
+/** A pin that allows no host this request may use (vel-POOL-ENF): a configuration refusal, never queued. */
+const noPinnedHost = (states: readonly IPoolHostState[], req: IPoolPlacementRequest & { pin: IPoolPin }, why: string | null): TPoolPlacement => {
+  const hosts = states.map((s) => (req.pin.gateHosts.length ? `${s.view.host} (gate host ${poolGateHostOf(s.config, s.view.host) ?? 'none'})` : s.view.host));
+  return {
+    ok: false, refusal: 'no-pinned-host', queueable: false,
+    reason: `no pool host matches the pin (${pinText(req.pin)})${why ? ` that a ${req.kind} may use (${why})` : ''}: the pool hosts are ${hosts.join(', ') || 'none'}`,
+  };
+};
 
 const harnessFits = (s: IPoolHostState, e: IPoolEnvelope): boolean => {
   if (!s.budget) return false;
@@ -635,6 +694,13 @@ export const wouldRefuseLine = (w: IPoolWouldRefuse): string => [
  */
 export const placeWork = (states: readonly IPoolHostState[], req: IPoolPlacementRequest, ctx: IPlaceContext = {}): TPoolPlacement => {
   const config: TConfigValue = states[0]?.config ?? (() => null);
+  // The pin is judged first, for every kind and class: a non-agent tab and a control-plane tab run on this host, so a
+  // pin that does not allow this host refuses them too (review r1 of #64).
+  const why = tabLocalOnly(req);
+  const allowed = allowedHosts(states, req);
+  if (req.pin && allowed.length === 0) {
+    return noPinnedHost(states, { ...req, pin: req.pin }, pinnedHosts(states, req.pin).length > 0 ? why : null);
+  }
   if (req.kind === 'tab' && !isAgentPanelType(req.panelType ?? 'claude-code')) {
     const local = states.find((s) => s.view.local);
     return { ok: true, host: local?.view.host ?? '', local: true, envelope: null, reason: `not an agent tab: a ${req.panelType} tab has no envelope and runs on this host` };
@@ -642,8 +708,6 @@ export const placeWork = (states: readonly IPoolHostState[], req: IPoolPlacement
   const e = requestEnvelope(req, config);
   if (req.kind === 'tab' && req.class === 'control-plane') return controlPlaneTab(states, e);
   const mode = poolModeOf(config);
-  const allowed = allowedHosts(states, req);
-  const why = tabLocalOnly(req);
   const known = allowed.filter((s) => s.budget);
   const tooLarge = known.length > 0 && known.every((s) => {
     const b = s.budget!;
@@ -730,5 +794,5 @@ export const buildPoolView = (
   wouldRefuse: IPoolWouldRefuseView = emptyWouldRefuse(poolModeOf(states[0]?.config ?? (() => null)), now),
 ): IPoolView => {
   const hosts = states.map((s) => s.view);
-  return { at: new Date(now).toISOString(), hosts, totals: poolTotals(hosts), queue: queueView(tickets, states), wouldRefuse };
+  return { at: new Date(now).toISOString(), hosts, totals: poolTotals(hosts), queue: queueView(tickets, states), wouldRefuse, features: POOL_FEATURES };
 };

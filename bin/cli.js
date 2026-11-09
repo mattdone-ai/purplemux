@@ -212,6 +212,9 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'pool-timeout': EXIT.UNREACHABLE,
   'pool-queued': EXIT.CONFLICT,
   'pool-ticket-gone': EXIT.CONFLICT,
+  'pool-no-pinned-host': EXIT.CONFLICT,
+  'pool-ask-cancelled': EXIT.CONFLICT,
+  'pool-ask-mismatch': EXIT.CONFLICT,
   'curator-task-invalid': EXIT.USAGE,
   'curator-workspace-invalid': EXIT.USAGE,
   'curator-gate-refused': EXIT.CONFLICT,
@@ -244,6 +247,9 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'pool-full': 'no host has the budget, the memory or the disk — wait for a release, or ask with --queue; a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here',
   'pool-queued': 'the request still waits in the pool queue — re-run with --ticket TICKET within 120 s to keep the place, or with a longer --wait; do not start the work without the pool',
   'pool-ticket-gone': 'the ticket expired or was released — ask again without --ticket (the place is lost)',
+  'pool-no-pinned-host': 'the pin names no pool host this work may use — a configuration refusal: fix the pin (--pin-host, --pin-gate-host, pool.gate-host.<host>), never wait on it',
+  'pool-ask-cancelled': 'this ask token was cancelled by `pool release --ask` — the late ask takes nothing; ask again with a fresh token',
+  'pool-ask-mismatch': 'the lease was not taken by this ask token — nothing was released; release only the lease your own ask took',
 }));
 
 const exitFor = (code) => (code && Object.hasOwn(CODE_EXIT, code) ? CODE_EXIT[code] : EXIT.UNEXPECTED);
@@ -1768,7 +1774,30 @@ const cmdLease = async (args) => {
 
 const POOL_KINDS = ['gate', 'build', 'mutation', 'browser', 'test-service', 'tab'];
 const POOL_CLASSES = ['product', 'harness', 'control-plane'];
-const POOL_USAGE = 'usage: pool show [--json] | acquire --kind gate|build|mutation|browser|test-service|tab [--mem GB] [--threads N] [--class product|harness|control-plane] [--queue [--wait SECONDS] | --ticket TICKET] [--ttl 60m] [--panel-type T] [--role R] | release LEASE|TICKET';
+const POOL_USAGE = 'usage: pool show [--json] | acquire --kind gate|build|mutation|browser|test-service|tab [--mem GB] [--threads N] [--class product|harness|control-plane] [--queue [--wait SECONDS] | --ticket TICKET] [--ttl 60m] [--panel-type T] [--role R] [--ask TOKEN] [--pin-host H]... [--pin-local] [--pin-gate-host G]... | release [LEASE|TICKET] [--ask TOKEN]';
+// vel-POOL-ENF: the server's grammars, so a bad value is a usage error before anything is sent.
+const POOL_ASK_TOKEN = /^[a-z0-9][a-z0-9-]{15,63}$/;
+const POOL_PIN_HOST = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const POOL_GATE_HOST = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+const POOL_PIN_MAX = 16;
+
+const poolAskOf = (args) => {
+  const ask = flagValue(args, '--ask');
+  if (ask === null && !args.includes('--ask')) return null;
+  if (!POOL_ASK_TOKEN.test(ask ?? '')) die(`--ask must match ${POOL_ASK_TOKEN.source}, got "${ask ?? ''}"`);
+  return ask;
+};
+
+/** The pin flags as the body's `pin`, or null when none is given (vel-POOL-ENF). */
+const poolPinOf = (args) => {
+  const hosts = [...new Set(flagValues(args, '--pin-host').map((h) => h.toLowerCase()))];
+  const gateHosts = [...new Set(flagValues(args, '--pin-gate-host'))];
+  const local = args.includes('--pin-local');
+  for (const h of hosts) if (!POOL_PIN_HOST.test(h)) die(`--pin-host must be a pool host name (${POOL_PIN_HOST.source}), got "${h}"`);
+  for (const g of gateHosts) if (!POOL_GATE_HOST.test(g)) die(`--pin-gate-host must be a gate-host ssh alias (${POOL_GATE_HOST.source}), got "${g}"`);
+  if (hosts.length > POOL_PIN_MAX || gateHosts.length > POOL_PIN_MAX) die(`a pin names at most ${POOL_PIN_MAX} hosts and ${POOL_PIN_MAX} gate hosts`);
+  return hosts.length || gateHosts.length || local ? { hosts, local, gateHosts } : null;
+};
 // vel-D4: a queued request waits here, re-asking with its ticket, up to --wait seconds (default 15 min).
 const POOL_QUEUE_WAIT_DEFAULT_S = 900;
 // The client rule: no answer in 2 s exits 6 (pool-timeout), and the caller falls back to its local slots and logs it.
@@ -1921,15 +1950,21 @@ const cmdPool = async (args) => {
       if (panelType !== null) data.panelType = panelType;
       const role = flagValue(rest, '--role');
       if (role !== null) data.role = role;
+      const ask = poolAskOf(rest);
+      if (ask !== null) data.ask = ask;
+      const pin = poolPinOf(rest);
+      if (pin !== null) data.pin = pin;
       requireEnv();
       const first = await poolRequest('POST', '/api/cli/pool/acquire', data);
       return out(await waitInQueue(first, (t) => poolRequest('POST', '/api/cli/pool/acquire', { ...data, ticket: t }), wait));
     }
     case 'release': {
-      const lease = rest.find((a) => !a.startsWith('-'));
-      if (!lease) die(`release needs a LEASE (pool:<host>/<kind>-<n>) or a TICKET (pool-queue:<kind>-<n>) — ${POOL_USAGE}`);
+      const ask = poolAskOf(rest);
+      const lease = rest.find((a, i) => !a.startsWith('-') && rest[i - 1] !== '--ask');
+      if (!lease && ask === null) die(`release needs a LEASE (pool:<host>/<kind>-<n>), a TICKET (pool-queue:<kind>-<n>) or --ask TOKEN — ${POOL_USAGE}`);
       requireEnv();
-      const { body } = await api('POST', '/api/cli/pool/release', { lease });
+      // vel-POOL-ENF: LEASE --ask releases only the lease that ask took; --ask alone cancels the ask.
+      const { body } = await api('POST', '/api/cli/pool/release', { ...(lease ? { lease } : {}), ...(ask !== null ? { ask } : {}) });
       return out(body);
     }
     default:
@@ -3732,7 +3767,8 @@ Commands:
                                            GPU, kind counts, the one budget (workers, harness share, control-plane
                                            reserve) and the queue; an unknown host shows no figures, never 0
   pool acquire --kind K [--mem GB] [--threads N] [--class product|harness] [--queue [--wait S] | --ticket T]
-             [--ttl 60m] [--panel-type T] [--role R]
+             [--ttl 60m] [--panel-type T] [--role R] [--ask TOKEN] [--pin-host H]... [--pin-local]
+             [--pin-gate-host G]...
                                            K: gate, build, mutation, browser, test-service or tab. Admit the work on
                                            the shared host budget (vel-D4) and take a slot lease: prints {host,
                                            local, slot, lease, expiresAt, reason, gateHost, class, envelope}. Jobs
@@ -3742,10 +3778,22 @@ Commands:
                                            pool-queued when --wait runs out. Exit 6 when no answer comes in 2 s:
                                            do what you do without the pool and log it (gate.no-local-fallback
                                            repositories never run here). A gate passes --ttl of at least its gate
-                                           timeout. Pass the envelope to systemd-run or docker where you can
-  pool release LEASE|TICKET                Release a slot you hold (pool:<host>/<kind>-<n>) or give up a queue place
+                                           timeout. Pass the envelope to systemd-run or docker where you can.
+                                           --ask TOKEN ([a-z0-9][a-z0-9-]{15,63}, fresh per ask) goes into the
+                                           slot's note, so only that ask reclaims it (vel-POOL-ENF). --pin-host,
+                                           --pin-local (the server's host) and --pin-gate-host (hosts whose
+                                           pool.gate-host names G) admit only there, their union; a pin that
+                                           matches no pool host is exit 3 pool-no-pinned-host, never queued. The
+                                           answer echoes ask and pin; pool show --json lists the server's features.
+                                           A server without them drops --ask and --pin-* unsaid: check features, or
+                                           that the answer echoes both, before you rely on the pin
+  pool release [LEASE|TICKET] [--ask TOKEN]
+                                           Release a slot you hold (pool:<host>/<kind>-<n>) or give up a queue place
                                            (pool-queue:<kind>-<n>); a slot also ends with its TTL (default 60m, at
-                                           most 24h) or its holder tab
+                                           most 24h) or its holder tab. With --ask, LEASE is released only when that
+                                           ask took it (else exit 3 pool-ask-mismatch); --ask alone cancels the ask:
+                                           its slots and tickets go, and an acquire with it that lands later is
+                                           refused (exit 3 pool-ask-cancelled) for 10 minutes
   inbox list -w WS [--all]                 Server notices (notes, watches, deploys, Mission Control) queued or held
                                            for WS's tabs; --all adds delivered and dropped (kept 7 days)
   inbox retry ID                           Re-queue a held notice once (the target workspace, the note's sender, or admin).

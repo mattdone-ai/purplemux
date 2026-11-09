@@ -211,8 +211,12 @@ export const holderStateOf = (lease: ILease, facts: IViewFacts): THolderState =>
   return facts.agentInactive(tabId) ? 'agent-gone' : 'live';
 };
 
+/** An ask token in a note (`ask=<T>`, vel-POOL-ENF) is its asker's alone: every view shows a short prefix (review r1 of #64). */
+const viewNote = (note: string | null): string | null => (note === null ? null : note.replace(/(^|\s)ask=(\S{8})\S*/g, '$1ask=$2...'));
+
 export const toLeaseView = (lease: ILease, facts: IViewFacts): ILeaseView => ({
   ...lease,
+  note: viewNote(lease.note),
   holder: { ...lease.holder, workspaceName: lease.holder.workspaceId ? facts.workspaceName(lease.holder.workspaceId) : null },
   ageSeconds: Math.max(0, Math.floor((facts.now - Date.parse(lease.acquiredAt)) / 1000)),
   expiresInSeconds: lease.expiresAt === null ? null : Math.max(0, Math.floor((Date.parse(lease.expiresAt) - facts.now) / 1000)),
@@ -540,6 +544,27 @@ export const releaseLease = async (rawName: unknown, holder: ILeaseHolder, autho
   const { name } = parseLeaseName(rawName);
   const lease = await transact(authority.now(), (state) => {
     const r = releaseInState(state, name, holder, authority.now());
+    return { state: r.state, value: r.lease, effects: [{ type: 'released', lease: r.lease, reason: 'released', by: holder }] };
+  });
+  return lease.value!;
+};
+
+/**
+ * Release a lease the holder holds, only when `check` accepts it (vel-POOL-ENF: a pool slot's own ask token). The check
+ * runs inside the lock on the stored lease and throws to refuse; nothing is released then.
+ */
+export const releaseLeaseWhere = async (
+  rawName: unknown,
+  holder: ILeaseHolder,
+  authority: ILeaseAuthority,
+  check: (lease: ILease) => void,
+): Promise<ILease> => {
+  requireHolder(holder);
+  const { name } = parseLeaseName(rawName);
+  const now = authority.now();
+  const lease = await transact(now, (state) => {
+    check(findHeld(state, name, holder, now));
+    const r = releaseInState(state, name, holder, now);
     return { state: r.state, value: r.lease, effects: [{ type: 'released', lease: r.lease, reason: 'released', by: holder }] };
   });
   return lease.value!;

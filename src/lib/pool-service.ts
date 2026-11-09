@@ -1,11 +1,12 @@
+import { createHash } from 'node:crypto';
 import { isAgentPanelType } from '@/lib/agent-panel-types';
 import { collectAllTabs } from '@/lib/layout-tree';
-import { LeasePolicyError, resolveTtl } from '@/lib/lease-policy';
-import { LeaseError, acquireChosenLease, holderLabel, listLeases, releaseLease, sameHolder, type ILeaseAuthority } from '@/lib/lease-store';
+import { LeasePolicyError, NOTE_MAX, resolveTtl } from '@/lib/lease-policy';
+import { LeaseError, acquireChosenLease, holderLabel, listLeases, releaseLease, releaseLeaseWhere, sameHolder, type ILeaseAuthority } from '@/lib/lease-store';
 import { createLogger } from '@/lib/logger';
 import {
   NO_TABS,
-  POOL_GATE_HOST_KEY_PREFIX,
+  POOL_CANCEL_TTL_SECONDS,
   POOL_LEASE_KIND,
   POOL_QUEUE_LEASE_KIND,
   QUEUE_RETRY_SECONDS,
@@ -18,12 +19,16 @@ import {
   hostState,
   isPoolClass,
   isPoolKind,
+  noteField,
   orderQueue,
   parsePoolLeaseName,
   parsePoolQueueName,
   parseTicket,
   pathSlowMsOf,
   placeWork,
+  askLabel,
+  poolCancelName,
+  poolGateHostOf,
   poolHostId,
   poolModeOf,
   poolLeaseName,
@@ -43,7 +48,7 @@ import { isValidRemoteHostName } from '@/lib/remote-host';
 import { pathAlertText, pathView } from '@/lib/tailnet-path';
 import type { ILease, ILeaseHolder } from '@/types/lease';
 import type {
-  IPoolAcquireResult, IPoolEnvelopeView, IPoolHostPath, IPoolPlacementRequest, IPoolQueuedResult, IPoolView, TPoolHostRead, TPoolPlacement,
+  IPoolAcquireResult, IPoolEnvelopeView, IPoolHostPath, IPoolPin, IPoolPlacementRequest, IPoolQueuedResult, IPoolView, TPoolHostRead, TPoolPlacement,
   TPoolRefusalReason,
 } from '@/types/pool';
 
@@ -57,7 +62,7 @@ export const THREADS_MAX = 4096;
 
 export class PoolError extends Error {
   constructor(
-    readonly code: 'pool-full' | 'pool-invalid' | 'pool-ticket-gone',
+    readonly code: 'pool-full' | 'pool-invalid' | 'pool-ticket-gone' | 'pool-no-pinned-host' | 'pool-ask-cancelled' | 'pool-ask-mismatch',
     message: string,
     readonly refusal: TPoolRefusalReason | null = null,
   ) {
@@ -212,6 +217,10 @@ export interface IPoolAcquireInput {
   queue?: unknown;
   /** Re-ask as this waiting ticket. */
   ticket?: unknown;
+  /** The caller's ask token (vel-POOL-ENF): written into the slot's note, so only this ask reclaims it. */
+  ask?: unknown;
+  /** Only these hosts (vel-POOL-ENF): `{hosts, local, gateHosts}`, their union; any kind. */
+  pin?: unknown;
 }
 
 const optionalText = (raw: unknown, field: string): string | undefined => {
@@ -221,6 +230,45 @@ const optionalText = (raw: unknown, field: string): string | undefined => {
 };
 
 const absent = (raw: unknown): boolean => raw === undefined || raw === null;
+
+export const ASK_TOKEN = /^[a-z0-9][a-z0-9-]{15,63}$/;
+export const PIN_MAX = 16;
+const PIN_HOST = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** The ask token (vel-POOL-ENF), exactly as sent: never lower-cased, so a token cannot match another one. */
+export const parseAskToken = (raw: unknown): string | null => {
+  if (absent(raw)) return null;
+  if (typeof raw !== 'string' || !ASK_TOKEN.test(raw)) throw new PoolError('pool-invalid', `ask must match ${ASK_TOKEN.source}, got ${JSON.stringify(raw)}`);
+  return raw;
+};
+
+const pinList = (raw: unknown, field: string, valid: (v: string) => boolean, norm: (v: string) => string): string[] => {
+  if (absent(raw)) return [];
+  if (!Array.isArray(raw)) throw new PoolError('pool-invalid', `pin.${field} must be a list of host names, got ${JSON.stringify(raw)}`);
+  if (raw.length > PIN_MAX) throw new PoolError('pool-invalid', `pin.${field} names at most ${PIN_MAX} hosts, got ${raw.length}`);
+  const out: string[] = [];
+  for (const v of raw) {
+    const name = typeof v === 'string' ? norm(v.trim()) : '';
+    if (!valid(name)) throw new PoolError('pool-invalid', `pin.${field} has an invalid host name ${JSON.stringify(v)}`);
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
+};
+
+/** The pin (vel-POOL-ENF), normalized: pool host names lower-cased and de-duplicated, gate hosts as ssh aliases. */
+export const parsePoolPin = (raw: unknown): IPoolPin | undefined => {
+  if (absent(raw)) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new PoolError('pool-invalid', `pin must be an object {hosts, local, gateHosts}, got ${JSON.stringify(raw)}`);
+  const r = raw as Record<string, unknown>;
+  if (!absent(r.local) && typeof r.local !== 'boolean') throw new PoolError('pool-invalid', `pin.local must be true or false, got ${JSON.stringify(r.local)}`);
+  const pin: IPoolPin = {
+    hosts: pinList(r.hosts, 'hosts', (v) => PIN_HOST.test(v), (v) => v.toLowerCase()),
+    local: r.local === true,
+    gateHosts: pinList(r.gateHosts, 'gateHosts', isValidRemoteHostName, (v) => v),
+  };
+  if (!pin.hosts.length && !pin.local && !pin.gateHosts.length) throw new PoolError('pool-invalid', 'pin must name a host, local or a gate host');
+  return pin;
+};
 
 export const parsePoolRequest = (input: IPoolAcquireInput): IPoolPlacementRequest => {
   if (!isPoolKind(input.kind)) throw new PoolError('pool-invalid', `kind must be gate, build, mutation, browser, test-service or tab, got ${JSON.stringify(input.kind ?? null)}`);
@@ -237,6 +285,7 @@ export const parsePoolRequest = (input: IPoolAcquireInput): IPoolPlacementReques
   const role = optionalText(input.role, 'role');
   if (input.kind !== 'tab' && (panelType || role || input.localOnly === true)) throw new PoolError('pool-invalid', 'panelType, role and localOnly go with kind tab only');
   if (input.kind === 'tab' && !isAgentPanelType(panelType ?? 'claude-code')) throw new PoolError('pool-invalid', `a ${panelType} tab has no envelope: only agent tabs reserve from the pool`);
+  const pin = parsePoolPin(input.pin);
   return {
     kind: input.kind,
     memGb,
@@ -245,12 +294,8 @@ export const parsePoolRequest = (input: IPoolAcquireInput): IPoolPlacementReques
     ...(panelType ? { panelType } : {}),
     ...(role ? { role } : {}),
     ...(input.localOnly === true ? { localOnly: true } : {}),
+    ...(pin ? { pin } : {}),
   };
-};
-
-const gateHostOf = (config: TConfigValue, host: string): string | null => {
-  const value = config(`${POOL_GATE_HOST_KEY_PREFIX}${poolHostId(host)}`)?.trim();
-  return value && isValidRemoteHostName(value) ? value : null;
 };
 
 const ticketInput = (raw: unknown): string | null => {
@@ -264,12 +309,33 @@ const ticketInput = (raw: unknown): string | null => {
 const pendingTicket = (name: string, req: IPoolPlacementRequest, holder: ILeaseHolder, now: number): IPoolTicket => {
   const at = new Date(now).toISOString();
   return {
-    name, kind: req.kind, n: parsePoolQueueName(name)?.n ?? 0, req,
+    name, kind: req.kind, n: parsePoolQueueName(name)?.n ?? 0, req, ask: null,
     lease: { name, kind: POOL_QUEUE_LEASE_KIND, resource: name.slice(name.indexOf(':') + 1), holder, epic: null, note: null, acquiredAt: at, renewedAt: at, ttlSeconds: QUEUE_TTL_SECONDS, expiresAt: null, survivesTab: false },
   };
 };
 
 type TAdmitted = Omit<IPoolAcquireResult, 'lease' | 'expiresAt' | 'gateHost'>;
+
+const isSlotOrTicket = (lease: ILease): boolean => parsePoolLeaseName(lease.name) !== null || parsePoolQueueName(lease.name) !== null;
+
+const holderKey = (holder: ILeaseHolder): string => (holder.admin ? 'admin' : `${holder.workspaceId ?? ''}/${holder.tabId ?? ''}`);
+
+/**
+ * The cancel mark of one holder's ask (review r1 of #64): named by a hash of the holder and the token, so another tab
+ * that knows the token can neither take this holder's mark (and block its cancel) nor refuse its late ask, and no
+ * lease name carries the token.
+ */
+const cancelMark = (ask: string, holder: ILeaseHolder): string =>
+  poolCancelName(createHash('sha256').update(`${holderKey(holder)}\n${ask}`).digest('hex').slice(0, 32));
+
+/** Inside the lease lock: a cancelled ask takes nothing, and a token is one caller's (vel-POOL-ENF). */
+const checkAsk = (leases: readonly ILease[], ask: string, holder: ILeaseHolder): void => {
+  if (leases.some((l) => l.name === cancelMark(ask, holder))) {
+    throw new PoolError('pool-ask-cancelled', `ask ${askLabel(ask)} was cancelled by \`pool release --ask\`: this late ask takes nothing (the mark lives ${POOL_CANCEL_TTL_SECONDS} s)`);
+  }
+  const other = leases.find((l) => isSlotOrTicket(l) && noteField(l.note, 'ask') === ask && !sameHolder(l.holder, holder));
+  if (other) throw new PoolError('pool-invalid', `ask ${askLabel(ask)} is another caller's token (${other.name}): send a fresh token per ask`);
+};
 type TChoice = { queued: false; admitted: TAdmitted } | { queued: true; result: IPoolQueuedResult };
 
 /**
@@ -287,6 +353,13 @@ export const acquirePoolSlot = async (
 ): Promise<IPoolAcquireResult | IPoolQueuedResult> => {
   const resolved = await resolvePoolClass(parsePoolRequest(input), holder, authority);
   const asked = resolved.req;
+  const askToken = parseAskToken(input.ask);
+  // A ticket note holds the pin and the token; one that would pass the lease note limit is refused here, before the lock
+  // (review r1 of #64: the limit was unstated, and the failure came later as a lease-policy 400).
+  const queueNote = poolQueueNote(asked, askToken);
+  if (queueNote.length > NOTE_MAX) {
+    throw new PoolError('pool-invalid', `the request's queue note would be ${queueNote.length} characters, at most ${NOTE_MAX}: pin fewer or shorter hosts`);
+  }
   const downgrade = resolved.downgrade ? { downgrade: resolved.downgrade } : {};
   const ticketName = ticketInput(input.ticket);
   if (!absent(input.ttlSeconds) && typeof input.ttlSeconds !== 'number') throw new LeasePolicyError('ttlSeconds must be a number');
@@ -305,16 +378,19 @@ export const acquirePoolSlot = async (
       if (self.kind !== asked.kind) throw new PoolError('pool-invalid', `${ticketName} is a ${self.kind} ticket, not ${asked.kind}`);
       req = self.req;
     }
+    const ask = askToken ?? self?.ask ?? null;
+    if (ask) checkAsk(state.leases, ask, holder);
     const placed = placeWork(states, req, { queue: tickets, ...(self ? { self: self.name } : {}) });
     const cls = req.class ?? 'product';
     const envelope = requestEnvelope(req, facts.config);
+    if (!placed.ok && placed.refusal === 'no-pinned-host') throw new PoolError('pool-no-pinned-host', placed.reason, placed.refusal);
     if (placed.ok) {
       const chosen = states.find((s) => s.view.host === placed.host)!;
       const n = freeSlotNumber(chosen, req.kind);
       return {
         name: poolLeaseName(placed.host, req.kind, n),
         ttlSeconds,
-        note: poolLeaseNote(envelope, cls),
+        note: poolLeaseNote(envelope, cls, ask),
         release: self ? [self.name] : [],
         value: {
           queued: false,
@@ -323,6 +399,8 @@ export const acquirePoolSlot = async (
             reason: resolved.downgrade ? `${resolved.downgrade}; ${placed.reason}` : placed.reason,
             ...(placed.wouldRefuse ? { wouldRefuse: placed.wouldRefuse } : {}),
             ...downgrade,
+            ask,
+            pin: req.pin ?? null,
           },
         },
       };
@@ -342,7 +420,7 @@ export const acquirePoolSlot = async (
       ...downgrade,
     };
     return renew
-      ? { name, ttlSeconds: QUEUE_TTL_SECONDS, note: poolQueueNote(req), value: { queued: true, result } }
+      ? { name, ttlSeconds: QUEUE_TTL_SECONDS, note: poolQueueNote(req, ask), value: { queued: true, result } }
       : { name: null, value: { queued: true, result } };
   });
   if (value.queued) {
@@ -355,16 +433,43 @@ export const acquirePoolSlot = async (
     ...value.admitted,
     lease: lease!.name,
     expiresAt: lease!.expiresAt,
-    gateHost: asked.kind === 'gate' && !value.admitted.local ? gateHostOf(facts.config, value.admitted.host) : null,
+    // A pin by gate host matched this host through its container, which then runs the work, wherever the host is
+    // (vel-POOL-ENF); otherwise a remote gate names its container, as before.
+    gateHost: value.admitted.pin?.gateHosts.length || (asked.kind === 'gate' && !value.admitted.local)
+      ? poolGateHostOf(facts.config, value.admitted.host)
+      : null,
   };
 };
 
-export const releasePoolSlot = async (rawName: unknown, holder: ILeaseHolder, authority: ILeaseAuthority): Promise<ILease> => {
+/** `ask` given (vel-POOL-ENF): only a lease whose note carries that token is released, so a reused slot name is safe. */
+export const releasePoolSlot = async (rawName: unknown, holder: ILeaseHolder, authority: ILeaseAuthority, rawAsk?: unknown): Promise<ILease> => {
   const name = typeof rawName === 'string' ? rawName.trim().toLowerCase() : '';
   if (!parsePoolLeaseName(name) && !parsePoolQueueName(name)) {
     throw new PoolError('pool-invalid', `lease must be a pool slot (pool:<host>/<kind>-<n>) or a queue ticket (pool-queue:<kind>-<n>), got ${JSON.stringify(rawName ?? null)}`);
   }
-  return releaseLease(name, holder, authority);
+  const ask = parseAskToken(rawAsk);
+  if (!ask) return releaseLease(name, holder, authority);
+  return releaseLeaseWhere(name, holder, authority, (lease) => {
+    const held = noteField(lease.note, 'ask');
+    if (held !== ask) throw new PoolError('pool-ask-mismatch', `${name} was taken by ${held ? `ask ${askLabel(held)}` : 'no ask token'}, not ask ${askLabel(ask)}: nothing was released`);
+  });
+};
+
+/**
+ * `pool release --ask T` (vel-POOL-ENF): in one transaction, release every pool slot and queue ticket of this holder
+ * that carries T, and take or renew this holder's mark `pool-cancel:<hash of holder and T>` (600 s), which refuses an
+ * acquire with T by this holder that lands later.
+ * Either order of a late acquire and its cancel therefore leaves no slot.
+ */
+export const cancelPoolAsk = async (rawAsk: unknown, holder: ILeaseHolder, authority: ILeaseAuthority): Promise<{ released: string[]; cancelled: string }> => {
+  const ask = parseAskToken(rawAsk);
+  if (!ask) throw new PoolError('pool-invalid', 'a cancel needs the ask token');
+  const { value } = await acquireChosenLease<string[]>(holder, authority, (state) => {
+    const gone = state.leases.filter((l) => isSlotOrTicket(l) && sameHolder(l.holder, holder) && noteField(l.note, 'ask') === ask).map((l) => l.name);
+    return { name: cancelMark(ask, holder), ttlSeconds: POOL_CANCEL_TTL_SECONDS, note: 'pool-cancel', release: gone, value: gone };
+  });
+  if (value.length) log.warn(`pool: ask ${askLabel(ask)} cancelled, released ${value.join(', ')}`);
+  return { released: value, cancelled: ask };
 };
 
 export interface ITabStartInput {

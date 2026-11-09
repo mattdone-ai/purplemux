@@ -164,6 +164,12 @@ describe('purplemux pool (ADR-0039)', { timeout: 30_000 }, () => {
     [['acquire', '--kind', 'gate', '--mem', 'lots'], '--mem must be a number'],
     [['acquire', '--kind', 'gate', '--ttl', 'none'], 'a pool slot must expire'],
     [['release'], 'release needs a LEASE'],
+    [['acquire', '--kind', 'gate', '--ask', 'short'], '--ask must match'],
+    [['acquire', '--kind', 'gate', '--ask', '0123456789ABCDEF0123456789ABCDEF'], '--ask must match'],
+    [['acquire', '--kind', 'gate', '--pin-host', 'bad host'], '--pin-host must be'],
+    [['acquire', '--kind', 'gate', '--pin-gate-host', '-x'], '--pin-gate-host must be'],
+    [['acquire', '--kind', 'gate', '--pin-host'], '--pin-host needs a value'],
+    [['release', '--ask', 'short'], '--ask must match'],
     [['nope'], 'usage: pool'],
   ])('%j is a usage error and sends nothing', async (args, message) => {
     const result = await cli(args);
@@ -198,5 +204,34 @@ describe('purplemux pool (ADR-0039)', { timeout: 30_000 }, () => {
     expect(text).toContain('mdserver1 (this host): 32 threads, load 30/28 (0.94/thread), 30.0/91.0 GiB free, / 60%; gate 1/4 build 0/4 tab 6/11');
     expect(text).toContain('ai-lan: unknown — read failed (ai-lan: timed out); slots held gate 2 build 0 tab 0');
     expect(requests.every((r) => r.method === 'GET' && r.url === '/api/cli/pool')).toBe(true);
+  });
+  const T = '0123456789abcdef0123456789abcdef';
+
+  it('acquire sends the ask token and the pin; no pin flag sends no pin (vel-POOL-ENF)', async () => {
+    reply = { status: 200, body: { host: 'control-host', lease: 'pool:control-host/gate-1', ask: T, pin: { hosts: ['control-host'], local: true, gateHosts: ['hosta'] } } };
+    expect((await cli(['acquire', '--kind', 'gate', '--ask', T, '--pin-host', 'Control-Host', '--pin-host', 'worker-host', '--pin-local', '--pin-gate-host', 'hosta', '--pin-gate-host', 'gate-host-b'])).code).toBe(0);
+    await cli(['acquire', '--kind', 'gate', '--pin-local']);
+    await cli(['acquire', '--kind', 'gate', '--ask', T]);
+    expect(requests.map((r) => r.body)).toEqual([
+      { kind: 'gate', ask: T, pin: { hosts: ['control-host', 'worker-host'], local: true, gateHosts: ['hosta', 'gate-host-b'] } },
+      { kind: 'gate', pin: { hosts: [], local: true, gateHosts: [] } },
+      { kind: 'gate', ask: T },
+    ]);
+  });
+
+  it("release --ask alone cancels the token; release LEASE --ask releases only that ask's lease", async () => {
+    reply = { status: 200, body: { released: [], cancelled: T } };
+    expect((await cli(['release', '--ask', T])).code).toBe(0);
+    reply = { status: 200, body: { released: { name: 'pool:worker-host/gate-1' } } };
+    expect((await cli(['release', 'pool:worker-host/gate-1', '--ask', T])).code).toBe(0);
+    expect(requests.map((r) => r.body)).toEqual([{ ask: T }, { lease: 'pool:worker-host/gate-1', ask: T }]);
+  });
+
+  it.each(['pool-no-pinned-host', 'pool-ask-cancelled', 'pool-ask-mismatch'])("%s exits 3 with the server's reason", async (code) => {
+    reply = { status: 409, body: { code, error: `measured reason for ${code}` } };
+    const result = await cli(['acquire', '--kind', 'gate', '--ask', T, '--pin-host', 'control-host']);
+    expect(result.code).toBe(3);
+    expect(result.stderr).toContain(code);
+    expect(result.stderr).toContain(`measured reason for ${code}`);
   });
 });
