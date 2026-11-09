@@ -205,7 +205,8 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     const { getAllPanesInfo } = await import('@/lib/tmux');
     const panes = await getAllPanesInfo();
     expect(panes.get(LOCAL)).toEqual({ command: 'bash', path: '/home/l', pid: 111, windowActivity: 5 });
-    expect(panes.get(REMOTE)).toEqual({ command: 'claude', path: '/home/r', pid: 0, windowActivity: 7, host: 'ai-server' });
+    // paneRef is the remote pane pid as text, an opaque proof-cache identity (vel-D61), never a local pid.
+    expect(panes.get(REMOTE)).toEqual({ command: 'claude', path: '/home/r', pid: 0, windowActivity: 7, host: hostOf.map.get(REMOTE), paneRef: '999' });
     expect(panes.has('not-ours')).toBe(false);
   });
 

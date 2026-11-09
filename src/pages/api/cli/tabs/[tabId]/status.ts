@@ -10,6 +10,12 @@ import { getStatusManager } from '@/lib/status-manager';
 import { resolveTabCliState } from '@/lib/tab-send';
 import { RemoteHostError } from '@/lib/remote-host';
 import { startupPromptBody } from '@/lib/startup-prompt';
+import { observeOrchestrationProcess } from '@/lib/orchestration-runtime';
+
+const remoteAgentProcess = async (tab: Parameters<typeof observeOrchestrationProcess>[0]): Promise<{ state: 'present' | 'absent' | 'unknown'; reason?: string }> => {
+  const observed = await observeOrchestrationProcess(tab);
+  return observed.state === 'present' ? { state: 'present' } : { state: observed.state, reason: observed.reason };
+};
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method !== 'GET') {
@@ -67,12 +73,16 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   }
 
   const command = await getPaneCurrentCommand(found.tab.sessionName);
+  // A remote agent's process, walked on its host (vel-D61): the one check an orchestrator makes before it
+  // respawns a remote tab the watchdog called inactive. `unknown` is a host that did not answer, never death.
+  const agentProcess = found.tab.host && provider ? await remoteAgentProcess(found.tab) : null;
   return res.status(200).json({
     tabId,
     workspaceId,
     ...host,
     alive: true,
     command,
+    ...(agentProcess ? { agentProcess } : {}),
     cliState: resolveTabCliState(found.tab, live),
     ...startupPromptBody(live?.cliState, live?.startupPrompt),
     agentProviderId: provider?.id ?? null,

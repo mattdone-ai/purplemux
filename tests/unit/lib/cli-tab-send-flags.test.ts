@@ -9,7 +9,9 @@ const run = promisify(execFile);
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'bin', 'purplemux.js');
 
 /** fetch refuses port 1 before connecting, so a command that reaches the network still fails fast. */
-const ENV = { ...process.env, PMUX_PORT: '1', PMUX_TOKEN: 'test-token', NO_UPDATE_NOTIFIER: '1' };
+const ENV: NodeJS.ProcessEnv = { ...process.env, PMUX_PORT: '1', PMUX_TOKEN: 'test-token', NO_UPDATE_NOTIFIER: '1' };
+// A remote tab's pane carries PMUX_URL (ADR-0022 §15), which wins over PMUX_PORT and names a live server.
+delete ENV.PMUX_URL;
 
 const cli = async (args: string[]): Promise<{ code: number; stderr: string }> => {
   try {

@@ -21,6 +21,7 @@ import { createLogger } from '@/lib/logger';
 import { POOL_MODE_KEY, isPoolMode, isPoolNumberKey, poolNumberRefusal } from '@/lib/pool';
 import type { IFleetConfigChange, IFleetConfigSetter, IFleetConfigState, IFleetConfigValue } from '@/types/fleet-config';
 import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, callbackUrlRefusal, isValidBareHostName, isValidRemoteHostName, parseCallbackAllowHosts } from '@/lib/remote-host';
+import { REMOTE_TIMEOUT_KEY, remoteTimeoutRefusal } from '@/lib/remote-timeouts';
 
 const log = createLogger('fleet-config');
 
@@ -109,6 +110,14 @@ const checkRemoteValue = (key: string, value: string, state: IFleetConfigState):
     const bad = value.split(',').map((h) => h.trim()).filter((h) => h && !isValidRemoteHostName(h));
     if (bad.length) throw new FleetConfigError('config-invalid', `${REMOTE_HOSTS_KEY} names that are not ssh aliases: ${bad.join(', ')}`);
     if (value.split(',').some((h) => h.trim() === 'auto')) throw new FleetConfigError('config-invalid', `${REMOTE_HOSTS_KEY} cannot name a host "auto": \`tab create --host auto\` asks the pool (ADR-0039)`);
+  }
+  if (key === REMOTE_TIMEOUT_KEY || key.startsWith(`${REMOTE_TIMEOUT_KEY}.`)) {
+    const host = key.slice(REMOTE_TIMEOUT_KEY.length + 1);
+    if (key !== REMOTE_TIMEOUT_KEY && !isValidRemoteHostName(host)) {
+      throw new FleetConfigError('config-invalid', `${key} is not a timeout key: ${REMOTE_TIMEOUT_KEY} or ${REMOTE_TIMEOUT_KEY}.<ssh alias>`);
+    }
+    const refusal = remoteTimeoutRefusal(key, value);
+    if (refusal) throw new FleetConfigError('config-invalid', refusal);
   }
 };
 

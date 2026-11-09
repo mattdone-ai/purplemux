@@ -549,6 +549,10 @@ GET /api/cli/tabs/<tabId>/status?workspaceId=WS
   (folder trust, external CLAUDE.md imports); the row then also carries "startupPrompt"
   ("folder-trust" | "external-imports" | null), "startupPromptLabel" (words for a person) and
   "startupPromptSince" (ms). tab list rows carry the same three fields in that state.
+  A remote agent tab (one with "host") that is alive also carries "agentProcess": { "state":
+  "present" | "absent" | "unknown", "reason"? }: its agent process, walked on that host. Prove a
+  remote tab dead with it before a respawn: "absent" or alive false is dead; "unknown" (the host did
+  not answer) is not, and neither is exit 6 remote-host-unreachable (vel-D61).
   probes/backgroundJobs are the tab's registered liveness watch (see "Liveness watch"),
   so an idle tab that is HOLDING dead background work is distinguishable from an idle
   tab that is done.
@@ -961,6 +965,12 @@ Keys in use:
   remote.callback-allow-hosts
                Bare lower-case host names that remote.callback-url may name over plain http,
                comma-separated. Admin token only.
+  remote.timeout-ms, remote.timeout-ms.<ssh alias>
+               The ssh budget of one tmux call or host check on a remote host, whole ms
+               5000..120000 (else 400 config-invalid); the per-host key wins. Every other remote
+               budget (create 10 s, close 20 s, transcript, spool and job reads 10 s) scales by
+               value/5000; ssh's ConnectTimeout is one second under each call's budget (at least 1 s).
+               Read when the fleet store changes; unset means 5000 (vel-D61). Admin token only.
   context.rotate-at-tokens
                The context a seat rotates at (ADR-0036): a whole number of tokens 50000..900000.
                Read every 30 s; unset or invalid means 300000 (an invalid value is logged). A tab's

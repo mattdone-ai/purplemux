@@ -3,6 +3,7 @@ import os from 'os';
 import { readFleetConfig, valueOf } from '@/lib/fleet-config-store';
 import { readServerPort } from '@/lib/server-port';
 import type { IReapedProcess, IReapResult } from '@/lib/tab-reaper';
+import { SSH_CONNECT_TIMEOUT_S, remoteBudget, remoteTimeoutMs } from '@/lib/remote-timeouts';
 
 /**
  * Remote tabs (ADR-0022): a tab whose tmux session runs on another host, driven
@@ -143,12 +144,12 @@ export const isTmuxAbsence = (err: unknown): boolean => {
   return (e.stderr ?? '').split('\n').some((line) => TMUX_ABSENCE.test(line.trim()));
 };
 
-export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boolean } = {}): string[] => {
+export const sshArgv = (host: string, remoteCommand: string, opts: { tty?: boolean; connectTimeoutS?: number } = {}): string[] => {
   if (!isValidRemoteHostName(host)) throw new Error(`invalid remote host name: ${JSON.stringify(host)}`);
   return [
     ...(opts.tty ? ['-tt'] : []),
     '-o', 'BatchMode=yes',
-    '-o', 'ConnectTimeout=5',
+    '-o', `ConnectTimeout=${opts.connectTimeoutS ?? SSH_CONNECT_TIMEOUT_S}`,
     '-o', 'ServerAliveInterval=15',
     '-o', 'ServerAliveCountMax=3',
     // No ControlMaster (ADR-0022 §5): a first multiplexed connection exited 255 with no stderr in 1
@@ -186,17 +187,20 @@ export const isSshFailure = (err: unknown): boolean => {
 /**
  * Run one command on `host`. Rejects like `execFile`: `code` is the remote exit
  * status, or 255 when ssh itself failed; `stdout`/`stderr` are attached.
+ * `timeoutMs` is the call's budget at the default; the host's `remote.timeout-ms`
+ * scales it and ssh's ConnectTimeout (vel-D61).
  */
-export const runSsh = (
+export const runSsh = async (
   host: string,
   command: string,
   opts: { timeoutMs: number; input?: string },
-): Promise<{ stdout: string; stderr: string }> =>
-  new Promise((resolve, reject) => {
+): Promise<{ stdout: string; stderr: string }> => {
+  const budget = remoteBudget(opts.timeoutMs, await remoteTimeoutMs(host));
+  return new Promise((resolve, reject) => {
     const child = execFile(
       'ssh',
-      sshArgv(host, command),
-      { timeout: opts.timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+      sshArgv(host, command, { connectTimeoutS: budget.connectTimeoutS }),
+      { timeout: budget.timeoutMs, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
           reject(Object.assign(err, { stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }));
@@ -208,18 +212,20 @@ export const runSsh = (
     child?.stdin?.on('error', () => {});
     child?.stdin?.end(opts.input ?? '');
   });
+};
 
 /** `runSsh` with stdout as bytes: a transcript chunk can end inside a multi-byte character. */
-export const runSshBuffer = (
+export const runSshBuffer = async (
   host: string,
   command: string,
   opts: { timeoutMs: number; maxBytes: number },
-): Promise<Buffer> =>
-  new Promise((resolve, reject) => {
+): Promise<Buffer> => {
+  const budget = remoteBudget(opts.timeoutMs, await remoteTimeoutMs(host));
+  return new Promise((resolve, reject) => {
     const child = execFile(
       'ssh',
-      sshArgv(host, command),
-      { timeout: opts.timeoutMs, maxBuffer: opts.maxBytes + 64 * 1024, encoding: 'buffer' },
+      sshArgv(host, command, { connectTimeoutS: budget.connectTimeoutS }),
+      { timeout: budget.timeoutMs, maxBuffer: opts.maxBytes + 64 * 1024, encoding: 'buffer' },
       (err, stdout, stderr) => {
         if (err) {
           reject(Object.assign(err, { stderr: Buffer.isBuffer(stderr) ? stderr.toString('utf-8') : String(stderr ?? '') }));
@@ -231,6 +237,7 @@ export const runSshBuffer = (
     child?.stdin?.on('error', () => {});
     child?.stdin?.end();
   });
+};
 
 export class RemoteHostError extends Error {
   constructor(readonly host: string, message: string) {

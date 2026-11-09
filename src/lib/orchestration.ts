@@ -57,7 +57,7 @@ purplemux's built-in watchdog sends you '${NUDGE_PREFIX} ...' messages when a wo
 - BACKGROUND JOB FAILED: inspect its stderr and artifacts, diagnose, then restart only when retrying is justified and bounded. Repeated failures are systematic — stop restarting and escalate.
 - BACKGROUND JOB EXITED (unknown status): inspect its artifacts and logs before deciding whether it succeeded or failed. Do not presume failure or restart blindly.
 - STALLED (liveness probe) / LIVENESS PROBE FAILING: the tab's background work stopped progressing or cannot be observed even if the pane looks fine. Wake the worker (tab send) to diagnose it; if only a human can clear it (an expired credential, an interactive login), post a standup with needsHuman=true naming the exact command — that is what pushes an alert to the human's phone. Never quietly work around a dead credential.
-- INACTIVE/DEAD: respawn the tab and re-issue the task, noting prior progress.
+- INACTIVE/DEAD: respawn the tab and re-issue the task, noting prior progress. A REMOTE tab (its tab status names a "host") needs one process check first: purplemux tab status -w {{WORKSPACE_ID}} <tabId>. Respawn it only when that shows alive false or agentProcess "absent". On agentProcess "unknown" or exit 6 (remote-host-unreachable), do NOT respawn: the agent may still run on that host; check again once the host answers.
 After handling every nudge, post a standup tick, then end your turn. The tick is the human's dashboard — it must answer "where are things at, are we progressing, any blockers, am I needed" at a glance:
 purplemux standup report -w {{WORKSPACE_ID}} --json '${STANDUP_SCHEMA_HINT}'
 One item per task with its current status; every blocker names the exact input that clears it; set needsHuman only when a human decision is genuinely required. Do not busy-wait; the watchdog will wake you. When awaiting a human, post state "awaiting-human" with the blockers filled in and retain the coordinator; heartbeats pause and no work resumes automatically. Only when the epic is FINISHED: post state "done", close completed worker tabs, then run: purplemux orchestration off -w {{WORKSPACE_ID}} — this stops the idle heartbeats so you are not woken all night for nothing.
@@ -128,7 +128,7 @@ export const buildNudgeMessage = (
     case 'turn-ended':
       return `${NUDGE_PREFIX} ${who} finished its turn. ${capture} — verify, then accept or send follow-up work.`;
     case 'inactive':
-      return `${NUDGE_PREFIX} ${who} is INACTIVE (agent process gone). Respawn the tab or mark its task blocked.`;
+      return `${NUDGE_PREFIX} ${who} is INACTIVE (agent process gone). Respawn the tab or mark its task blocked.${detail ? ` ${detail}` : ''}`;
     case 'stuck':
       return `${NUDGE_PREFIX} ${who} has been busy with no activity for a long time — possibly stalled. ${capture} — decide: keep waiting, interrupt and re-prompt, or respawn.`;
     // Liveness nudges come from registered probes/pids, not tab state. The tab
@@ -154,6 +154,10 @@ export const buildNudgeMessage = (
       return buildHeartbeatMessage(0, workspaceId);
   }
 };
+
+/** The inactive nudge of a remote tab (vel-D61): one process check on its host comes before any respawn. */
+export const remoteInactiveDetail = (host: string, workspaceId: string, tabId: string): string =>
+  `It runs on ${host}, whose pane scan answered without a live agent. Prove it once before a respawn: purplemux tab status -w ${workspaceId} ${tabId} must show alive false or agentProcess "absent"; on agentProcess "unknown" or exit 6 (remote-host-unreachable), do NOT respawn.`;
 
 export const nudgeKindForTransition = (prevState: string | undefined, newState: string, silent: boolean): TOrchestrationNudgeKind | null => {
   if (newState === 'inactive') return prevState && prevState !== 'unknown' ? 'inactive' : null;
