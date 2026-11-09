@@ -94,7 +94,7 @@ and each prints `PASS`/`FAIL` with what it measured and expected:
 | `exit-4-target-gone`, `exit-2-usage`, `exit-7-not-found`, `exit-6-unreachable`, `exit-6-routes-absent` | the CLI exit-code contract (ADR-0016) |
 | `bash-guard` | with `--bash-guard`: the guard allows the holder's merge and refuses another tab's |
 | `turn-marker`, `turn-waiting`, `turn-ready` | ADR-0018 with a scratch `claude` stand-in and posted hook events: a marker line reaches the orchestrator nudge; a stop with a live `tab bg` job stays busy with no nudge; a plain stop keeps READY FOR REVIEW |
-| `live-socket-untouched` | no isolated session appeared on the live tmux socket |
+| `live-socket-untouched` | no isolated session appeared on the live tmux socket; no live server is a pass that says so (tmux answers `no server running`, or lstat of the socket path tmux names gives ENOENT); any other read error fails |
 
 Run it by hand against any built checkout:
 `scripts/acceptance/run.sh --candidate <dir> [--log FILE] [--bash-guard PATH] [--keep]`.
