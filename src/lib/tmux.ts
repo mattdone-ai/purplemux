@@ -250,7 +250,7 @@ const createRemoteSession = async (
   const nonce = nanoid(16);
   const script = buildRemoteCreateScript({
     nonce,
-    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv, trustSeed: !!trust }),
+    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv }),
     session: name,
     cols,
     rows,
