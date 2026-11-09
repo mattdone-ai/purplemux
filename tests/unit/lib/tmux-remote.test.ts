@@ -432,12 +432,16 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(shipped && Buffer.from(shipped[1], 'base64').toString('utf-8')).toBe(REMOTE_TRUST_SEED_SCRIPT);
   });
 
+  // The kit always ships the script (the Claude launch line runs it); the create runs no seed line here.
   it('pre-trusts nothing for a cwd outside every workspace directory, or with no cwd', async () => {
     workspaceDirs.map.set('ws-r', ['/home/mdone/code/nomupay']);
     const { createSession } = await import('@/lib/tmux');
     await createSession(REMOTE, 120, 40, '/home/mdone/portfolio', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
     await createSession(REMOTE, 120, 40, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
     await createSession(REMOTE, 120, 40, '/home/mdone/code/nomupay-other', { workspaceId: 'ws-r', tabId: 'tab-remote1' });
-    for (const call of calls.list) expect(call.input ?? '').not.toContain('trust-seed.py');
+    for (const call of calls.list) {
+      expect(call.input ?? '').toMatch(/^put 'trust-seed\.py' /m);
+      expect((call.input ?? '').split('\n').filter((line) => line.includes('python3'))).toEqual([]);
+    }
   });
 });
