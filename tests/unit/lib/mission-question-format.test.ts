@@ -7,6 +7,8 @@ import {
   emptyMissionChanges,
   effectiveAnswerType,
   mergeMissionChanges,
+  actionReviewLint,
+  ownerStepsLint,
   questionLint,
   questionOfItem,
   validateMissionQuestion,
@@ -323,5 +325,69 @@ describe('selectedOptionLabels (ADR-0037 amendment D2; review r1 finding 4)', ()
       OPTION_NOT_IN_QUESTION_LABEL, OPTION_NOT_IN_QUESTION_LABEL, OPTION_NOT_IN_QUESTION_LABEL,
     ]);
     expect(OPTION_NOT_IN_QUESTION_LABEL).toBe('an option no longer in the question');
+  });
+});
+
+// vel-MC-ACT: an owner step written inside a question closes with the question when the owner answers it, undone (a
+// recurrence the owner raised). The lint warns and names the split; it never refuses. Tuned on a fixture set (the
+// review of PR #60 named its false positives and misses) and on every served question fixture.
+describe('ownerStepsLint (vel-MC-ACT)', () => {
+  interface ICase { name: string; question: Record<string, unknown>; expect?: string[] }
+  const set = JSON.parse(fs.readFileSync(path.join(__dirname, '../../fixtures/mission-questions/owner-steps.json'), 'utf-8')) as { positive: ICase[]; negative: ICase[] };
+
+  it.each(set.positive.map((c) => [c.name, c] as const))('finds an owner step: %s', (_name, c) => {
+    const findings = ownerStepsLint(c.question);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].limit).toContain('open each owner step as its own kind=action item');
+    for (const part of c.expect ?? []) expect(findings[0].measured).toContain(part);
+  });
+
+  it.each(set.negative.map((c) => [c.name, c] as const))('an ordinary decision question is not flagged: %s', (_name, c) => {
+    expect(ownerStepsLint(c.question)).toEqual([]);
+  });
+
+  it('no served question fixture is flagged (tests/fixtures/mc-question-v2)', () => {
+    const dir = path.join(__dirname, '../../fixtures/mc-question-v2');
+    const flagged = fs.readdirSync(dir).filter((file) => file.endsWith('.json')).flatMap((file) => {
+      const item = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf-8')) as Record<string, unknown>;
+      return ownerStepsLint(item).length ? [file] : [];
+    });
+    expect(flagged).toEqual([]);
+  });
+
+  // PR #60 r6: a measurable target. One context sentence per case; misses and false hits are named in the failure.
+  const table = (set as unknown as { labelled: { positive: string[]; negative: string[] } }).labelled;
+  const hit = (sentence: string) => ownerStepsLint({ kind: 'question', context: sentence }).length > 0;
+  const missed = table.positive.filter((sentence) => !hit(sentence));
+  const falseHits = table.negative.filter(hit);
+  const recall = `${table.positive.length - missed.length}/${table.positive.length}`;
+  const clean = `${table.negative.length - falseHits.length}/${table.negative.length}`;
+  it(`labelled table: recall ${recall}, negatives clean ${clean} (target 22/24 each)`, () => {
+    expect(table.positive).toHaveLength(24);
+    expect(table.negative).toHaveLength(24);
+    expect(table.positive.length - missed.length, `missed: ${JSON.stringify(missed)}`).toBeGreaterThanOrEqual(22);
+    expect(table.negative.length - falseHits.length, `false hits: ${JSON.stringify(falseHits)}`).toBeGreaterThanOrEqual(22);
+  });
+
+  it('a kind=action is not read: it is the step', () => {
+    expect(ownerStepsLint({ kind: 'action', context: 'Click Approve. Paste the token into the secret.' })).toEqual([]);
+  });
+
+  it('names every field it found steps in, in one finding', () => {
+    const [finding] = ownerStepsLint({
+      kind: 'question', decision: 'Your steps come first', context: 'Your steps: click Save, then confirm.',
+      options: [{ id: 'a', label: 'Yes', consequence: 'Then sign in to the console.' }, { id: 'b', label: 'No' }],
+    });
+    expect(finding.field).toBe('context, decision, options[0].consequence');
+  });
+});
+
+describe('actionReviewLint (vel-MC-ACT)', () => {
+  it('warns on a kind=action with no human review, naming who makes it visible', () => {
+    const [finding] = actionReviewLint({ kind: 'action' }, undefined);
+    expect(finding.field).toBe('humanReview');
+    expect(finding.limit).toContain('configured orchestrator');
+    expect(actionReviewLint({ kind: 'action' }, { humanNeed: 'external-action' })).toEqual([]);
+    expect(actionReviewLint({ kind: 'question' }, undefined)).toEqual([]);
   });
 });

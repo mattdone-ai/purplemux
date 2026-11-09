@@ -1761,3 +1761,84 @@ describe('MissionControlStore attention class and stated default (ADR-0031)', ()
     store.close();
   });
 });
+
+// vel-MC-ACT, the owner's recurrence: an owner action the orchestrator opened without a human review was stored as a
+// candidate, so it never reached the owner's Needs you list although it was "open" work. The configured orchestrator's
+// own action is now stamped external-action and opens; anyone else's action stays a candidate for its review.
+describe('MissionControlStore: an owner action opened without a human review (vel-MC-ACT)', () => {
+  const action: IMissionQuestion = {
+    kind: 'action',
+    title: 'Rotate the deploy token',
+    context: 'The token expires on Friday; only the owner can issue a new one.',
+    storyIds: [],
+    options: [],
+    recommendation: null,
+    blockingScope: 'run',
+    canContinue: false,
+  };
+  const openAction = (eventId: string, itemId: string): TMissionProducerEvent => ({
+    ...openEvent(eventId),
+    payload: { itemId, ...action },
+  });
+
+  it('opened by the configured orchestrator: open, stamped external-action, in the owner\'s inbox and the open count', async () => {
+    const { isMissionHumanInboxItem } = await import('@/components/features/mission-control/mission-control-utils');
+    const store = new MissionControlStore(databasePath());
+    seedRun(store);
+    const opened = openAction('event-action', 'item-action');
+    store.applyEvents([opened], new Map([[opened.eventId, { ...reviewAuthority, opener: { tabId: binding.tabId, identity: 'launch' as const } }]]));
+
+    const item = store.snapshot().items.find((entry) => entry.id === 'item-action')!;
+    expect(item.state).toBe('open');
+    expect(item.candidateReason).toBeNull();
+    expect(item.humanReview).toMatchObject({
+      humanNeed: 'external-action',
+      reviewerTabId: binding.tabId,
+      humanReason: expect.stringContaining('Rotate the deploy token'),
+      eventId: 'event-action',
+    });
+    expect(isMissionHumanInboxItem(item)).toBe(true);
+    expect(store.latestOwnerItemBefore('ws-a', Date.now() + 1)).toBe('item-action');
+  });
+
+  it('opened by any other tab: still a candidate for the orchestrator to review, never stamped', () => {
+    const store = new MissionControlStore(databasePath());
+    seedRun(store);
+    const opened = openAction('event-worker-action', 'item-worker-action');
+    store.applyEvents([opened], new Map([[opened.eventId, {
+      resolvedIdentity: observedIdentity('worker'), configuredOrchestratorTabId: binding.tabId, opener: { tabId: 'tab-worker', identity: 'launch' as const },
+    }]]));
+    const item = store.snapshot().items.find((entry) => entry.id === 'item-worker-action')!;
+    expect(item.state).toBe('candidate');
+    expect(item.humanReview).toBeNull();
+  });
+
+  it('the orchestrator\'s identity without the orchestrator as opener, or the opener named with another identity: a candidate', () => {
+    const store = new MissionControlStore(databasePath());
+    seedRun(store);
+    const noOpener = openAction('event-no-opener', 'item-no-opener');
+    store.applyEvents([noOpener], new Map([[noOpener.eventId, reviewAuthority]]));
+    const spoofed = openAction('event-spoofed', 'item-spoofed');
+    store.applyEvents([spoofed], new Map([[spoofed.eventId, {
+      resolvedIdentity: observedIdentity('worker'), configuredOrchestratorTabId: binding.tabId, opener: { tabId: binding.tabId, identity: 'launch' as const },
+    }]]));
+    const states = store.snapshot().items.filter((entry) => entry.id === 'item-no-opener' || entry.id === 'item-spoofed').map((entry) => entry.state);
+    expect(states).toEqual(['candidate', 'candidate']);
+  });
+
+  it('with no configured orchestrator: a candidate, as before', () => {
+    const store = new MissionControlStore(databasePath());
+    seedRun(store);
+    const opened = openAction('event-no-orch', 'item-no-orch');
+    store.applyEvents([opened], new Map([[opened.eventId, identity]]));
+    expect(store.snapshot().items.find((entry) => entry.id === 'item-no-orch')!.state).toBe('candidate');
+  });
+
+  it('a question with no review is untouched: it stays a candidate', () => {
+    const store = new MissionControlStore(databasePath());
+    seedRun(store);
+    const opened: TMissionProducerEvent = { ...openEvent('event-q'), payload: { itemId: 'item-q', ...question } };
+    store.applyEvents([opened], new Map([[opened.eventId, reviewAuthority]]));
+    expect(store.snapshot().items.find((entry) => entry.id === 'item-q')!.state).toBe('candidate');
+  });
+});

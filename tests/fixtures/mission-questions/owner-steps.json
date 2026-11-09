@@ -1,0 +1,684 @@
+{
+  "about": "vel-MC-ACT: the owner-steps lint tuning set. Neutral synthetic questions only (the repository is public: no real Mission Control text, not even with names stripped), modelled on the shapes of real items. positive: an owner step written into a kind=question, which closes with the question when the owner answers it; each names text the finding must carry. negative: an ordinary decision or status question, including every false positive the reviews of PR #60 named. r4 (PR #60): shapes from a counts-and-shapes-only run over the real store; how the owner answers and what the agent does are not owner steps, and an option label is read for owner-addressed phrases only. r5: 'you <verb>' and 'please <verb>' that do not ask the owner to act (a past reference, a relative clause, a condition or a wait, a request for information, a decision restated as an option) are not owner steps. r6: the labelled table is the measurable target (recall and clean negatives, at least 22 of 24 each); the rule is an imperative or a clause-initial 'you <present verb>' that is not in a past, relative, conditional, information-request, answer or agent-plan sentence.",
+  "positive": [
+    {
+      "name": "paste into",
+      "question": {
+        "kind": "question",
+        "context": "Copy the new token from the sign-in page. Paste it into the repository secret named DEPLOY_TOKEN."
+      },
+      "expect": [
+        "'Copy the'",
+        "'Paste it'",
+        "in context"
+      ]
+    },
+    {
+      "name": "paste with a full stop before 'to'",
+      "question": {
+        "kind": "question",
+        "context": "Paste the value the device flow shows. It goes to the deploy secret."
+      },
+      "expect": [
+        "'Paste the'"
+      ]
+    },
+    {
+      "name": "your steps",
+      "question": {
+        "kind": "question",
+        "context": "Your steps: rotate the token and confirm here."
+      },
+      "expect": [
+        "'Your steps'"
+      ]
+    },
+    {
+      "name": "a bare Steps: heading",
+      "question": {
+        "kind": "question",
+        "context": "Steps:\n- Sign in to the console\n- Rotate the key"
+      },
+      "expect": [
+        "'Steps:'",
+        "'Sign in'",
+        "'Rotate the'"
+      ]
+    },
+    {
+      "name": "numbered owner steps",
+      "question": {
+        "kind": "question",
+        "context": "1. Open the repository settings.\n2. Go to Secrets and variables.\n3. Click New repository secret."
+      },
+      "expect": [
+        "3 owner steps",
+        "'Open the'",
+        "'Go to'",
+        "'Click New'"
+      ]
+    },
+    {
+      "name": "click a button",
+      "question": {
+        "kind": "question",
+        "context": "Click Approve on the pull request, then choose the merge time."
+      },
+      "expect": [
+        "'Click Approve'"
+      ]
+    },
+    {
+      "name": "run this",
+      "question": {
+        "kind": "question",
+        "context": "Run this once on the build host: `make bootstrap`."
+      },
+      "expect": [
+        "'Run this'"
+      ]
+    },
+    {
+      "name": "run the following",
+      "question": {
+        "kind": "question",
+        "context": "Run the following:\n```\nmake bootstrap\n```\nThen pick a merge window."
+      },
+      "expect": [
+        "'Run the'"
+      ]
+    },
+    {
+      "name": "please run",
+      "question": {
+        "kind": "question",
+        "context": "If the check fails, please run the setup script again."
+      },
+      "expect": [
+        "'please <do>'"
+      ]
+    },
+    {
+      "name": "navigate",
+      "question": {
+        "kind": "question",
+        "context": "Navigate to the billing page and pick a plan."
+      },
+      "expect": [
+        "'Navigate to'"
+      ]
+    },
+    {
+      "name": "a step in an option consequence",
+      "question": {
+        "kind": "question",
+        "context": "Pick how the key changes.",
+        "options": [
+          {
+            "id": "a",
+            "label": "Rotate now",
+            "consequence": "Then sign in to the console and approve the change."
+          },
+          {
+            "id": "b",
+            "label": "Wait"
+          }
+        ]
+      },
+      "expect": [
+        "in options[0].consequence",
+        "'sign in'"
+      ]
+    },
+    {
+      "name": "press a key",
+      "question": {
+        "kind": "question",
+        "context": "Press Enter at the prompt, and the install continues."
+      },
+      "expect": [
+        "'Press Enter'"
+      ]
+    },
+    {
+      "name": "an owner-steps phrase in the decision",
+      "question": {
+        "kind": "question",
+        "decision": "Your steps first, then pick the expiry",
+        "context": "The token expires on Friday."
+      },
+      "expect": [
+        "'Your steps'"
+      ]
+    },
+    {
+      "name": "you'll need to",
+      "question": {
+        "kind": "question",
+        "context": "You'll need to restart the service after the merge, so pick a quiet hour."
+      },
+      "expect": [
+        "'you need to <do>'"
+      ]
+    },
+    {
+      "name": "after that, paste",
+      "question": {
+        "kind": "question",
+        "context": "The page shows a code. After that, paste the code into the box."
+      },
+      "expect": [
+        "'paste the'"
+      ]
+    },
+    {
+      "name": "add a secret",
+      "question": {
+        "kind": "question",
+        "context": "Add the secret DEPLOY_TOKEN to the repository settings."
+      },
+      "expect": [
+        "'Add the'"
+      ]
+    },
+    {
+      "name": "merge, then reply",
+      "question": {
+        "kind": "question",
+        "context": "Merge the PR once CI is green. Reply with the merge time."
+      },
+      "expect": [
+        "'Merge the'"
+      ]
+    },
+    {
+      "name": "approve the pull request",
+      "question": {
+        "kind": "question",
+        "context": "Approve the pull request in the web UI before the release window."
+      },
+      "expect": [
+        "'Approve the'"
+      ]
+    },
+    {
+      "name": "shape: numbered owner steps in the context",
+      "question": {
+        "kind": "question",
+        "context": "Before the window opens:\n1. Sign in to the vendor console.\n2. Open the API keys page.\n3. Create a key named release-bot.\nThen choose the window below."
+      },
+      "expect": [
+        "3 owner steps",
+        "'Sign in'",
+        "'Open the'",
+        "'Create a'"
+      ]
+    },
+    {
+      "name": "shape: a Paste to <party> block",
+      "question": {
+        "kind": "question",
+        "context": "Paste to the partner's support desk:\n> We rotate our key on Friday at 09:00.\nThen pick whether we wait for their reply."
+      },
+      "expect": [
+        "'Paste to'"
+      ]
+    },
+    {
+      "name": "shape: a Your steps: block",
+      "question": {
+        "kind": "question",
+        "context": "Your steps:\n- approve the access request\n- confirm the new cost centre\nDecide which cost centre to use."
+      },
+      "expect": [
+        "'Your steps'"
+      ]
+    },
+    {
+      "name": "shape: a click <button> instruction",
+      "question": {
+        "kind": "question",
+        "context": "In the billing page, click Upgrade plan, then tell us which tier you chose."
+      },
+      "expect": [
+        "'click Upgrade'"
+      ]
+    },
+    {
+      "name": "shape: a run this command",
+      "question": {
+        "kind": "question",
+        "context": "Run this from your laptop: `tool login --device`. Which account should the agents use?"
+      },
+      "expect": [
+        "'Run this'"
+      ]
+    },
+    {
+      "name": "r4 miss: 'you <verb>' after a label, not at a sentence start",
+      "question": {
+        "kind": "question",
+        "context": "Two ways to load the rates. (1) The agent waits for the nightly job. (2) A one-off: you run the load script with your own sign-in. Which way?"
+      },
+      "expect": [
+        "'you <do>'"
+      ]
+    },
+    {
+      "name": "r4 miss: 'please <verb>' on a third party",
+      "question": {
+        "kind": "question",
+        "context": "The vendor holds the refund. Please ask the vendor's support desk to release it today, then choose the refund date."
+      },
+      "expect": [
+        "'please <do>'"
+      ]
+    },
+    {
+      "name": "r4 miss: a paste-to-a-party message inside a line",
+      "question": {
+        "kind": "question",
+        "context": "One outside step - paste to the partner's onboarding contact: \"We need our sandbox key reissued.\" Then pick the go-live week."
+      },
+      "expect": [
+        "'Paste to <party>:'"
+      ]
+    },
+    {
+      "name": "r4 miss: an owner step in an option label",
+      "question": {
+        "kind": "question",
+        "context": "The nightly schedule fails until the fix lands.",
+        "options": [
+          {
+            "id": "a",
+            "label": "You disable the nightly schedule until the fix lands, then re-enable"
+          },
+          {
+            "id": "b",
+            "label": "Leave it on"
+          }
+        ]
+      },
+      "expect": [
+        "'you <do>'"
+      ]
+    },
+    {
+      "name": "r4 miss: steps announced as 'steps from you'",
+      "question": {
+        "kind": "question",
+        "context": "We need two short steps from you, at two times: tonight before 22:00 and tomorrow after the deploy. Which evening suits?"
+      },
+      "expect": [
+        "'steps from you'"
+      ]
+    },
+    {
+      "name": "r6 guard: an 'I' sentence that turns to the owner",
+      "question": {
+        "kind": "question",
+        "context": "I have the signed file ready, please upload it to the shared drive before noon."
+      },
+      "expect": [
+        "'please <do>'"
+      ]
+    }
+  ],
+  "negative": [
+    {
+      "name": "click-through rate",
+      "question": {
+        "kind": "question",
+        "context": "Click-through rate fell 3% after the change. Ship the new layout or revert?"
+      }
+    },
+    {
+      "name": "one-click rollback",
+      "question": {
+        "kind": "question",
+        "context": "A one-click rollback exists for both paths."
+      }
+    },
+    {
+      "name": "double-click",
+      "question": {
+        "kind": "question",
+        "context": "Double-click handling in the old UI is gone."
+      }
+    },
+    {
+      "name": "clicks as a noun",
+      "question": {
+        "kind": "question",
+        "context": "Clicks dropped 3% this week; click rate is flat."
+      }
+    },
+    {
+      "name": "should I run this migration",
+      "question": {
+        "kind": "question",
+        "context": "Should I run this migration on prod tonight, or wait for the freeze to end?"
+      }
+    },
+    {
+      "name": "numbered options",
+      "question": {
+        "kind": "question",
+        "context": "1. Ship staged to one tenant.\n2. Ship to all tenants at once.\n3. Hold until Monday."
+      }
+    },
+    {
+      "name": "paste by someone else",
+      "question": {
+        "kind": "question",
+        "context": "The bot will paste the log into the issue for you to read."
+      }
+    },
+    {
+      "name": "open question",
+      "question": {
+        "kind": "question",
+        "context": "Open question: should the lock reuse the pre-flight gate?"
+      }
+    },
+    {
+      "name": "open items as a noun",
+      "question": {
+        "kind": "question",
+        "context": "Open items: 3. The queue is otherwise empty."
+      }
+    },
+    {
+      "name": "run time",
+      "question": {
+        "kind": "question",
+        "context": "Run time is 12 minutes on the new runner."
+      }
+    },
+    {
+      "name": "past tense",
+      "question": {
+        "kind": "question",
+        "context": "We ran this job twice and pasted the output into the ticket."
+      }
+    },
+    {
+      "name": "copy of",
+      "question": {
+        "kind": "question",
+        "context": "Copy of the report is attached as evidence."
+      }
+    },
+    {
+      "name": "type as a label",
+      "question": {
+        "kind": "question",
+        "context": "Type: decision. Scope: one story."
+      }
+    },
+    {
+      "name": "press as a noun",
+      "question": {
+        "kind": "question",
+        "context": "Press coverage is unchanged either way."
+      }
+    },
+    {
+      "name": "sign-in as a noun",
+      "question": {
+        "kind": "question",
+        "context": "Sign-in failures rose after the release. Sign in rates are flat."
+      }
+    },
+    {
+      "name": "a quoted command in a code block",
+      "question": {
+        "kind": "question",
+        "context": "The worker ran:\n```\nclick Save\nrun this\n```\nDid it pick the right target?"
+      }
+    },
+    {
+      "name": "approve is the decision itself",
+      "question": {
+        "kind": "question",
+        "context": "Approve or reject the staged rollout."
+      }
+    },
+    {
+      "name": "go-to-market",
+      "question": {
+        "kind": "question",
+        "context": "The go-to-market date moves to May."
+      }
+    },
+    {
+      "name": "go to production",
+      "question": {
+        "kind": "question",
+        "context": "Go to production tonight or hold until Monday?"
+      }
+    },
+    {
+      "name": "a sentence-initial decision verb",
+      "question": {
+        "kind": "question",
+        "context": "Run this migration tonight? Install the patch now or on Monday?"
+      }
+    },
+    {
+      "name": "an imperative decision",
+      "question": {
+        "kind": "question",
+        "decision": "Select the rollout path",
+        "context": "Staged keeps one tenant on the old build."
+      }
+    },
+    {
+      "name": "press on",
+      "question": {
+        "kind": "question",
+        "context": "Press on with the plan, or pause for the audit."
+      }
+    },
+    {
+      "name": "open to",
+      "question": {
+        "kind": "question",
+        "context": "Open to suggestions on the timing."
+      }
+    },
+    {
+      "name": "a Title Case heading",
+      "question": {
+        "kind": "question",
+        "context": "Press Coverage: unchanged either way."
+      }
+    },
+    {
+      "name": "shape: a decision with (a)/(b) options and a recommendation",
+      "question": {
+        "kind": "question",
+        "context": "The release can ship staged or all at once. (a) staged: one tenant first, two days longer (b) all tenants tonight. Recommended: (a), because the rollback is tested only on one tenant.",
+        "options": [
+          {
+            "id": "a",
+            "label": "Staged",
+            "consequence": "One tenant first; done on Thursday."
+          },
+          {
+            "id": "b",
+            "label": "All tenants",
+            "consequence": "Done tonight; no partial rollback."
+          }
+        ]
+      }
+    },
+    {
+      "name": "shape: a status question with no owner step",
+      "question": {
+        "kind": "question",
+        "context": "The nightly import finished at 04:10 with 2 rejected rows. Both rows are duplicates of rows imported yesterday. Accept the import as complete?"
+      }
+    },
+    {
+      "name": "shape: a question quoting a log line with click",
+      "question": {
+        "kind": "question",
+        "context": "The UI test log shows:\n2026-11-09T04:44:10Z ui: click Save -> 500 (timeout)\nand `click handler bound twice` on retry. Ship the fix tonight or wait for the full suite?"
+      }
+    },
+    {
+      "name": "r4 false positive: how the owner answers (reply with, type in the text box)",
+      "question": {
+        "kind": "question",
+        "context": "Three hosts can stay on the old build. Reply with the host names, one per line. Type the host names in the text box below if the list is long."
+      }
+    },
+    {
+      "name": "r4 false positive: agent steps after Fix: and Plan:, and a capability list",
+      "question": {
+        "kind": "question",
+        "context": "The nightly job fails on an empty batch. Fix: add the P3 label, add a test, open the PR.\nPlan:\n1. add the retry\n2. open the PR\nThe new role lets the agent read the secret, open a tunnel, pause and restart the worker. Grant the role now or after the review?"
+      }
+    },
+    {
+      "name": "r4 guard: 'you' as a question's subject or a condition",
+      "question": {
+        "kind": "question",
+        "context": "If you run the import twice, the second run is a no-op. Do you run it from the console or the command line?"
+      }
+    },
+    {
+      "name": "r4 guard: an imperative option label is the choice",
+      "question": {
+        "kind": "question",
+        "context": "CI is green on the release branch.",
+        "options": [
+          {
+            "id": "a",
+            "label": "Merge the PR now"
+          },
+          {
+            "id": "b",
+            "label": "Wait for the freeze"
+          }
+        ]
+      }
+    },
+    {
+      "name": "r5 false positive: 'you <verb>' as a past reference",
+      "question": {
+        "kind": "question",
+        "context": "On 21 Oct, you set the push window to 09:00. The push you set on 26 Oct also ran at 09:00. Keep that window for the next release or move it?"
+      }
+    },
+    {
+      "name": "r5 false positive: 'you <verb>' in a relative clause after a noun",
+      "question": {
+        "kind": "question",
+        "context": "A ceiling you set limits each batch to 500 rows. The list you accept today becomes the allow-list. Raise the ceiling or keep it?"
+      }
+    },
+    {
+      "name": "r5 false positive: 'you <verb>' in a condition or a wait",
+      "question": {
+        "kind": "question",
+        "context": "The import stays paused until you accept the empty state. Before you answer, note that the old file stays on disk. Resume now or wait for the vendor?"
+      }
+    },
+    {
+      "name": "r5 false positive: a request for information, not an action",
+      "question": {
+        "kind": "question",
+        "context": "Please tell us whether the vendor has the new key. Please check whether the cut-over is still on Friday. Go ahead on Friday or move it?"
+      }
+    },
+    {
+      "name": "r5 false positive: a decision restated as an option",
+      "question": {
+        "kind": "question",
+        "context": "The feed sends no rows on public holidays.\n(a) add a holiday calendar to the check\n(b) record that you accept the empty state and close the item",
+        "options": [
+          {
+            "id": "a",
+            "label": "Add the calendar"
+          },
+          {
+            "id": "b",
+            "label": "Record that you accept the empty state"
+          }
+        ]
+      }
+    },
+    {
+      "name": "r6 guard: a past-verb sentence with a 'you <verb>' clause",
+      "question": {
+        "kind": "question",
+        "context": "You asked whether the cap applies, and you set it to 2,000 then. Keep the cap for the next quarter?"
+      }
+    },
+    {
+      "name": "r6 guard: an agent plan led by 'I'",
+      "question": {
+        "kind": "question",
+        "context": "I open the PR, then merge the branch after CI is green. Ship it today or on Monday?"
+      }
+    }
+  ],
+  "labelled": {
+    "about": "PR #60 r6: a labelled table of single context sentences, paraphrased from shapes measured in a real Mission Control store (no item text, names, hosts or accounts). positive: an owner step outside the answer; negative: a decision, a past reference, an agent step or an answer instruction. The test reports recall and the clean share of negatives; the target is at least 22 of 24 on each side.",
+    "positive": [
+      "Your one click: open the deployment run page and press Review deployments, then Approve.",
+      "One grant line is needed in your network policy file, and only you edit that file.",
+      "Or you sign in with a role that already has the permission and run the step yourself.",
+      "Step 1, now, before you answer: in the repository settings, open Environments and add yourself as the reviewer.",
+      "(a) Yes: I merge the pull request / you merge it.",
+      "(a) Add your developer sign-in role as an operator of the cluster.",
+      "A one-off: you run the fetch script with your own sign-in profile, then sign out.",
+      "If you choose (b), you put the key into the secret store yourself after you sign in.",
+      "Please ask the payments team to check the bank statements for both days and to record the duplicate.",
+      "Please delete the old block from the shared config file, or tell us it moved elsewhere.",
+      "Paste to the partner contact: Hi, could you please re-send the settlement callbacks for the two batches?",
+      "Copy the new token into the vault entry, then approve it as the organisation owner.",
+      "Run the two disk-usage lines and reply with their output.",
+      "If the provider asks for test credit, add it in their portal.",
+      "Copy the state file you hold to the shared path on the control host.",
+      "Open your sign-in window at about 22:30 tonight so the job can start.",
+      "Your steps: 1. Open the run. 2. Review the plan. 3. Approve the apply.",
+      "Tap Done, with the outputs in the text box, after step 1.",
+      "Set can_admins_bypass to false on each gated environment.",
+      "The change needs one line in the access policy, which only you can edit; I send you the exact line.",
+      "Before the reload, you rotate the database password in the console.",
+      "Press Squash and merge on the pull request and keep the title.",
+      "Upload the signed file to the shared drive so the reconciliation can read it.",
+      "Grant the reader role to the service account in the identity console."
+    ],
+    "negative": [
+      "On 21 Oct you set the per-transfer cap to 2,000.",
+      "On 23 Oct you wrote: \"Ideally we use workflows with federated identity\".",
+      "You ruled that a paid payout whose matched cash differs is held.",
+      "You asked whether a second server would bring things on quicker.",
+      "As you answered, the limit is 100 per business day.",
+      "It is not part of the push you set on 26 Oct.",
+      "Only records on the list you accept count as done.",
+      "A ceiling you set limits it; type another figure if you want.",
+      "Under your rule they count as not done until you accept the empty state.",
+      "These older limits still stand until you say otherwise.",
+      "Please tell us whether the bank books its fee as a separate line.",
+      "Please confirm whether the batch total cap applies in production.",
+      "(b) Record that you accept the header-asserted identity while the guard is in shadow.",
+      "Reply with the start and end time in the free-text box.",
+      "Reply with a target date, or 'not yet'.",
+      "Type the names for Q2 and Q3 in the text box.",
+      "Fix: split the suspense reason, add the new label, and add a counter for it.",
+      "We recommend No: keep the old cut, and add a test that proves it stays harmless.",
+      "I re-point the migration to the chain head and open the PR.",
+      "The role may read the app password, open a tunnel to the database, and restart the worker.",
+      "Every deploy then ends with a pass or fail you can read in the workflow page.",
+      "Should I run this migration now?",
+      "Raising a lane's budget needs your click.",
+      "The click-through rate on the page fell by 4 %."
+    ]
+  }
+}

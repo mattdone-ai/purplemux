@@ -4,7 +4,7 @@ import { isOwnWorkspace } from '@/lib/cli-utils';
 import { MissionControlError } from '@/lib/mission-control-errors';
 import { sendMissionError, setMissionHeaders } from '@/lib/mission-control-http';
 import { readQuestionMinVersion } from '@/lib/mission-question-config';
-import { reviewLint, validateMissionQuestion } from '@/lib/mission-question-format';
+import { actionReviewLint, ownerStepsLint, reviewLint, validateMissionQuestion } from '@/lib/mission-question-format';
 import { getMissionControlStore } from '@/lib/mission-control-store';
 import type { TCliScope } from '@/lib/workspace-token';
 import type { IMissionFollowUpRefusal, IMissionQuestionDefect } from '@/types/mission-control';
@@ -89,7 +89,12 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     const followUp = checkFollowUp(body, workspaceId, caller.scope);
     if (verdict.ok && !followUp) {
       return res.status(200).json({ ok: true, formatVersion: verdict.formatVersion, minVersion, defects: [],
-        lint: [...verdict.lint, ...reviewLint(verdict.question, body.humanReview)], question: verdict.question, reshape });
+        lint: [
+          ...verdict.lint,
+          ...reviewLint(verdict.question, body.humanReview),
+          ...ownerStepsLint(verdict.question as unknown as Record<string, unknown>),
+          ...actionReviewLint(verdict.question, body.humanReview),
+        ], question: verdict.question, reshape });
     }
     const defects = [...(verdict.ok ? [] : verdict.defects), ...(followUp ? [followUp] : [])];
     // A refused follow-up alone keeps the checked question: only the link is wrong.

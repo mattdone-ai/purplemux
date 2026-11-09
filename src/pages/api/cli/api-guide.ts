@@ -1966,7 +1966,15 @@ POST /api/cli/mission-control/events?workspaceId=WS
   sets the class: the server never guesses one, and an item without a class reads "class": null
   (shown as Unclassified). An item with a human review (humanNeed not "none") and no class is
   accepted with the lint finding "class: absent" in the events route's 200 body and on mc ask's
-  stderr; it is never refused. The snapshot item carries "class" and "defaultOptionId" (null when
+  stderr; it is never refused. A kind=question that holds owner steps (an owner verb starting a
+  sentence or list item, such as "Click Approve", "Paste it into", "Go to", "Run this", or "Your
+  steps") in its context, decision, whyNow or option text gets the lint finding "owner steps in a
+  question: ..." the same way (vel-MC-ACT): answering a question closes it, and a step written
+  inside it closes with it, undone, so open each owner step as its own kind=action item
+  (answerType action-done, humanNeed external-action). A kind=action opened with no humanReview
+  by the configured orchestrator is stamped humanNeed external-action and opens in the owner's
+  list; from any other tab it stays a candidate, with the lint finding "humanReview: absent on a
+  kind=action". The snapshot item carries "class" and "defaultOptionId" (null when
   absent); attention.updated replaces both under the item revision rule, and a change of either
   on an open item needs renewed review like any other question change. The snapshot also carries
   "answersByClass": [{ "day": "YYYY-MM-DD", "class": "money"|...|"unclassified",

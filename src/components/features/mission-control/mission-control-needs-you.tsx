@@ -7,7 +7,7 @@ import MissionControlAnswerCard, { FollowedByNote, MissionControlAutoAnswerCard 
 import { AnswersByClassStrip } from '@/components/features/mission-control/attention-class-view';
 import { ATTENTION_CLASS_KEYS, ATTENTION_CLASS_LABELS, attentionClassKey } from '@/lib/attention-class';
 import type { TAttentionClassKey } from '@/lib/attention-class';
-import { isMissionHumanInboxItem } from '@/components/features/mission-control/mission-control-utils';
+import { createMissionDraft, isMissionHumanInboxItem } from '@/components/features/mission-control/mission-control-utils';
 import type { IMissionDraft, IMissionDraftPatch } from '@/components/features/mission-control/mission-control-utils';
 import type {
   IMissionAttentionItem,
@@ -188,8 +188,10 @@ const NeedsYouList = ({
               <p className="break-words text-xs font-medium text-muted-foreground">{workspace?.name ?? workspaceId}</p>
               <div className="grid min-w-0 gap-3 xl:grid-cols-2">
                 {groupItems.map((item) => {
-                  const draft = drafts[item.id];
-                  if (!draft) return null;
+                  // Every open owner item shows, whatever its kind (vel-MC-ACT): one the page holds no draft for yet
+                  // (the first render of a new snapshot, or a draft the page dropped) renders from a fresh one,
+                  // never as a count with no card.
+                  const draft = drafts[item.id] ?? createMissionDraft(item);
                   return (
                     <div key={item.id} id={missionItemAnchor(item.id)} data-mission-item={item.id}
                       className={item.id === focusItemId ? 'min-w-0 scroll-mt-4 rounded-lg ring-2 ring-ui-blue/60' : 'min-w-0'}>

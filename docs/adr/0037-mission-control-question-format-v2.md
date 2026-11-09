@@ -228,3 +228,58 @@ exit 7), so this amendment adds no new code.
 **What proves it wrong.** In the 14 days after the deploy, more than 1 follow-up in 10 gets an owner answer that
 restates the earlier answer, or agents still open an unlinked item for an answered question more than twice a week.
 Then measure why the asker does not use the link. Do that before you add mechanism.
+
+## Amendment (2026-11-09, story vel-MC-ACT: owner steps and actions in the owner's list)
+
+A recurrence the owner raised. Two things went missing from Mission Control:
+
+1. An owner action written inside a question item closed, undone, when he answered the question.
+2. An open kind=action item did not show in his list, though it was listed as open work.
+
+**Case 2's cause.** An attention.opened with no `humanReview` is stored as a **candidate** (`candidateReason: workspace-issue`), whatever its kind. A candidate is the orchestrator's to review and never reaches the owner's Needs you list. That was measured before: an item needs a human review to show. An owner action opened without a review was therefore invisible to the owner until an attention.updated added one.
+
+- **Fix: the server stamps the orchestrator's own owner action.**
+  - **Production path:** `mission events` and the events route go through `applyMissionEventBatch`. For an attention.opened kind=action with no `humanReview`, the batch reads two things:
+    - the opener's live identity: the opener is the server-resolved caller tab, never a payload claim (ADR-0023);
+    - the workspace's configured orchestrator.
+  - **When it stamps:** only when the opener IS the configured orchestrator, and its live identity matches the run's binding. These are the checks an explicit review passes. The store then stamps `humanNeed: external-action`:
+    - `humanReason` is "An action only the owner can take: <decision or title>." plus its whyNow;
+    - `handling` says the server stamped it;
+    - `reviewerTabId` is the orchestrator.
+    The item opens in the owner's list.
+  - **Pinned end to end:** through `applyMissionEventBatch` and the real store, with no injected authority.
+- **Anyone else's action is still a candidate.** That covers:
+  - a kind=action opened by any other tab;
+  - one opened by a server or admin producer with no opener;
+  - one opened by the orchestrator tab whose live session no longer matches the binding;
+  - any action when no orchestrator is configured.
+  Each stays a candidate for the orchestrator's review, as before. Both the events route and `mc ask` (the check route) warn the opener: `humanReview: absent on a kind=action`, naming who makes it visible.
+- **After the stamp:** the item is open like any reviewed item. An attention.updated that changes its text needs a `humanReview` again (renewed review, as for every open item).
+- **The view.** The Needs you list also renders an open owner item the page holds no draft for yet, from a fresh draft. That closes a one-render gap only; it was not case 2's cause.
+
+**Owner steps are lint, not a refusal.**
+- **What is read:** every attention.opened and attention.updated of a kind=question, in its `context`, `decision`, `whyNow` and the options' `label`, `consequence` and `description`. Code blocks are dropped, since they hold quoted text.
+- **What counts as a step (round 6):** a clause that asks the owner to act outside his answer.
+  - **An imperative** at the start of a sentence, a line, a numbered item, a comma or slash clause, or after a short label ("Your one click: open the run page"), followed by what makes it a command: "Click Approve", "Paste it into", "Open the", "open Environments", "Go to Settings", "Sign in to", "Run the", "Press Squash and merge", "Add the", "Set can_admins_bypass to false".
+  - **"you <present verb>" at the start of a clause** ("A one-off: you run the script", "Or you sign in with a role", "If you choose (b), you put the key in"), and **"only you <verb>"** ("which only you can edit").
+  - **A phrase that addresses the owner's steps:** "Your steps", "Steps:", "please <do>" (a third party too: "Please ask the vendor to ..."), "you'll need to <do>", "you must <do>", "need you to <do>", "steps from you", and a message for an outside party ("Paste this to the vendor's desk:").
+- **What does not count:**
+  - A question: a sentence that ends with "?".
+  - An imperative in `decision` or in an option `label`: both name the choice ("Select the rollout path", "Merge the PR now"), so there only the phrases count.
+  - A lettered item ("(b) add a calendar"): an option of the decision. An imperative there is a step only on the owner's own object ("(a) Add your role as an operator").
+  - A past reference: a date or a past marker ("On 21 Oct, you set ..."), or "you" with a past verb ("you wrote", "you ruled", "you asked").
+  - "you" that is not at a clause start: a relative clause ("the list you accept"), a condition or a wait ("until you accept", "before you answer"), "that you ..." ("record that you accept").
+  - A request for information: "Please tell us whether ...", "please check whether ...".
+  - An answer instruction: "Reply with ...", "Type the names in the text box", "Tick ...", "Pick an option".
+  - An agent plan: a sentence after "Fix:", "Plan:" or "Recommended:", the items under a "Fix:" or "Plan:" heading line, a sentence led by "I <verb>" that does not turn to the owner, "we <step>" or "we recommend", a role with a step verb ("The role may read the password, open a tunnel"), and a "lets the agent ..." capability list.
+  - A verb that is also a noun without its command form: "Run time", "Open question", "Copy of", "Press coverage", "Press on", "Open to", "Go to production", "Sign-in rates", a capitalised heading such as "Press Coverage:".
+- **The finding** names the steps, the fields they were found in, and the split. Each owner step becomes its own kind=action item (answerType `action-done`, humanNeed `external-action`), and the question keeps to the decision.
+- **The fixture set:** the patterns are tuned on `tests/fixtures/mission-questions/owner-steps.json`.
+  - Its positives are the owner-step forms.
+  - Its negatives include every false positive the reviews named.
+  - Round 4 (PR #60) added one case per shape from a run over the real store (1332 items, 37 hits, about 21 true): the two false-positive shapes above and five miss shapes ("you <do>" mid-sentence, "please <do>" on a third party, a paste-to-a-party message inside a line, a step in an option label, "steps from you"). Round 5 added one negative case per remaining false-positive shape: "you <verb>" or "please <verb>" that is not an instruction (precision was about 66 % at round 4, 94 hits).
+  - Round 5 added one negative per "you <verb>" shape that is not an instruction. It was worse on the real store (63 hits, precision about 57 %, and real steps dropped): tuned on descriptions, measured on items the tuner cannot see.
+  - Round 6 adds a measurable target: a `labelled` table of 24 owner-step and 24 non-step context sentences, paraphrased from real shapes. The test reports recall and the clean share of negatives; the target is at least 22 of 24 on each side, and every other case still passes. If round 6 does not beat round 4 on the real store, the lint goes back to round 4's rules.
+  - Every case is neutral synthetic text modelled on the shapes of real items. The repository is public, so no real Mission Control text goes in, not even with names stripped. The lint is measured over the real items on the control host, outside the repository; only the counts and the shapes it got wrong come back as new synthetic cases.
+  - No served question fixture (`mc-question-v2`) is flagged.
+- **A heuristic, so it never refuses.** A pattern cannot tell every step from a description of one, and a refused question would hide the decision too. A kind=action item is not read: it is the step.

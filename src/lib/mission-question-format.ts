@@ -182,6 +182,235 @@ export const questionLint = (question: TMissionStoredQuestion): IMissionQuestion
   return findings;
 };
 
+/*
+ * Owner steps (vel-MC-ACT; PR #60 r6). An owner step is a clause that asks the owner to act outside his answer:
+ *   - an imperative ("Copy the token into the vault", "Press Squash and merge", "Set can_admins_bypass to false"), or
+ *   - "you <present verb>" at the start of a clause ("A one-off: you run the script", "Or you sign in with a role",
+ *     "If you choose (b), you put the key in"), or "only you <verb>" ("only you edit that file"), or
+ *   - a phrase that addresses the owner's steps ("Your steps", "please ask the vendor to ...", "steps from you").
+ * It is NOT, by the sentence it sits in:
+ *   - a past reference: a date ("On 21 Oct, you set ...") or "you" with a past verb ("you wrote", "you ruled");
+ *   - a relative clause or a condition: "you" not at a clause start ("the list you accept", "until you accept");
+ *   - a request for information ("please tell us whether ...", "please confirm which ...");
+ *   - an answer instruction ("Reply with ...", "Type the names in the text box", "Tick the ones that apply");
+ *   - an agent plan: after "Fix:", "Plan:", "We recommend", "Recommended:", a sentence led by "I <verb>", "we <step>"
+ *     or a role ("The role may read the password, open a tunnel"), or a "lets the agent ..." capability list;
+ *   - a question ("Run this migration tonight, or wait?").
+ * A lettered item ("(a) Add your role", "(b) add a calendar") is an option of the decision: an imperative there is a
+ * step only when its object is the owner's own ("your", "yourself").
+ * Tuned on tests/fixtures/mission-questions/owner-steps.json, whose `labelled` table is the measurable target.
+ */
+const STEP_VERBS = 'click|tap|press|paste|copy|run|open|go|navigate|sign|log|enter|type|select|upload|download|install|rotate|add|set|update|create|merge|restart|reset|grant|send|connect|plug|unplug|approve|visit|put';
+/** What the owner does to a third party or an item ("Please ask the vendor to ...", "please cancel it"). */
+const PARTY_VERBS = 'ask|tell|email|message|contact|call|forward|share|cancel|disable|enable|re-enable|delete|remove|pay|book|schedule';
+const YOU_VERBS = `${STEP_VERBS}|${PARTY_VERBS}|check|edit|change|accept`;
+/** Not a request for information: "tell us", "let me know", "<verb> whether|which|..." (the owner answers it). */
+const INFO_REQUEST = String.raw`(?!(?:tell|let)\s+(?:us|me)\b)(?!\w+(?:\s+(?:us|me|it|this|that))?\s+(?:whether|if|which|what|when|where|how|who|why)\b)`;
+
+/** "you <do>" at a clause start: after a numbered marker, a short label, or a connective. */
+const YOU_STEP = new RegExp(String.raw`^(?:\(?\d{1,2}\)\s+)?(?:[^:,]{1,40}:\s+)?(?:(?:then|and|so|now|next|first|instead|also)\s+)?you\s+(?:then\s+|can\s+|must\s+)?${INFO_REQUEST}(?:${YOU_VERBS})\b(?!-)`, 'i');
+/** "only you <do>": the owner is the only one who can act ("which only you can edit"). */
+const ONLY_YOU = new RegExp(String.raw`\bonly\s+you\s+(?:can\s+|could\s+)?(?:${YOU_VERBS})\b(?!-)`, 'i');
+/** A sentence about the past: a date, a past marker, or "you" with a past verb. */
+const PAST_MARKER = /\b(?:on\s+\d{1,2}\s+[A-Z][a-z]{2,8}|on\s+[A-Z][a-z]{2,8}\s+\d{1,2}|on\s+\d{4}-\d{2}-\d{2}|yesterday|earlier|last\s+(?:week|night|time|month)|ago|previously)\b/i;
+const PAST_YOU = /\byou\s+(?:wrote|said|ruled|asked|chose|answered|approved|decided|agreed|picked|named|gave|replied|noted|told|ran|sent|merged|opened|added|granted|rotated|signed)\b/i;
+
+interface IStepPhrase { pattern: RegExp; name: string; inQuestion: boolean; perClause?: boolean; owner?: boolean }
+/**
+ * Phrases read per sentence. `inQuestion: false` skips a sentence that asks; `perClause` tests each clause from its
+ * start; `owner` marks a "you" phrase, which a past sentence never carries.
+ */
+const OWNER_STEP_PHRASES: readonly IStepPhrase[] = [
+  { pattern: /\b(?:your|owner|manual)\s+steps?\b/i, name: "'Your steps'", inQuestion: true },
+  { pattern: /\bsteps\s+for\s+you\b/i, name: "'steps for you'", inQuestion: true },
+  { pattern: /^\s*steps\s*:/i, name: "'Steps:'", inQuestion: true },
+  { pattern: new RegExp(`\\bplease\\s+${INFO_REQUEST}(?:${STEP_VERBS}|${PARTY_VERBS})\\b`, 'i'), name: "'please <do>'", inQuestion: true },
+  { pattern: new RegExp(`\\byou(?:'ll|\\s+will)?\\s+(?:need|have)\\s+to\\s+(?:${STEP_VERBS})\\b`, 'i'), name: "'you need to <do>'", inQuestion: true },
+  { pattern: new RegExp(`\\byou\\s+must\\s+(?:${STEP_VERBS})\\b`, 'i'), name: "'you must <do>'", inQuestion: true },
+  { pattern: /\b(?:steps?|actions?)\s+from\s+you\b/i, name: "'steps from you'", inQuestion: true },
+  { pattern: new RegExp(`\\bneed\\s+you\\s+to\\s+${INFO_REQUEST}(?:${YOU_VERBS})\\b`, 'i'), name: "'need you to <do>'", inQuestion: true },
+  { pattern: YOU_STEP, name: "'you <do>'", inQuestion: false, perClause: true, owner: true },
+  { pattern: ONLY_YOU, name: "'only you <do>'", inQuestion: false, owner: true },
+  // A message for an outside party: "Paste this to the vendor's desk:", "Send to the bank contact:".
+  { pattern: /\b(?:paste|send|forward|post)\s+(?:this\s+|the\s+(?:following|text\s+below)\s+)?to\s+[^.:?\n]{1,60}:/i, name: "'Paste to <party>:'", inQuestion: true },
+];
+
+/**
+ * An imperative verb at the start of a clause, followed by what makes it a command, since most of these verbs are also
+ * nouns or a question's own words ("Press coverage", "Run time", "Open question", "Copy of", "Type:", "Click rate",
+ * "Go to production", "Press on", "Open to").
+ */
+const OBJECT = String.raw`(?:(?:the|your|yourself|it|this|that|these|a|an)\b|https?:|` + '`' + String.raw`|"|[A-Za-z][\w-]*_[\w.-]*)`;
+const IMPERATIVE_VERBS = 'paste|copy|enter|type|select|upload|download|install|rotate|visit|add|set|update|create|merge|restart|reset|grant|send|connect|unplug|approve|run';
+const OWNER_STEP_IMPERATIVES: readonly RegExp[] = [
+  new RegExp(String.raw`^(?:${IMPERATIVE_VERBS})\s+${OBJECT}`, 'i'),
+  new RegExp(String.raw`^(?:click|tap)\s+(?:on\s+)?${OBJECT}`, 'i'),
+  new RegExp(String.raw`^(?:plug\s+in|paste\s+(?:to|into))\b`, 'i'),
+  // A UI label after click, tap, press or open ("Click Approve", "Press Enter", "open Environments"); not a
+  // capitalised heading ("Press Coverage:").
+  /^(?:[Cc]lick|[Tt]ap|[Pp]ress|[Oo]pen)\s+(?![\w-]+\s*:)[A-Z]/,
+  /^(?:[Gg]o|[Nn]avigate)\s+to\s+(?:the\b|your\b|https?:|`|[A-Z])/,
+  new RegExp(String.raw`^(?:sign|log)\s+in\s+(?:to|with|as|again|using)\b`, 'i'),
+  new RegExp(String.raw`^open\s+(?:(?:the|your|a|an)\b|https?:|` + '`' + String.raw`)(?!\s*(?:questions?|items?|issues?|risks?)\b)`, 'i'),
+];
+/** In a lettered option, an imperative is a step only on the owner's own object, or a UI label. */
+const OPTION_STEP_IMPERATIVES: readonly RegExp[] = [
+  new RegExp(String.raw`^(?:${IMPERATIVE_VERBS}|open)\s+(?:your|yourself)\b`, 'i'),
+  /^(?:[Cc]lick|[Tt]ap|[Pp]ress)\s+(?![\w-]+\s*:)[A-Z]/,
+];
+const LEADING_CONNECTIVE = /^(?:then|and|or|now|next|first|finally|after\s+that|once\s+(?:that\s+is\s+|it\s+is\s+)?done)[,\s]+/i;
+/** A short label before the step: "Your one click: open the run page", "A one-off: run the script". */
+const LEADING_LABEL = /^[^:,"`]{1,30}:\s+/;
+
+/**
+ * How the owner answers is not a step: the answer IS that action. "Tap Done" is not here: the labelled table reads
+ * "Tap Done, with the outputs in the text box, after step 1" as an owner step (r4's rule for it never matched "Tap").
+ */
+const ANSWER_CHANNEL: readonly RegExp[] = [
+  /^(?:please\s+)?reply\b/i,
+  /\b(?:type|enter|write|list|put|paste)\b[^.?!]*\b(?:in|into)\s+(?:the\s+)?(?:text|free-text|free\s+text|answer|reply)\s+(?:box|field)\b/i,
+  /^(?:please\s+)?tick\b/i,
+  /^(?:please\s+)?(?:pick|choose|select)\s+(?:an?\s+|one\s+)?(?:option|answer)\b/i,
+];
+
+/** An agent plan, not an owner step. */
+const AGENT_LABEL = /^(?:fix|plan|recommended|recommendation|next\s+steps?\s+for\s+(?:me|us|the\s+agents?)|agent\s+steps|what\s+(?:i|we)\s+(?:will\s+)?do)\s*:/i;
+const MODAL = String.raw`(?:'ll|\s+will|\s+would|\s+can|\s+could|\s+may|\s+must|\s+then|\s+also|\s+first)?`;
+const AGENT_SUBJECT: readonly RegExp[] = [
+  // "I re-point the migration and open the PR"; not a sentence that turns to the owner ("I have the file, please upload it").
+  /^i\s+(?![^.;]*\b(?:please|you|your)\b)[a-z'][\w'-]*/i,
+  new RegExp(String.raw`^we${MODAL}\s+(?:${STEP_VERBS}|${PARTY_VERBS}|read|write|recommend|propose|suggest|plan|keep|fix)\b`, 'i'),
+  new RegExp(String.raw`^(?:the\s+(?:agents?|orchestrator|worker|bot|role|grant|token|policy|service\s+account)|agents?|it)${MODAL}\s+` +
+    String.raw`(?:${STEP_VERBS}|${PARTY_VERBS}|read|write|lets|allows|enables)\b`, 'i'),
+];
+const CAPABILITY = /\b(?:lets|allows|permits|enables)\s+(?:the\s+)?(?:agents?|orchestrator|worker|bot|role|us|me|it)\b/i;
+const isAgentSentence = (sentence: string): boolean => {
+  const text = sentence.replace(LEADING_CONNECTIVE, '');
+  return AGENT_LABEL.test(text) || AGENT_SUBJECT.some((p) => p.test(text)) || CAPABILITY.test(sentence);
+};
+
+/** The owner step a clause starts with, by its first words; null when it is not one. */
+const ownerStepOf = (clause: string, option: boolean): string | null => {
+  const plain = clause.replace(LEADING_CONNECTIVE, '');
+  const patterns = option ? OPTION_STEP_IMPERATIVES : OWNER_STEP_IMPERATIVES;
+  // The clause itself ("Run this from your laptop: ..."), else what follows a short label ("Your one click: open ...").
+  const text = [plain, plain.replace(LEADING_LABEL, '').replace(LEADING_CONNECTIVE, '')]
+    .find((candidate) => patterns.some((pattern) => pattern.test(candidate)));
+  if (text === undefined) return null;
+  return text.split(/\s+/).slice(0, 2).join(' ').replace(/[`:"',.]+$/, '');
+};
+const LIST_MARKER = /^\s*(?:[-*•]|\d{1,2}[.):]|\(\d{1,2}\)|step\s+\d{1,2}[.):]?)\s+/i;
+const OPTION_MARKER = /^\s*\(?[a-h]\)\s+/i;
+const BLANK = /^\s*$/;
+
+interface IStepSentence { sentence: string; asks: boolean; option: boolean; past: boolean }
+/**
+ * The sentences that can hold an owner step, each without its list or option marker. A "Fix:" or "Plan:" heading on
+ * its own line opens an agent block: its list items are agent steps, until a blank line, a line that is not a list
+ * item, or an owner-steps heading. An answer-channel sentence and an agent sentence are dropped.
+ */
+const stepSentences = (text: string): IStepSentence[] => {
+  const out: IStepSentence[] = [];
+  let agentBlock = false;
+  for (const line of text.split('\n')) {
+    const isItem = LIST_MARKER.test(line);
+    const option = !isItem && OPTION_MARKER.test(line);
+    const body = line.replace(LIST_MARKER, '').replace(OPTION_MARKER, '').trim();
+    if (agentBlock && (BLANK.test(line) || !isItem || /^(?:your|owner|manual)\s+steps?\b|^steps\s*:/i.test(body))) agentBlock = false;
+    if (agentBlock) continue;
+    if (AGENT_LABEL.test(body) && body.replace(AGENT_LABEL, '').trim() === '') {
+      agentBlock = true;
+      continue;
+    }
+    body.split(/(?<=[.!?;])\s+/).forEach((raw, index) => {
+      const sentence = raw.trim();
+      if (!sentence || ANSWER_CHANNEL.some((p) => p.test(sentence.replace(LEADING_CONNECTIVE, ''))) || isAgentSentence(sentence)) return;
+      out.push({ sentence, asks: sentence.endsWith('?'), option: option && index === 0, past: PAST_MARKER.test(sentence) || PAST_YOU.test(sentence) });
+    });
+  }
+  return out;
+};
+
+/** Each sentence's clauses: split at a comma or a slash ("In the billing page, click Upgrade", "I merge it / you merge it"). */
+const clausesOf = (sentence: string): string[] => sentence.split(/,\s+|\s+\/\s+/).map((part) => part.trim()).filter(Boolean);
+
+/** The question's own words: never `title` (v1 title IS the decision), code blocks dropped (quoted text, not a step). */
+const ownerStepTexts = (question: Record<string, unknown>): Array<[string, string]> => {
+  const texts: Array<[string, string]> = [];
+  const add = (field: string, value: unknown) => {
+    if (typeof value === 'string' && value.trim()) texts.push([field, value.replace(/```[\s\S]*?```/g, ' ')]);
+  };
+  add('context', question.context);
+  add('decision', question.decision);
+  add('whyNow', question.whyNow);
+  if (Array.isArray(question.options)) {
+    question.options.forEach((option: unknown, index: number) => {
+      if (option && typeof option === 'object') {
+        const o = option as Record<string, unknown>;
+        add(`options[${index}].label`, o.label);
+        add(`options[${index}].consequence`, o.consequence);
+        add(`options[${index}].description`, o.description);
+      }
+    });
+  }
+  return texts;
+};
+
+/** Fields that name a choice: an imperative there is the choice ("Select the rollout path", "Merge now"), not a step. */
+const PHRASES_ONLY = /^(?:decision|options\[\d+\]\.label)$/;
+
+/**
+ * Owner steps inside a question (vel-MC-ACT, a recurrence the owner raised): an action the owner must take, written into
+ * a question, closes with the question when he answers it, undone. A warning, never a refusal: it names what it found,
+ * where, and the split, one kind=action item per step. A kind=action item is not read: it is the step.
+ *
+ * A heuristic, tuned on a fixture set (tests/fixtures/mission-questions/owner-steps.json and the served question
+ * fixtures) and, by counts and shapes only, on the real store (PR #60 r4): an imperative owner verb starting a
+ * sentence, line or list item, or a phrase that addresses the owner's steps. A plain decision ("Should I run this
+ * migration?", "1. Ship staged", "click-through rate"), how the owner answers ("Reply with ..."), and what the agent
+ * does ("Fix: add a test", "the role lets the agent open a tunnel") are not steps.
+ */
+export const ownerStepsLint = (question: Record<string, unknown>): IMissionQuestionDefect[] => {
+  if (question.kind !== 'question') return [];
+  const found: string[] = [];
+  const fields: string[] = [];
+  for (const [field, text] of ownerStepTexts(question)) {
+    const sentences = stepSentences(text);
+    const phrases = OWNER_STEP_PHRASES
+      .filter(({ pattern, inQuestion, perClause, owner }) => sentences.some(({ sentence, asks, past }) => (inQuestion || !asks)
+        && !(owner && past)
+        && (perClause
+          ? clausesOf(sentence).some((clause) => pattern.test(clause.replace(LEADING_CONNECTIVE, '')))
+          : pattern.test(sentence))))
+      .map(({ name }) => name);
+    const steps = PHRASES_ONLY.test(field) ? [] : sentences
+      .filter(({ asks }) => !asks)
+      .flatMap(({ sentence, option }) => clausesOf(sentence).map((clause) => ownerStepOf(clause, option)))
+      .filter((step): step is string => step !== null);
+    if (!phrases.length && !steps.length) continue;
+    fields.push(field);
+    found.push(...phrases.filter((name) => !found.includes(name)));
+    if (steps.length) {
+      const named = [...new Set(steps.map((step) => `'${step}'`))];
+      found.push(`${steps.length} owner step${steps.length === 1 ? '' : 's'} (${named.join(', ')}) in ${field}`);
+    }
+  }
+  if (!found.length) return [];
+  return [defect(fields.join(', '), `owner steps in a question: ${found.join('; ')}`,
+    'split them: open each owner step as its own kind=action item (answerType action-done, humanNeed external-action) and keep this question to the decision; answering a question closes it, and a step written inside it closes with it, undone')];
+};
+
+/**
+ * A kind=action opened with no human review (vel-MC-ACT): from the configured orchestrator the server stamps
+ * external-action and it reaches the owner; from any other tab it is a candidate the owner does not see until the
+ * orchestrator reviews it. A warning, never a refusal.
+ */
+export const actionReviewLint = (question: { kind?: unknown }, humanReview: unknown): IMissionQuestionDefect[] =>
+  question.kind === 'action' && (humanReview === undefined || humanReview === null)
+    ? [defect('humanReview', 'absent on a kind=action',
+      'the owner sees an action only with a review: opened by the configured orchestrator, the server stamps external-action; from any other tab it stays a candidate until the orchestrator sends attention.updated with humanReview external-action')]
+    : [];
+
 /**
  * A human-reviewed item with no class sorts as Unclassified on the owner's board (ADR-0031): a warning, never a refusal,
  * since a producer that cannot name the class omits it (story 36, D6). A `none` review is never owner-visible.

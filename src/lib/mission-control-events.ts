@@ -31,19 +31,23 @@ export const applyMissionEventBatch = async (
   }
   const store = getMissionControlStore();
   const unreplayed = store.unreplayedEventIds(events);
+  // An owner action opened with no review by a tab (vel-MC-ACT): the store stamps it external-action when that tab is
+  // the configured orchestrator on the run's binding, so the opener's own live identity and the orchestrator are read.
+  const unreviewedAction = (event: (typeof events)[number]): boolean => event.type === 'attention.opened'
+    && event.payload.humanReview === undefined && (event.payload as { kind?: unknown }).kind === 'action' && opener !== null;
   const identities = new Map<string, Awaited<ReturnType<typeof resolveMissionTargetIdentity>>>();
   await Promise.all(events.map(async (event) => {
     if (!unreplayed.has(event.eventId)) return;
     const tabId = event.type === 'run.started' || event.type === 'run.resumed'
       ? event.payload.tabId
       : (event.type === 'attention.opened' || event.type === 'attention.updated')
-        ? event.payload.humanReview?.reviewerTabId
+        ? event.payload.humanReview?.reviewerTabId ?? (unreviewedAction(event) ? opener?.tabId : undefined)
         : undefined;
     if (tabId) identities.set(event.eventId, await resolveMissionTargetIdentity(event.workspaceId, tabId));
   }));
   const needsReviewAuthority = events.some((event) => unreplayed.has(event.eventId)
     && (event.type === 'attention.opened' || event.type === 'attention.updated')
-    && event.payload.humanReview !== undefined);
+    && (event.payload.humanReview !== undefined || unreviewedAction(event)));
   const configuredOrchestratorTabId = needsReviewAuthority
     ? (await getWorkspaceById(workspaceId))?.orchestration?.orchestratorTabId ?? null
     : null;

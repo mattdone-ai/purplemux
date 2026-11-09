@@ -6,7 +6,7 @@ import type {
   TMissionProducerEvent,
 } from '@/types/mission-control';
 import { MissionControlError } from '@/lib/mission-control-errors';
-import { reviewLint, validateMissionQuestion } from '@/lib/mission-question-format';
+import { actionReviewLint, ownerStepsLint, reviewLint, validateMissionQuestion } from '@/lib/mission-question-format';
 
 const id = z.string().trim().min(1).max(128);
 const timestamp = z.number().int().safe().nonnegative();
@@ -151,7 +151,12 @@ const checkQuestions = (events: TParsedEvent[], minVersion: 1 | 2): IMissionEven
       defects.push(...verdict.defects.map((entry) => ({ eventId: event.eventId, itemId, ...entry })));
       return event;
     }
-    const findings = [...verdict.lint, ...reviewLint(verdict.question, review)];
+    const findings = [
+      ...verdict.lint,
+      ...reviewLint(verdict.question, review),
+      ...ownerStepsLint(verdict.question as unknown as Record<string, unknown>),
+      ...(event.type === 'attention.opened' ? actionReviewLint(verdict.question, review) : []),
+    ];
     if (findings.length) lint.push({ eventId: event.eventId, itemId, findings });
     return { ...event, payload: { itemId, ...verdict.question, ...(review ? { humanReview: review } : {}), ...(followsUp !== undefined ? { followsUp } : {}) } };
   });

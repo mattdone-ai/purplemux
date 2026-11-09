@@ -412,3 +412,42 @@ describe('MissionControlDeliveryCard: who answered', () => {
     expect(html).not.toContain('Answered by rule');
   });
 });
+
+// vel-MC-ACT: every open owner item shows in the owner's list whatever its kind, its human need or its format, and a
+// card renders even before the page holds a draft for it; the count and the cards always agree.
+describe('every open owner item shows (vel-MC-ACT)', () => {
+  const review = (humanNeed: 'decision' | 'approval' | 'information' | 'external-action') =>
+    ({ ...question().humanReview!, humanNeed }) as IMissionAttentionItem['humanReview'];
+  const items = [
+    question({ id: 'q-decision', humanReview: review('decision') }),
+    question({ id: 'q-approval', humanReview: review('approval') }),
+    question({ id: 'q-information', options: [], humanReview: review('information') }),
+    question({ id: 'act-v1', kind: 'action', revision: 5, title: 'Rotate the token', options: [], humanReview: review('external-action') }),
+    question({
+      id: 'act-v2', kind: 'action', revision: 5, formatVersion: 2, answerType: 'action-done', decision: 'Rotate the token',
+      options: [], humanReview: review('external-action'), class: 'scope',
+    } as Partial<IMissionAttentionItem>),
+  ];
+  const render = (drafts: Record<string, IMissionDraft>) => renderToStaticMarkup(
+    <MissionControlNeedsYou snapshot={snapshot(items)} loading={false} unsupported={false} error={null} refreshing={false}
+      drafts={drafts} focusItemId={null} onRetry={() => {}} onDraftChange={() => {}} onAdoptCurrent={() => {}} onSubmit={() => {}} />,
+  );
+  const cards = (html: string) => [...html.matchAll(/data-question-card="([^"]+)"/g)].map((m) => m[1]).sort();
+
+  it('with drafts: one card per open owner item, actions included', () => {
+    expect(cards(render(draftsFor(items)))).toEqual(items.map((item) => item.id).sort());
+  });
+
+  it('with no draft yet (a new snapshot\'s first render, or a dropped draft): still one card per item', () => {
+    expect(cards(render({}))).toEqual(items.map((item) => item.id).sort());
+    const partial = draftsFor(items.slice(0, 2));
+    expect(cards(render(partial))).toEqual(items.map((item) => item.id).sort());
+  });
+
+  it('an action card says Action and offers the done button', () => {
+    const html = render({});
+    const card = html.slice(html.indexOf('data-question-card="act-v1"'));
+    expect(card).toContain('Action');
+    expect(card).toContain('completed this action');
+  });
+});

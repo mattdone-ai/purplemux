@@ -149,7 +149,11 @@ interface ILinkRow {
 export interface IMissionEventAuthority {
   resolvedIdentity: TMissionIdentity | null;
   configuredOrchestratorTabId: string | null;
-  /** The server-resolved caller tab of an `attention.opened` (ADR-0023); advisory, never authorization. */
+  /**
+   * The server-resolved caller tab of an `attention.opened` (ADR-0023). Advisory, never authorization alone: only the
+   * owner-action stamp (vel-MC-ACT) reads it, as "the opener is the configured orchestrator", and then still requires
+   * the opener's live identity to match the run's binding.
+   */
   opener?: IMissionItemOpener | null;
 }
 
@@ -1579,7 +1583,7 @@ export class MissionControlStore {
       });
       const humanReview = reviewInput
         ? this.stampHumanReview(event, run, authority, now)
-        : null;
+        : question.kind === 'action' ? this.orchestratorActionReview(event, run, authority, now, question) : null;
       const state = humanReview && humanReview.humanNeed !== 'none' ? 'open' : 'candidate';
       const candidateReason: TMissionCandidateReason | null = state === 'candidate' ? 'workspace-issue' : null;
       this.database.prepare(`INSERT INTO attention_items
@@ -1923,8 +1927,8 @@ export class MissionControlStore {
     run: IMissionRun,
     authority: IMissionEventAuthority,
     reviewedAt: number,
+    review = event.payload.humanReview,
   ): TMissionHumanReview => {
-    const review = event.payload.humanReview;
     if (!review) throw new Error('human review is required');
     if (!authority.configuredOrchestratorTabId
       || review.reviewerTabId !== authority.configuredOrchestratorTabId) {
@@ -1946,6 +1950,38 @@ export class MissionControlStore {
       missionConflict('human review requires the current orchestrator session binding', run);
     }
     return { ...review, binding, eventId: event.eventId, reviewedAt };
+  };
+
+  /**
+   * An owner action the configured orchestrator opened without a human review (vel-MC-ACT): an action is a step only the
+   * owner takes, and its opener IS the reviewer, so the server stamps `external-action` and the item opens in the owner's
+   * list. Without it the item was a candidate the owner never saw. Anyone else's action stays a candidate for the
+   * orchestrator's review, as before: null unless the opener (the server-resolved caller tab, never a payload claim)
+   * IS the configured orchestrator, and its live identity matches the run's binding (the checks of an explicit review).
+   */
+  private orchestratorActionReview = (
+    event: Extract<TMissionProducerEvent, { type: 'attention.opened' }>,
+    run: IMissionRun,
+    authority: IMissionEventAuthority,
+    reviewedAt: number,
+    question: { title?: unknown; decision?: unknown; whyNow?: unknown },
+  ): TMissionHumanReview | null => {
+    if (!authority.configuredOrchestratorTabId || authority.opener?.tabId !== authority.configuredOrchestratorTabId) return null;
+    if (authority.resolvedIdentity?.tabId !== authority.opener.tabId) return null;
+    const step = [question.decision, question.title].find((text): text is string => typeof text === 'string' && text.trim().length > 0) ?? 'this step';
+    const why = typeof question.whyNow === 'string' && question.whyNow.trim() ? ` ${question.whyNow.trim()}` : '';
+    const review = {
+      humanNeed: 'external-action' as const,
+      humanReason: `An action only the owner can take: ${step}.${why}`.slice(0, 1000),
+      handling: 'The orchestrator opened this owner action without a review; the server stamped it as external-action so it reaches the owner (vel-MC-ACT).',
+      reviewerTabId: authority.configuredOrchestratorTabId,
+    };
+    try {
+      return this.stampHumanReview(event, run, authority, reviewedAt, review);
+    } catch (err) {
+      if (err instanceof MissionControlError) return null;
+      throw err;
+    }
   };
 
   private attentionEventPayload = (
