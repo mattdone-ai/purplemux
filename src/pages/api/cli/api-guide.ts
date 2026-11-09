@@ -880,8 +880,11 @@ SO-1..SO-7) and ~/.purplemux/workspaces/<ws>/standing-orders.md. Each order SO-<
 the host) has text (≤ 600), source (the owner message id and UTC date, ≤ 300), scope (default the
 file's owner), check (a hook or test name, default "prose") and state (active | struck). The active
 fleet and workspace orders are written into the workspace's claude-prompt.md at every Claude launch
-(tab create, restart, resume) and on every change; a change also sends each live agent tab it
-reaches one urgent line: "[purplemux standing order] SO-<n> added|struck (<owner>): <text> — …".
+(tab create, restart, resume) and on every change, with the time they were rendered; a change also
+rewrites the kit copy on each remote host that runs a tab of the workspace. Claude reads the file
+once, at launch: a running session keeps the list it started with, so a change also sends each live
+agent tab it reaches one urgent line: "[purplemux standing order] SO-<n> added|struck (<owner>): <text> — …".
+purplemux so list is the authority; an order missing there is struck.
 
 GET /api/cli/standing-orders[?workspaceId=WS][&all=1]
   A tab reads the fleet's and its own workspace's orders; admin reads one workspace or every file.
