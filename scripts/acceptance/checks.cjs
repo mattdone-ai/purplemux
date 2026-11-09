@@ -1046,12 +1046,19 @@ const wave2 = async (inst) => {
 
 /** Story 24 (ADR-0019): authority, and the `constructor` key that plain indexing read as Object. */
 const fleetConfig = async (inst, { nonce, wsB, check }) => {
-  // The orchestrator of workspace B (a terminal tab, set by the story 15 checks) and a plain worker tab.
+  // The orchestrator of workspace B (a claude-code tab with no agent launched, set by the story 15 checks) and a
+  // plain worker tab. The orchestrator's command runs in its shell through tmux, not through `tab send`: a send into
+  // an agent tab reports submitted only on a prompt-submit turn (vel-RETRO-R3), and a shell never posts one.
   const orchestrator = parseJson((await inst.cli(['orchestration', 'status', '-w', wsB])).out)?.orchestration?.orchestratorTabId ?? null;
+  const orchestratorSession = orchestrator
+    ? parseJson((await inst.cli(['tab', 'list', '-w', wsB])).out)?.tabs?.find((t) => t.tabId === orchestrator)?.sessionName ?? null
+    : null;
   const worker = parseJson((await inst.cli(['tab', 'create', '-w', wsB, '-n', 'acc2-worker', '-t', 'terminal'])).out)?.tabId ?? null;
   await sleep(1000);
   const key = `acc.slots-${nonce}`;
-  const bySelf = orchestrator ? await inst.inTab(wsB, orchestrator, inst.tabCli(['config', 'set', key, '4'])) : { rc: -1, out: '', err: 'no orchestrator' };
+  const bySelf = orchestrator && orchestratorSession
+    ? await inst.inTab(wsB, orchestrator, inst.tabCli(['config', 'set', key, '4']), { session: orchestratorSession })
+    : { rc: -1, out: '', err: orchestrator ? `no session for orchestrator ${orchestrator}` : 'no orchestrator' };
   const byWorker = worker ? await inst.inTab(wsB, worker, inst.tabCli(['config', 'set', key, '9'])) : { rc: -1, out: '', err: 'no worker tab' };
   const value = await inst.cli(['config', 'get', key]);
   check(
