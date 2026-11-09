@@ -88,10 +88,59 @@ describe('an owner action opened with no human review, through mission events (v
     expect(itemOf('item-server').state).toBe('candidate');
   });
 
+  // #60 review follow-up: `hook` and `session` name the tab on the caller's word (ADR-0010). A worker that holds the
+  // workspace token can send the orchestrator's session in X-Pmux-Session; the route then names the orchestrator tab.
+  it.each(['session', 'hook'] as const)('by the orchestrator tab with a %s identity, not launch: a candidate, never stamped', async (identity) => {
+    await startRun();
+    await applyMissionEventBatch('ws-a', [openAction(`ev-${identity}`, `item-${identity}`)], { tabId: 'tab-orch', identity });
+    const item = itemOf(`item-${identity}`);
+    expect(item.state).toBe('candidate');
+    expect(item.candidateReason).toBe('workspace-issue');
+    expect(item.humanReview).toBeNull();
+    expect(isMissionHumanInboxItem(item)).toBe(false);
+  });
+
   it('by the orchestrator tab whose live session no longer matches the run binding: a candidate', async () => {
     await startRun();
     live.identities.set('tab-orch', { ...identityOf('tab-orch'), sessionId: 'session-relaunched' });
     await applyMissionEventBatch('ws-a', [openAction('ev-stale', 'item-stale')], { tabId: 'tab-orch', identity: 'launch' });
     expect(itemOf('item-stale').state).toBe('candidate');
+  });
+});
+
+describe('a later attention.updated on a stamped owner action (vel-MC-ACT, #60 review follow-up)', () => {
+  const update = (eventId: string, expectedRevision: number, title: string, humanReview?: Record<string, unknown>): TMissionProducerEvent => {
+    const opened = openAction('unused', 'item-act');
+    return {
+      ...base(eventId, expectedRevision, 1),
+      type: 'attention.updated',
+      payload: { ...(opened.payload as object), title, ...(humanReview ? { humanReview } : {}) },
+    } as TMissionProducerEvent;
+  };
+
+  it('a changed text with no humanReview is refused 409 and the stamp stays; with a humanReview it is re-stamped by that review', async () => {
+    await startRun();
+    await applyMissionEventBatch('ws-a', [openAction('ev-act', 'item-act')], { tabId: 'tab-orch', identity: 'launch' });
+    const stamped = itemOf('item-act');
+    expect(stamped.humanReview).toMatchObject({ humanNeed: 'external-action', eventId: 'ev-act' });
+
+    const refused = applyMissionEventBatch('ws-a', [update('ev-upd-bare', 1, 'Rotate the deploy token today')], { tabId: 'tab-orch', identity: 'launch' });
+    await expect(refused).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/renewed orchestrator review/) });
+    expect(itemOf('item-act')).toEqual(stamped);
+
+    const review = {
+      humanNeed: 'external-action',
+      humanReason: 'Only the owner can issue the deploy token, and it expires today.',
+      handling: 'The orchestrator reviewed the revised step.',
+      reviewerTabId: 'tab-orch',
+    };
+    await applyMissionEventBatch('ws-a', [update('ev-upd-review', 1, 'Rotate the deploy token today', review)], { tabId: 'tab-orch', identity: 'launch' });
+    const restamped = itemOf('item-act');
+    expect(restamped).toMatchObject({ state: 'open', revision: 2, candidateReason: null, title: 'Rotate the deploy token today' });
+    expect(restamped.humanReview).toMatchObject({
+      humanNeed: 'external-action', humanReason: review.humanReason, handling: review.handling, reviewerTabId: 'tab-orch', eventId: 'ev-upd-review',
+      binding: expect.objectContaining({ tabId: 'tab-orch' }),
+    });
+    expect(isMissionHumanInboxItem(restamped)).toBe(true);
   });
 });

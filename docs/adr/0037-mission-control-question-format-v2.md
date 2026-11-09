@@ -240,9 +240,9 @@ A recurrence the owner raised. Two things went missing from Mission Control:
 
 - **Fix: the server stamps the orchestrator's own owner action.**
   - **Production path:** `mission events` and the events route go through `applyMissionEventBatch`. For an attention.opened kind=action with no `humanReview`, the batch reads two things:
-    - the opener's live identity: the opener is the server-resolved caller tab, never a payload claim (ADR-0023);
+    - the opener's live identity: the opener is the caller tab from the request credential, never from the payload (ADR-0023);
     - the workspace's configured orchestrator.
-  - **When it stamps:** only when the opener IS the configured orchestrator, and its live identity matches the run's binding. These are the checks an explicit review passes. The store then stamps `humanNeed: external-action`:
+  - **When it stamps:** only when the opener IS the configured orchestrator with a `launch` identity, and its live identity matches the run's binding. These are the checks an explicit review passes. The store then stamps `humanNeed: external-action`:
     - `humanReason` is "An action only the owner can take: <decision or title>." plus its whyNow;
     - `handling` says the server stamped it;
     - `reviewerTabId` is the orchestrator.
@@ -252,9 +252,10 @@ A recurrence the owner raised. Two things went missing from Mission Control:
   - a kind=action opened by any other tab;
   - one opened by a server or admin producer with no opener;
   - one opened by the orchestrator tab whose live session no longer matches the binding;
+  - one whose opener names the orchestrator with a `hook` or `session` identity (follow-up, #60 review). Those name the tab on the caller's word (ADR-0010): any holder of the workspace token can send the orchestrator's session in `X-Pmux-Session`. Only `launch` proves the tab;
   - any action when no orchestrator is configured.
   Each stays a candidate for the orchestrator's review, as before. Both the events route and `mc ask` (the check route) warn the opener: `humanReview: absent on a kind=action`, naming who makes it visible.
-- **After the stamp:** the item is open like any reviewed item. An attention.updated that changes its text needs a `humanReview` again (renewed review, as for every open item).
+- **After the stamp:** the item is open like any reviewed item. An attention.updated that changes its text needs a `humanReview` again (renewed review, as for every open item): without one it is refused 409 and the item keeps its stamp; with one the explicit review replaces the stamp. Pinned in the owner-action test.
 - **The view.** The Needs you list also renders an open owner item the page holds no draft for yet, from a fresh draft. That closes a one-render gap only; it was not case 2's cause.
 
 **Owner steps are lint, not a refusal.**

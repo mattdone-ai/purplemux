@@ -19,6 +19,7 @@ vi.mock('@/lib/claude-prompt', () => ({ getClaudePromptPath: () => fixture.promp
 
 import { buildFreshLaunchCommand } from '@/lib/agent-launch';
 import { PG_CLIENT_DIR, evaluatorChromeMcpPath, evaluatorSqlPath } from '@/lib/tab-role';
+import { managedHookSkipNote, managedPreToolUseHookFiles } from './managed-hooks';
 
 const claudeBin = (() => {
   try {
@@ -27,6 +28,11 @@ const claudeBin = (() => {
     return null;
   }
 })();
+
+// A managed settings PreToolUse hook runs before the tool configuration in every claude process on the host, and no
+// setting overrides it. Where one is wired, the tests that assert the permission layer's own Bash refusal skip; the
+// assertions stay as they are, and hosts without managed hooks (CI included) keep proving them.
+const managedHooks = managedPreToolUseHookFiles();
 
 interface IToolCall { name: string; input: Record<string, unknown> }
 interface IToolResult { content: string; isError: boolean }
@@ -217,7 +223,8 @@ describe.skipIf(!claudeBin)('an evaluator tab refuses writes and credential read
     expect(results[10]).toMatchObject({ isError: false, content: expect.stringContaining('hello') });
   });
 
-  it('runs evaluator-sql on the tab service, denies another service, and denies the process, socket and docker readers', async () => {
+  it('runs evaluator-sql on the tab service, denies another service, and denies the process, socket and docker readers', async (ctx) => {
+    ctx.skip(managedHooks.length > 0, managedHookSkipNote(managedHooks));
     const sql = evaluatorSqlPath();
     const { code, stderr, results } = await runEvaluator([
       { name: 'Bash', input: { command: `${sql} 'select 1'` } },
@@ -237,7 +244,8 @@ describe.skipIf(!claudeBin)('an evaluator tab refuses writes and credential read
     });
   });
 
-  it('denies every Bash write path even where user and project settings allow it', async () => {
+  it('denies every Bash write path even where user and project settings allow it', async (ctx) => {
+    ctx.skip(managedHooks.length > 0, managedHookSkipNote(managedHooks));
     const head = git(repo, 'rev-parse', 'HEAD');
     const sql = evaluatorSqlPath();
     const { code, stderr, results } = await runEvaluator([

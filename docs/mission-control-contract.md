@@ -147,7 +147,8 @@ tab (or to the enabled orchestrator for a workspace's unattributed UNANSWERED). 
 **Opener attribution (advisory).** The CLI events route records who opened each new `attention.opened` in the unversioned
 side table `mission_item_openers`, inside the same transaction. The opener comes from the server-resolved caller
 credential (ADR-0010), never from the payload: `launch` is verified, `hook` and `session` are asserted. It is not
-authorization, and `IMissionSnapshot` and the event feed do not carry it. A missing row means unattributed. The
+authorization, with one exception: the owner-action stamp (ADR-0037, vel-MC-ACT amendment) reads it, and accepts only
+a `launch` opener. `IMissionSnapshot` and the event feed do not carry it. A missing row means unattributed. The
 trust-boundary sentence above still holds for a workspace-token caller; a launch tab token does name its tab.
 
 ## Board (ADR-0034)

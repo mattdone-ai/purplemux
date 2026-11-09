@@ -150,9 +150,10 @@ export interface IMissionEventAuthority {
   resolvedIdentity: TMissionIdentity | null;
   configuredOrchestratorTabId: string | null;
   /**
-   * The server-resolved caller tab of an `attention.opened` (ADR-0023). Advisory, never authorization alone: only the
-   * owner-action stamp (vel-MC-ACT) reads it, as "the opener is the configured orchestrator", and then still requires
-   * the opener's live identity to match the run's binding.
+   * The caller tab of an `attention.opened`, from the request credential (ADR-0010, ADR-0023), never from the payload.
+   * Only a `launch` identity is proof; `hook` and `session` name the tab on the caller's word. Advisory, never
+   * authorization alone: only the owner-action stamp (vel-MC-ACT) reads it, as "a `launch` opener that is the configured
+   * orchestrator", and then still requires the opener's live identity to match the run's binding.
    */
   opener?: IMissionItemOpener | null;
 }
@@ -1956,8 +1957,11 @@ export class MissionControlStore {
    * An owner action the configured orchestrator opened without a human review (vel-MC-ACT): an action is a step only the
    * owner takes, and its opener IS the reviewer, so the server stamps `external-action` and the item opens in the owner's
    * list. Without it the item was a candidate the owner never saw. Anyone else's action stays a candidate for the
-   * orchestrator's review, as before: null unless the opener (the server-resolved caller tab, never a payload claim)
-   * IS the configured orchestrator, and its live identity matches the run's binding (the checks of an explicit review).
+   * orchestrator's review, as before: null unless the opener IS the configured orchestrator, and its live identity
+   * matches the run's binding (the checks of an explicit review). The opener comes from the request credential, never
+   * the payload, but only a `launch` identity proves the tab (ADR-0010). A `hook` or `session` opener is the caller's
+   * word: any holder of the workspace token can name the orchestrator's session in `X-Pmux-Session`. So only a
+   * `launch` opener is stamped; any other stays a candidate.
    */
   private orchestratorActionReview = (
     event: Extract<TMissionProducerEvent, { type: 'attention.opened' }>,
@@ -1967,6 +1971,7 @@ export class MissionControlStore {
     question: { title?: unknown; decision?: unknown; whyNow?: unknown },
   ): TMissionHumanReview | null => {
     if (!authority.configuredOrchestratorTabId || authority.opener?.tabId !== authority.configuredOrchestratorTabId) return null;
+    if (authority.opener.identity !== 'launch') return null;
     if (authority.resolvedIdentity?.tabId !== authority.opener.tabId) return null;
     const step = [question.decision, question.title].find((text): text is string => typeof text === 'string' && text.trim().length > 0) ?? 'this step';
     const why = typeof question.whyNow === 'string' && question.whyNow.trim() ? ` ${question.whyNow.trim()}` : '';

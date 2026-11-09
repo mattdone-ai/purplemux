@@ -28,7 +28,9 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       throw new MissionControlError(403, 'forbidden', `Mission Control writes require this workspace token. ${FOREIGN_MUTATION_HINT}`);
     }
     const body = req.body as { events?: unknown } | null;
-    // Who opened an item: the server-resolved caller tab, never a payload claim (ADR-0023). Advisory only.
+    // Who opened an item: the caller tab from the request credential, never from the payload (ADR-0023). Only a
+    // `launch` identity proves the tab; `hook` and `session` are the caller's word (ADR-0010). Advisory only: the
+    // owner-action stamp (vel-MC-ACT) accepts a `launch` opener alone.
     const opener: IMissionItemOpener | null = !caller.admin && caller.tabId && caller.workspaceId === workspaceId
       && caller.identity !== 'none'
       ? { tabId: caller.tabId, identity: caller.identity }
