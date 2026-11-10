@@ -55,7 +55,7 @@ notice, and 646 of 1,286 note lines to the three coordinators in 24 h were ack n
 - F10 step 3 maps `note ack` onto a message's `delivered → processed` write; this amendment adds no ack path for it to
   replace.
 
-## Amendment: a coordinator may point at its own undelivered note (2026-11-10, epic `harness-velocity`, story vel-G7-POINTER)
+## Amendment: a coordinator may point at its own undelivered note (2026-11-10, story vel-G7-POINTER)
 A note's notice reaches a composer only through the inbox, and the inbox types only into a ready, empty composer
 (ADR-0012). A coordinator that stays busy for an hour therefore never receives a decision note: on 10 Nov the oldest
 undelivered decision note at a coordinator was more than 60 min old. A `tab send` reaches a busy tab, but the API
@@ -79,9 +79,9 @@ confines agent mutations to the caller's workspace, and that boundary stays.
   queued notice is withdrawn (`note-pointed`). A line left in the composer stamps no receipt and answers
   `typed-not-submitted` (exit 1). Each outcome writes one `note-pointer` coordination audit line.
 
-## Amendment: pending notes are read where the coordinator reads, and an undelivered note escalates at 15 min (2026-11-10, epic `harness-velocity`, story vel-G7-PENDING)
-The audit seat's ruling on G7: a status line is read by a person, not by the model, and a hold after 30 inbox
-refusals (about 2.4 h) is too late for an owner decision. Readers only: no new store, no new queue, and no change to
+## Amendment: pending notes are read where the coordinator reads, and an undelivered note escalates at 15 min (2026-11-10, story vel-G7-PENDING)
+A status line is read by a person, not by the model, and a hold after 30 inbox refusals (about 2.4 h) is too late
+for an owner decision. Readers only: no new store, no new queue, and no change to
 the inbox's ready-only rule.
 - A coordinator's digest (a tab the coordinator window governs) carries, under its `DIGEST` header,
   `N notes pending, oldest <age>: run purplemux note list --open --to-me`. A watchdog nudge typed to it carries the

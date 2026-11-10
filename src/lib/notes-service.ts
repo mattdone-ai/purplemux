@@ -854,7 +854,7 @@ export class NotesService {
 
   /**
    * The caller is the verified, live orchestrator of its own workspace: the coordinator half of `admissionFor`
-   * (:244), stated on its own. `admissionFor` also returns `owner` or `local` without a throw (design ruling F3).
+   * (:244), stated on its own. `admissionFor` also returns `owner` or `local` without a throw, so its return is no coordinator check.
    */
   private async isCoordinator(caller: ICaller, r: IReads): Promise<boolean> {
     if (caller.admin || !caller.verified || !caller.workspaceId || !caller.tabId) return false;
@@ -908,7 +908,7 @@ export class NotesService {
 
   /**
    * Type one fixed pointer line for the caller's own undelivered note into its recipient orchestrator, busy
-   * included (G7, design ruling vel-G7-POINTER). Lock order: the target's dispatch lock, then the notes lock, as
+   * included (G7, vel-G7-POINTER). Lock order: the target's dispatch lock, then the notes lock, as
    * the inbox takes them before its preflight; every check runs again inside both. The caller's mapping lock is
    * never held. A typed and submitted line is the note's composer receipt, so its queued notice is withdrawn.
    */
@@ -1047,7 +1047,7 @@ const defaultDeps = async (): Promise<INotesDeps> => {
     audit: coordinationAudit.appendCoordinationAudit,
     window: coordinatorWindow.getCoordinatorWindow,
     alertUndelivered: async (note, now) => {
-      // SO-10 shape: the portfolio Scrum Master seat hears it as one digest line. Its own note needs no copy: it
+      // The portfolio Scrum Master seat hears it as one digest line, as a pool flag does. Its own note needs no copy: it
       // is the sender, told already, or the recipient that has not read it.
       const [{ getPortfolioStore }, { getStatusManager }, { renderUndeliveredAlert }] = await Promise.all([
         import('@/lib/portfolio-store'),
