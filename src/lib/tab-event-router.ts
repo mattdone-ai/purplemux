@@ -89,6 +89,12 @@ export interface ITabEventRouterDeps {
    * longer than the tab's oldest inbox item. Absent: every tab keeps the rules above (tests, a server without it).
    */
   window?: () => CoordinatorWindow | null;
+  /**
+   * G7: the coordinator's pending-notes line (`N notes pending, oldest <age>: run purplemux note list --open
+   * --to-me`), or null when none wait. Read when a digest or a watchdog nudge is typed to a coordinator the window
+   * governs; a throw or an absent reader leaves the message as it was.
+   */
+  pendingNotes?: (workspaceId: string, tabId: string) => Promise<string | null>;
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -113,9 +119,10 @@ export const appendDelivered = (table: TabEventsTable, event: ITabEventRoute, at
  * One message for every waiting event (ADR-HFL-05 decision 2): `DIGEST <n> since <time>`, a line per
  * event while they fit, then the pointer to the full list. At most DIGEST_MAX_BYTES in all.
  */
-export const renderDigest = (events: readonly ITabEvent[], workspaceId: string, tabId: string): string => {
+export const renderDigest = (events: readonly ITabEvent[], workspaceId: string, tabId: string, notesLine: string | null = null): string => {
   const since = iso(Math.min(...events.map((event) => event.at)));
-  const header = `DIGEST ${events.length} since ${since}`;
+  // G7: a coordinator's pending notes go right under the header, so the line survives any clipping below.
+  const header = notesLine ? `DIGEST ${events.length} since ${since}\n${notesLine}` : `DIGEST ${events.length} since ${since}`;
   const pointer = (shown: number) => (shown === events.length
     ? `Full text: purplemux events show -w ${workspaceId} ${tabId} --since ${since}`
     : `${events.length - shown} more: purplemux events show -w ${workspaceId} ${tabId} --since ${since}`);
@@ -237,9 +244,14 @@ export class TabEventRouter {
     if (cls === 'urgent') {
       const { whenReady } = event;
       const ready = whenReady ? () => whenReady() && this.settled(table, event.workspaceId, event.tabId) : undefined;
+      // G7: a watchdog nudge (a sourced event) typed to a coordinator carries its pending-notes line; the log keeps the
+      // nudge's own text, so its duplicate filter and its history read the same row as before.
+      const notes = event.sourceTabId && await this.governedBy(event.workspaceId, event.tabId) !== null
+        ? await this.notesLine(event.workspaceId, event.tabId) : null;
+      const text = notes ? `${event.text}\n${notes}` : event.text;
       this.inFlight.add(seq);
       try {
-        const delivered = await this.paste(event.workspaceId, event.tabId, event.text, ready);
+        const delivered = await this.paste(event.workspaceId, event.tabId, text, ready);
         if (delivered) this.markDelivered(table, [seq], null);
         return { class: cls, delivered, seq, duplicate };
       } finally {
@@ -296,6 +308,17 @@ export class TabEventRouter {
     }
   }
 
+  /** The coordinator's pending-notes line, or null: no reader, nothing pending, or an unreadable note store. */
+  private async notesLine(workspaceId: string, tabId: string): Promise<string | null> {
+    if (!this.deps.pendingNotes) return null;
+    try {
+      return await this.deps.pendingNotes(workspaceId, tabId);
+    } catch (err) {
+      log.warn(`pending notes for ${tabId} unreadable; the message goes without the line: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
   /** Send the tab its digest when one is due and the tab is at its prompt; true when one went out. */
   async flush(workspaceId: string, tabId: string): Promise<boolean> {
     const key = `${workspaceId}/${tabId}`;
@@ -315,7 +338,7 @@ export class TabEventRouter {
         ? window.isOpen(workspaceId, tabId) && window.digestTurn(workspaceId, tabId)
         : pending.length >= DIGEST_MAX_WAITING || last === null || now - last >= DIGEST_INTERVAL_MS;
       if (!due || this.deps.holdDigest?.(tabId) || !this.deps.atPrompt(tabId) || !this.settled(table, workspaceId, tabId)) return false;
-      const message = renderDigest(pending, workspaceId, tabId);
+      const message = renderDigest(pending, workspaceId, tabId, window ? await this.notesLine(workspaceId, tabId) : null);
       // Re-read in the dispatch lock: an inbox item may have taken the window since the check above.
       const delivered = await this.paste(workspaceId, tabId, message,
         () => !this.deps.holdDigest?.(tabId) && this.deps.atPrompt(tabId) && this.settled(table, workspaceId, tabId)

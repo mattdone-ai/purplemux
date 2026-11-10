@@ -492,6 +492,8 @@ export class StatusManager {
         }
       },
       isKnownTab: (tabId) => this.tabs.has(tabId),
+      // G7: the coordinator's digest and nudges carry its pending notes, read from the note store.
+      pendingNotes: async (workspaceId, tabId) => (await import('@/lib/note-pending')).readPendingNotesLine(workspaceId, tabId, Date.now()),
       onStale: (stale) => {
         void this.alertStaleDigest(stale).catch((err) => {
           log.warn(`held-digest alert failed: ${err instanceof Error ? err.message : err}`);
