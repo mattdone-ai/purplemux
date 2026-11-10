@@ -46,7 +46,7 @@ describe('remote Claude hook script (ADR-0022)', () => {
         FAKE_CURL_OUT: curl.out,
         FAKE_CURL_EXIT: String(curl.exit),
         FAKE_SESSION: SESSION,
-        PMUX_URL: 'http://mdserver1:8022',
+        PMUX_URL: 'http://host-a:8022',
         PMUX_TAB_TOKEN: 'tab-secret',
         ...env,
       } as unknown as NodeJS.ProcessEnv,
@@ -59,10 +59,10 @@ describe('remote Claude hook script (ADR-0022)', () => {
   const spooled = () => (fs.existsSync(spoolDir()) ? fs.readdirSync(spoolDir()).filter((n) => n.endsWith('.json') && !n.startsWith('.')) : []);
 
   it('posts the raw hook JSON to PMUX_URL with the tab token, the event and the session', () => {
-    const body = '{"session_id":"0f9e","transcript_path":"/home/mdone/.claude/projects/-x/0f9e.jsonl","hook_event_name":"Stop"}';
+    const body = '{"session_id":"0f9e","transcript_path":"/home/user/.claude/projects/-x/0f9e.jsonl","hook_event_name":"Stop"}';
     run('stop', body, { out: '204 0.000100', exit: 0 });
     const args = fs.readFileSync(path.join(dir, 'curl-args'), 'utf-8');
-    expect(args).toMatch(new RegExp(`http://mdserver1:8022/api/status/hook\\?remote=claude&event=stop&session=${SESSION}&occurredAt=\\d{13}`));
+    expect(args).toMatch(new RegExp(`http://host-a:8022/api/status/hook\\?remote=claude&event=stop&session=${SESSION}&occurredAt=\\d{13}`));
     // The token never rides on curl's command line (readable in /proc/<pid>/cmdline): it comes on fd 3.
     expect(args).not.toContain('tab-secret');
     expect(args).toContain('-H @/dev/fd/3');

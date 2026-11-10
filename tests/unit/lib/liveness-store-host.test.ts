@@ -22,11 +22,11 @@ afterAll(async () => {
 
 describe('a saved job names its host (D63)', () => {
   it('round-trips the host and reads a job with none as before', async () => {
-    await upsertJob({ workspaceId: 'ws-h', tabId: 'tab-1', pid: 1, host: 'ai-lan', registeredAt: 1 });
+    await upsertJob({ workspaceId: 'ws-h', tabId: 'tab-1', pid: 1, host: 'host-b-lan', registeredAt: 1 });
     await upsertJob({ workspaceId: 'ws-h', tabId: 'tab-1', pid: 2, registeredAt: 1 });
     const evidence = await readLivenessEvidence('ws-h');
     expect(evidence).toEqual({ known: true, data: { probes: [], jobs: [
-      { workspaceId: 'ws-h', tabId: 'tab-1', pid: 1, host: 'ai-lan', registeredAt: 1 },
+      { workspaceId: 'ws-h', tabId: 'tab-1', pid: 1, host: 'host-b-lan', registeredAt: 1 },
       { workspaceId: 'ws-h', tabId: 'tab-1', pid: 2, registeredAt: 1 },
     ] } });
   });

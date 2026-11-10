@@ -531,7 +531,7 @@ describe('property: waits equal the clipped intervals (AC 6)', () => {
 
 describe('experiments (ADR-HFL-03)', () => {
   const input = (overrides: Partial<ILedgerExperimentInput> = {}): ILedgerExperimentInput => ({
-    hypothesis: 'one gate outside the lock halves lock hours', change_ref: 'treasury-v2#1', stage: 'land', reason: 'under-lock-gate',
+    hypothesis: 'one gate outside the lock halves lock hours', change_ref: 'acme-ledger-v2#1', stage: 'land', reason: 'under-lock-gate',
     metric: 'lock-hours', baseline: { value: 13, window: '7d' }, target: 6, guards: [{ metric: 'red-mains', limit: 1 }],
     revert_if: 'red mains above 1 a day', min_days: 3, max_days: 7, ...overrides,
   });

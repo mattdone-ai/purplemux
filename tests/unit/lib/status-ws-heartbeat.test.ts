@@ -147,7 +147,7 @@ const ALERT: IAlert = {
   kind: 'needs-input',
   tabId: 'tab-1',
   workspaceId: 'ws-1',
-  workspaceName: 'nomupay',
+  workspaceName: 'acme',
   tabName: 'orchestrator',
   providerId: 'claude',
   isOrchestrator: true,

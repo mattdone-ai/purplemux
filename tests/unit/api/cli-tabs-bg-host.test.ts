@@ -23,7 +23,7 @@ const fakeResponse = () => {
   return { state, res };
 };
 
-const hosts: Record<string, string | undefined> = { 'tab-remote': 'ai-lan', 'tab-local': undefined, 'tab-other-remote': 'gpu-1' };
+const hosts: Record<string, string | undefined> = { 'tab-remote': 'host-b-lan', 'tab-local': undefined, 'tab-other-remote': 'gpu-1' };
 const tab = (id: string): ITab => ({
   id, name: id, order: 0, sessionName: `pt-ws-1-pane-a-${id}`, panelType: 'claude-code', ...(hosts[id] ? { host: hosts[id] } : {}),
 });
@@ -43,7 +43,7 @@ describe('tab bg add names the host the pid lives on (D63)', () => {
   });
 
   it('a remote tab registering its own pid names its host; a local tab marks itself local with host null', async () => {
-    expect((await register('tab-remote', { tabId: 'tab-remote', tabVerified: true })).job).toMatchObject({ pid: 157985, host: 'ai-lan' });
+    expect((await register('tab-remote', { tabId: 'tab-remote', tabVerified: true })).job).toMatchObject({ pid: 157985, host: 'host-b-lan' });
     const local = await register('tab-local', { tabId: 'tab-local', tabVerified: true });
     expect(local.state.statusCode).toBe(200);
     expect(local.job).toHaveProperty('host', null);
@@ -51,13 +51,13 @@ describe('tab bg add names the host the pid lives on (D63)', () => {
 
   it('takes the verified caller tab\'s host over the target\'s: the pid was taken where the caller runs', async () => {
     expect((await register('tab-remote', { tabId: 'tab-local', tabVerified: true })).job).toHaveProperty('host', null);
-    expect((await register('tab-local', { tabId: 'tab-remote', tabVerified: true })).job).toMatchObject({ host: 'ai-lan' });
+    expect((await register('tab-local', { tabId: 'tab-remote', tabVerified: true })).job).toMatchObject({ host: 'host-b-lan' });
     expect((await register('tab-remote', { tabId: 'tab-other-remote', tabVerified: true })).job).toMatchObject({ host: 'gpu-1' });
   });
 
   it('uses the target tab\'s host when the token is not a verified tab', async () => {
-    expect((await register('tab-remote', {})).job).toMatchObject({ host: 'ai-lan' });
-    expect((await register('tab-remote', { tabId: 'tab-local' })).job).toMatchObject({ host: 'ai-lan' });
+    expect((await register('tab-remote', {})).job).toMatchObject({ host: 'host-b-lan' });
+    expect((await register('tab-remote', { tabId: 'tab-local' })).job).toMatchObject({ host: 'host-b-lan' });
     expect((await register('tab-local', { type: 'admin' })).job).toHaveProperty('host', null);
   });
 

@@ -46,12 +46,12 @@ describe('lease store', () => {
 
   it('refuses a second holder with lease-held naming the workspace, tab and age (case-insensitive name)', async () => {
     const { acquireLease } = await store();
-    await acquireLease({ name: 'merge:nomupay/treasury-api' }, tabA, authority);
+    await acquireLease({ name: 'merge:acme/acme-ledger-api' }, tabA, authority);
     now += 7 * 60 * 1000;
 
-    const err = await acquireLease({ name: 'merge:NomuPay/treasury-api' }, tabB, authority).catch((e) => e);
+    const err = await acquireLease({ name: 'merge:Acme/acme-ledger-api' }, tabB, authority).catch((e) => e);
     expect(err.code).toBe('lease-held');
-    expect(err.message).toBe('merge:nomupay/treasury-api is held by ws1/tab-a (A) for 7m');
+    expect(err.message).toBe('merge:acme/acme-ledger-api is held by ws1/tab-a (A) for 7m');
     expect(err.lease.holder).toMatchObject({ workspaceId: 'ws1', tabId: 'tab-a' });
   });
 
@@ -224,37 +224,37 @@ describe('lease store', () => {
     it('lets the epic holder release its survives-tab claims only', async () => {
       const { acquireLease, releaseEpicClaims, listLeases } = await store();
       await acquireLease({ name: 'epic:p4' }, tabB, authority);
-      await claim('num:nomupay/treasury-api:adr:0373', tabA);
-      await claim('num:nomupay/treasury-api:adr:0374', tabA);
-      await claim('num:nomupay/treasury-api:adr:0375', tabA, 'other');
+      await claim('num:acme/acme-ledger-api:adr:0373', tabA);
+      await claim('num:acme/acme-ledger-api:adr:0374', tabA);
+      await claim('num:acme/acme-ledger-api:adr:0375', tabA, 'other');
 
       const released = await releaseEpicClaims('p4', tabB, authority);
-      expect(released.map((l) => l.name).sort()).toEqual(['num:nomupay/treasury-api:adr:0373', 'num:nomupay/treasury-api:adr:0374']);
-      expect((await listLeases()).map((l) => l.name)).toEqual(['epic:p4', 'num:nomupay/treasury-api:adr:0375']);
+      expect(released.map((l) => l.name).sort()).toEqual(['num:acme/acme-ledger-api:adr:0373', 'num:acme/acme-ledger-api:adr:0374']);
+      expect((await listLeases()).map((l) => l.name)).toEqual(['epic:p4', 'num:acme/acme-ledger-api:adr:0375']);
     });
 
     it('lets a tab of the claims\' holder workspace release them', async () => {
       const { releaseEpicClaims } = await store();
-      await claim('num:nomupay/treasury-api:adr:0373', tabA);
+      await claim('num:acme/acme-ledger-api:adr:0373', tabA);
       expect(await releaseEpicClaims('p4', tabA2, authority)).toHaveLength(1);
     });
 
     it('lets admin release them', async () => {
       const { releaseEpicClaims } = await store();
-      await claim('num:nomupay/treasury-api:adr:0373', tabA);
+      await claim('num:acme/acme-ledger-api:adr:0373', tabA);
       expect(await releaseEpicClaims('p4', admin, authority)).toHaveLength(1);
     });
 
     it('refuses anyone else', async () => {
       const { releaseEpicClaims, listLeases } = await store();
-      await claim('num:nomupay/treasury-api:adr:0373', tabA);
+      await claim('num:acme/acme-ledger-api:adr:0373', tabA);
       await expect(releaseEpicClaims('p4', tabB, authority)).rejects.toMatchObject({ code: 'forbidden' });
       expect(await listLeases()).toHaveLength(1);
     });
 
     it('filters by kind when asked', async () => {
       const { releaseEpicClaims } = await store();
-      await claim('num:nomupay/treasury-api:adr:0373', tabA);
+      await claim('num:acme/acme-ledger-api:adr:0373', tabA);
       expect(await releaseEpicClaims('p4', admin, authority, 'other-kind')).toEqual([]);
       await expect(releaseEpicClaims('p4', admin, authority, 'Bad Kind')).rejects.toMatchObject({ code: 'lease-policy' });
     });
@@ -384,11 +384,11 @@ describe('lease store', () => {
       now: now + 120_000,
       liveTabIds: new Set(live),
       agentInactive: (id: string) => inactive.includes(id),
-      workspaceName: (id: string) => (id === 'ws1' ? 'Treasury' : null),
+      workspaceName: (id: string) => (id === 'ws1' ? 'Acme-ledger' : null),
     });
 
     expect(toLeaseView(lease, facts(['tab-a']))).toMatchObject({
-      ageSeconds: 120, expiresInSeconds: 480, holderState: 'live', holder: { workspaceName: 'Treasury', tabId: 'tab-a', verified: true, admin: false },
+      ageSeconds: 120, expiresInSeconds: 480, holderState: 'live', holder: { workspaceName: 'Acme-ledger', tabId: 'tab-a', verified: true, admin: false },
     });
     expect(toLeaseView(lease, facts(['tab-a'], ['tab-a'])).holderState).toBe('agent-gone');
     expect(toLeaseView(lease, facts([])).holderState).toBe('closed');

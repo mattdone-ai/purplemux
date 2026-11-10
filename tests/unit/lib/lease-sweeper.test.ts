@@ -60,13 +60,13 @@ describe('lease death', () => {
     const { emitTabClosed } = await import('@/lib/tab-lifecycle');
     getLeaseSweeper();
     await acquireLease({ name: 'merge:x/y' }, tabA, authority);
-    await acquireLease({ name: 'num:nomupay/treasury-api:adr:0373', epic: 'p4' }, tabA, authority);
+    await acquireLease({ name: 'num:acme/acme-ledger-api:adr:0373', epic: 'p4' }, tabA, authority);
 
     emitTabClosed({ workspaceId: 'ws1', tabId: 'tab-a', sessionName: 's', reason: 'layout-removed' });
     await drainLeaseLocks();
     await drainLeaseLocks();
 
-    expect(await names()).toEqual(['num:nomupay/treasury-api:adr:0373']);
+    expect(await names()).toEqual(['num:acme/acme-ledger-api:adr:0373']);
     const audit = await readAudit(mockHome.value);
     expect(audit.filter((e) => e.reason === 'holder-tab-closed').map((e) => e.name)).toEqual(['merge:x/y']);
   });

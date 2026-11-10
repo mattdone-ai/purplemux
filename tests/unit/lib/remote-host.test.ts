@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mockHome = vi.hoisted(() => ({ value: '', hostname: 'mdserver1' }));
+const mockHome = vi.hoisted(() => ({ value: '', hostname: 'host-a' }));
 
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
@@ -15,7 +15,7 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
   beforeEach(async () => {
     vi.resetModules();
     mockHome.value = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-remote-host-'));
-    mockHome.hostname = 'mdserver1';
+    mockHome.hostname = 'host-a';
   });
 
   afterEach(async () => {
@@ -24,9 +24,9 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
 
   it('accepts ssh aliases and refuses anything ssh could read as an option or a shell could expand', async () => {
     const { isValidRemoteHostName, parseRemoteHosts } = await import('@/lib/remote-host');
-    for (const ok of ['ai-server', 'ai_server.tail', 'H1']) expect(isValidRemoteHostName(ok)).toBe(true);
+    for (const ok of ['host-b', 'ai_server.tail', 'H1']) expect(isValidRemoteHostName(ok)).toBe(true);
     for (const bad of ['-oProxyCommand=x', '', 'a b', 'a;b', '$(id)', 'a/b', 'x'.repeat(64), 7, null]) expect(isValidRemoteHostName(bad)).toBe(false);
-    expect(parseRemoteHosts(' ai-server, -bad ,ai-server,gpu2 ')).toEqual(['ai-server', 'gpu2']);
+    expect(parseRemoteHosts(' host-b, -bad ,host-b,gpu2 ')).toEqual(['host-b', 'gpu2']);
     expect(parseRemoteHosts(undefined)).toEqual([]);
   });
 
@@ -34,8 +34,8 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
     const { readRemoteHosts } = await import('@/lib/remote-host');
     expect(await readRemoteHosts()).toEqual([]);
     const { mutateFleetConfig, setValue } = await import('@/lib/fleet-config-store');
-    await mutateFleetConfig((state) => setValue(state, { key: 'remote.hosts', value: 'ai-server' }, { workspaceId: null, tabId: null, admin: true }, Date.now()));
-    expect(await readRemoteHosts()).toEqual(['ai-server']);
+    await mutateFleetConfig((state) => setValue(state, { key: 'remote.hosts', value: 'host-b' }, { workspaceId: null, tabId: null, admin: true }, Date.now()));
+    expect(await readRemoteHosts()).toEqual(['host-b']);
   });
 
   it('names the remote socket after this host, never purple', async () => {
@@ -47,11 +47,11 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
 
   it('builds a non-interactive, non-multiplexed ssh argv with the host after --', async () => {
     const { sshArgv } = await import('@/lib/remote-host');
-    const argv = sshArgv('ai-server', 'true');
-    expect(argv.slice(-3)).toEqual(['--', 'ai-server', 'true']);
+    const argv = sshArgv('host-b', 'true');
+    expect(argv.slice(-3)).toEqual(['--', 'host-b', 'true']);
     expect(argv).toEqual(expect.arrayContaining(['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ControlMaster=no', '-o', 'ControlPath=none']));
     expect(argv[0]).not.toBe('-tt');
-    expect(sshArgv('ai-server', 'x', { tty: true })[0]).toBe('-tt');
+    expect(sshArgv('host-b', 'x', { tty: true })[0]).toBe('-tt');
     expect(() => sshArgv('-oProxyCommand=sh', 'x')).toThrow(/invalid remote host/);
   });
 
@@ -76,8 +76,8 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
   it('tmux\'s absence is read from any stderr line: an ssh warning or shell start-up output before it changes nothing (review r2 nit 2)', async () => {
     const { isTmuxAbsence } = await import('@/lib/remote-host');
     const absent = (stderr: string) => isTmuxAbsence({ code: 1, stderr });
-    expect(absent("Warning: Permanently added 'ai-server' (ED25519) to the list of known hosts.\ncan't find session: x")).toBe(true);
-    expect(absent('welcome banner\nno server running on /tmp/tmux-1000/pmux-mdserver1\n')).toBe(true);
+    expect(absent("Warning: Permanently added 'host-b' (ED25519) to the list of known hosts.\ncan't find session: x")).toBe(true);
+    expect(absent('welcome banner\nno server running on /tmp/tmux-1000/pmux-host-a\n')).toBe(true);
     expect(absent('some other failure')).toBe(false);
     expect(isTmuxAbsence({ code: 255, stderr: "can't find session: x" })).toBe(false);
     expect(isTmuxAbsence({ code: 1, killed: true, stderr: "can't find session: x" })).toBe(false);
@@ -101,24 +101,24 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
     ['octal dotted for 127.0.0.1', 'http://0177.0.0.1:8022'],
     ['octal dotted for a tailnet-looking address', 'http://100.064.1.1:8022'],
     ['short dotted form', 'http://127.1:8022'],
-    ['a trailing dot on a ts.net name', 'http://mdserver1.tail1234.ts.net.:8022'],
+    ['a trailing dot on a ts.net name', 'http://host-a.example.ts.net.:8022'],
     ['ts.net as a label, not the suffix', 'http://ts.net.evil.com:8022'],
-    ['userinfo', 'http://user@100.94.44.114:8022'],
-    ['a path', 'http://100.94.44.114:8022/x'],
-    ['a query', 'http://100.94.44.114:8022?a=1'],
+    ['userinfo', 'http://user@100.64.0.114:8022'],
+    ['a path', 'http://100.64.0.114:8022/x'],
+    ['a query', 'http://100.64.0.114:8022?a=1'],
     ['an intranet-style bare name not on the allow-list', 'http://intranet:8022'],
     ['a public dotted address', 'http://8.8.8.8:8022'],
     ['an address outside 100.64.0.0/10', 'http://100.128.0.1:8022'],
     ['a public name', 'http://example.com:8022'],
-    ['not a URL', 'mdserver1:8022'],
+    ['not a URL', 'host-a:8022'],
   ])('refuses %s (review r4)', async (_label, url) => {
     const { callbackUrlRefusal } = await import('@/lib/remote-host');
-    expect(callbackUrlRefusal(url, ['mdserver1'])).not.toBeNull();
+    expect(callbackUrlRefusal(url, ['host-a'])).not.toBeNull();
   });
 
   it.each([
-    'http://localhost:18463', 'http://127.0.0.1:8022', 'http://[::1]:8022', 'http://100.94.44.114:8022',
-    'http://mdserver1.tail1234.ts.net:8022', 'https://pmux.example.com', 'https://pmux.example.com:8443/',
+    'http://localhost:18463', 'http://127.0.0.1:8022', 'http://[::1]:8022', 'http://100.64.0.114:8022',
+    'http://host-a.example.ts.net:8022', 'https://pmux.example.com', 'https://pmux.example.com:8443/',
   ])('accepts %s', async (url) => {
     const { callbackUrlRefusal } = await import('@/lib/remote-host');
     expect(callbackUrlRefusal(url)).toBeNull();
@@ -126,9 +126,9 @@ describe('remote host registry and ssh invocation (ADR-0022)', () => {
 
   it('a bare MagicDNS name passes over plain http only once it is on remote.callback-allow-hosts', async () => {
     const { callbackUrlRefusal, parseCallbackAllowHosts } = await import('@/lib/remote-host');
-    expect(callbackUrlRefusal('http://mdserver1:8022')).toMatch(/remote\.callback-allow-hosts/);
-    expect(callbackUrlRefusal('http://mdserver1:8022', parseCallbackAllowHosts(' mdserver1, 9bad ,x.y'))).toBeNull();
-    expect(callbackUrlRefusal('http://MDSERVER1:8022', ['mdserver1'])).toBeNull();
-    expect(parseCallbackAllowHosts('mdserver1,9bad,x.y,-a')).toEqual(['mdserver1']);
+    expect(callbackUrlRefusal('http://host-a:8022')).toMatch(/remote\.callback-allow-hosts/);
+    expect(callbackUrlRefusal('http://host-a:8022', parseCallbackAllowHosts(' host-a, 9bad ,x.y'))).toBeNull();
+    expect(callbackUrlRefusal('http://HOST-A:8022', ['host-a'])).toBeNull();
+    expect(parseCallbackAllowHosts('host-a,9bad,x.y,-a')).toEqual(['host-a']);
   });
 });

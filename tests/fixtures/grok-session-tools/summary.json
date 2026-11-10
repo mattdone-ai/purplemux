@@ -1,7 +1,7 @@
 {
   "info": {
     "id": "01a008c3-8e98-7220-a0d3-e0b36fa3aa99",
-    "cwd": "/tmp/claude-1000/-home-mdone-code-nomupay/fb558f7c-d3ab-4658-813c-774dc827c1e0/scratchpad/grok-tools"
+    "cwd": "/tmp/claude-1000/-home-user-code-acme/fb558f7c-d3ab-4658-813c-774dc827c1e0/scratchpad/grok-tools"
   },
   "session_summary": "Replace world with grok in note.txt",
   "created_at": "2026-08-16T04:10:28.899095051Z",
@@ -12,7 +12,7 @@
   "next_trace_turn": 1,
   "chat_format_version": 1,
   "request_id": "50ffac54-2e91-45ea-93be-72673dc84e41",
-  "grok_home": "/home/mdone/.grok",
+  "grok_home": "/home/user/.grok",
   "last_active_at": "2026-08-16T04:10:44.834353671Z",
   "generated_title": "Replace world with grok in note.txt",
   "agent_name": "grok-build-plan",

@@ -43,14 +43,14 @@ afterEach(async () => {
 
 describe('the standing-order fan-out refreshes the local prompt and each remote kit copy (D32)', () => {
   it('pushes the new local text once to each remote host of the workspace, and to no local tab', async () => {
-    state.tabs = [{ id: 'tab-1' }, { id: 'tab-2', host: 'ai-server' }, { id: 'tab-3', host: 'ai-server' }, { id: 'tab-4', host: 'gpu-1' }];
+    state.tabs = [{ id: 'tab-1' }, { id: 'tab-2', host: 'host-b' }, { id: 'tab-3', host: 'host-b' }, { id: 'tab-4', host: 'gpu-1' }];
     const { standingOrderDeps } = await import('@/lib/standing-orders-http');
     state.version = 'SO-9 struck';
     await standingOrderDeps().refreshPrompt('ws-r');
     expect(await fs.readFile(path.join(state.dir, 'ws-r', 'claude-prompt.md'), 'utf-8')).toBe('prompt of ws-r: SO-9 struck\n');
     expect(state.pushed).toEqual([
-      { host: 'ai-server', ws: 'ws-r', prompt: 'prompt of ws-r: SO-9 struck\n' },
       { host: 'gpu-1', ws: 'ws-r', prompt: 'prompt of ws-r: SO-9 struck\n' },
+      { host: 'host-b', ws: 'ws-r', prompt: 'prompt of ws-r: SO-9 struck\n' },
     ]);
   });
 

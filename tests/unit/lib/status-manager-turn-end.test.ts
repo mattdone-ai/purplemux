@@ -622,7 +622,7 @@ describe('stop classification (ADR-0018)', () => {
     });
 
     describe('D28: a reportsTo tab asks its reportsTo; one marker per end line; no question, no item', () => {
-      const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: /home/mdone/.local/share/v2-scope/HANDOFF-SO9-1103.md …';
+      const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: /home/user/.local/share/v2-scope/HANDOFF-SO9-1103.md …';
       const ROUTED = ' [no owner item: this tab reports to root, so its NEEDS-DECISION is answered by you, never sent to the owner (SO-6); answer it, or ask the owner on your own end line]';
 
       it('a tab with reportsTo: no owner item and no push; the nudge goes to its reportsTo whatever its reportOn', async () => {

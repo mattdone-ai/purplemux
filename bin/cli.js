@@ -3129,6 +3129,9 @@ const curatorStatusText = (body) => {
     process.stdout.write(`kodit before: ${rate(k.before)}\nkodit after: ${k.after ? rate(k.after) : `waits for 72 h live (from ${body.liveSince ? boardTime(body.liveSince + 72 * 3600000) : '—'})`}`
       + `${k.drop === null ? '' : ` · change ${(-k.drop * 100).toFixed(1)}%`}\n`);
   }
+  // An older server sends no koditCheck: print nothing rather than guess.
+  if (body.koditCheck && body.koditCheck.state === 'not-configured') process.stdout.write(`kodit check: NOT CONFIGURED: ${body.koditCheck.reason}\n`);
+  else if (body.koditCheck && body.koditCheck.state === 'configured') process.stdout.write(`kodit check: reads the log on ${body.koditCheck.host}\n`);
   for (const e of body.evals || []) process.stdout.write(`eval ${e.task}: ${e.running ? `running ${e.done}/${e.total}` : e.error ? `failed: ${e.error}` : 'finished'}\n`);
 };
 
@@ -3931,7 +3934,7 @@ Exit codes:
     error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
 
 Environment:
-  PMUX_URL           Server base URL, e.g. http://mdserver1:8022 (a remote tab's CLI; wins over PMUX_PORT)
+  PMUX_URL           Server base URL, e.g. http://myhost:8022 (a remote tab's CLI; wins over PMUX_PORT)
   PMUX_PORT          Server port (falls back to ~/.purplemux/port)
   PMUX_TAB_TOKEN     This tab's own token; names the calling tab (set in every tab created by the server)
   PMUX_TOKEN         This tab's workspace token (ignored while PMUX_TAB_TOKEN is set; unset that to override)

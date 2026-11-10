@@ -92,7 +92,7 @@ describe('standing orders: files, ids and the 8 KB budget (story 14 AC 1)', () =
       id: 'SO-8', text: 'Land WIP before new work.', source: 'owner message ws-a/abc, 2026-11-02T01:00Z',
       scope: 'ws-a', check: 'prose', state: 'active', added: '2026-11-03T10:00:00Z',
     });
-    const next = await addOrder('ws-b', { text: 'Use ai-server for gates.', source: 'owner message ws-b/def, 2026-11-02T02:00Z', scope: 'workers', check: 'tests/unit/x.test.ts' }, [], T0);
+    const next = await addOrder('ws-b', { text: 'Use host-b for gates.', source: 'owner message ws-b/def, 2026-11-02T02:00Z', scope: 'workers', check: 'tests/unit/x.test.ts' }, [], T0);
     expect(next.order).toMatchObject({ id: 'SO-9', scope: 'workers', check: 'tests/unit/x.test.ts' });
     const raw = await fs.readFile(orderFilePath('ws-a'), 'utf-8');
     expect(orderFilePath('ws-a')).toBe(path.join(mockHome.value, '.purplemux', 'workspaces', 'ws-a', 'standing-orders.md'));
@@ -280,11 +280,11 @@ describe('the workspace prompt file carries the active orders at every launch (s
     let prompt = await fs.readFile(getClaudePromptPath('ws-a'), 'utf-8');
     expect(prompt).toContain('## Standing orders');
     expect(prompt).toContain('- **SO-4** (fleet; check: prose) Reversible work needs no approval. Dev and QA are not production.');
-    await addOrder('ws-a', { text: 'Use ai-server for every gate.', source: 's' }, [], T0);
+    await addOrder('ws-a', { text: 'Use host-b for every gate.', source: 's' }, [], T0);
     await strikeOrder('SO-4', 'test', () => {}, T0);
     await buildClaudeFlags('ws-a');
     prompt = await fs.readFile(getClaudePromptPath('ws-a'), 'utf-8');
-    expect(prompt).toContain('- **SO-8** (ws-a; check: prose) Use ai-server for every gate.');
+    expect(prompt).toContain('- **SO-8** (ws-a; check: prose) Use host-b for every gate.');
     expect(prompt).not.toContain('SO-4');
     expect(prompt.indexOf('## Standing orders')).toBeGreaterThan(prompt.indexOf('### Tab type notes'));
   });
@@ -365,7 +365,7 @@ describe('D32: a struck order leaves every prompt it reached, and the section na
     for (const ws of ['ws-a', 'ws-b']) expect(await fs.readFile(getClaudePromptPath(ws), 'utf-8')).toContain('- **SO-7** (fleet');
     const pushed: Array<{ host: string; ws: string; prompt: string }> = [];
     const f = new Fanout();
-    const rdeps = refreshDeps(pushed, { 'ws-b': ['ai-server', 'mdserver1', 'ai-server'] });
+    const rdeps = refreshDeps(pushed, { 'ws-b': ['host-b', 'host-a', 'host-b'] });
     const result = await strikeStandingOrder({ ...f.deps(), refreshPrompt: (ws) => refreshWorkspacePrompt(ws, rdeps) }, ADMIN, 'SO-7', 'replaced');
     expect(result).toMatchObject({ promptsWritten: 2, tabsNotified: 3 });
     for (const ws of ['ws-a', 'ws-b']) {
@@ -374,7 +374,7 @@ describe('D32: a struck order leaves every prompt it reached, and the section na
       expect(prompt).toContain('- **SO-6** (fleet');
     }
     // Each host once, with the text of the local file: a new launch there loads the order list as it is now.
-    expect(pushed.map((p) => `${p.host}:${p.ws}`)).toEqual(['ai-server:ws-b', 'mdserver1:ws-b']);
+    expect(pushed.map((p) => `${p.host}:${p.ws}`)).toEqual(['host-a:ws-b', 'host-b:ws-b']);
     const local = await fs.readFile(getClaudePromptPath('ws-b'), 'utf-8');
     expect(pushed.every((p) => p.prompt === local)).toBe(true);
   });
@@ -384,9 +384,9 @@ describe('D32: a struck order leaves every prompt it reached, and the section na
     const { refreshWorkspacePrompt } = await import('@/lib/workspace-prompt-refresh');
     const { getClaudePromptPath } = await import('@/lib/claude-prompt');
     const pushed: Array<{ host: string; ws: string; prompt: string }> = [];
-    const rdeps = refreshDeps(pushed, { 'ws-a': ['ai-server', 'ai-2'] }, 'ai-server');
+    const rdeps = refreshDeps(pushed, { 'ws-a': ['host-b', 'ai-2'] }, 'host-b');
     await expect(refreshWorkspacePrompt('ws-a', rdeps)).rejects.toThrow(
-      'the local prompt file of ws-a is written; the remote copy is not, on 1 of 2 hosts: ai-server: ssh: connect to host timed out');
+      'the local prompt file of ws-a is written; the remote copy is not, on 1 of 2 hosts: host-b: ssh: connect to host timed out');
     expect(pushed.map((p) => p.host)).toEqual(['ai-2']);
     const f = new Fanout();
     const result = await strikeStandingOrder({ ...f.deps(), refreshPrompt: (ws) => refreshWorkspacePrompt(ws, rdeps) }, ADMIN, 'SO-3', 'test');

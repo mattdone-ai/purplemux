@@ -1,7 +1,7 @@
                                                                                                                                                                                                                                                        
-[38;5;231m●[39m I've recorded decision (a) in [38;5;153mstatus.yaml[39m: treasury-engineering#413 keeps its entries unchanged, merges after producer#437 and liquidityhub#142, and fixes TE main when it lands.                                                                      
+[38;5;231m●[39m I've recorded decision (a) in [38;5;153mstatus.yaml[39m: acme-ledger-engineering#413 keeps its entries unchanged, merges after producer#437 and liquidityhub#142, and fixes TE main when it lands.                                                                      
                                                                                                                                                                                                                                 
-  BLOCKED: treasury-event-producer#437, treasury-liquidityhub#142, treasury-engineering#413 — needs GitHub Actions billing restored, then the re-runs listed in my previous report                                                                       
+  BLOCKED: acme-ledger-event-producer#437, acme-ledger-liquidityhub#142, acme-ledger-engineering#413 — needs GitHub Actions billing restored, then the re-runs listed in my previous report                                                                       
 
 [38;5;246m✻[39m [38;5;246mBrewed for 7s · done 8:47 AM[39m                                                                                                                                                                                                                         
 

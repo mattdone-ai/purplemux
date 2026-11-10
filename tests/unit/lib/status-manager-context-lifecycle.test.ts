@@ -161,8 +161,8 @@ describe('the context lifecycle in the StatusManager (ADR-0036)', () => {
   });
 
   it.each([
-    ['answers 503 remote-host-unreachable', () => restart.restartTab.mockResolvedValueOnce({ status: 503, body: { code: 'remote-host-unreachable', error: 'remote host ai-server did not answer over ssh (exit 255)' } })],
-    ['throws RemoteKitBrokenError', () => restart.restartTab.mockRejectedValueOnce(Object.assign(new Error('the CLI kit does not run on ai-server'), { name: 'RemoteKitBrokenError' }))],
+    ['answers 503 remote-host-unreachable', () => restart.restartTab.mockResolvedValueOnce({ status: 503, body: { code: 'remote-host-unreachable', error: 'remote host host-b did not answer over ssh (exit 255)' } })],
+    ['throws RemoteKitBrokenError', () => restart.restartTab.mockRejectedValueOnce(Object.assign(new Error('the CLI kit does not run on host-b'), { name: 'RemoteKitBrokenError' }))],
   ])('review r1 F2: the restart %s: a wait, no failed check; the next pass clears', async (_label, refuse) => {
     const { manager, typed, seat, handoffPath, transcript, seatItem, store } = await setup();
     refuse();

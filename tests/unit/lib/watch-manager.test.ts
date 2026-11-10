@@ -53,7 +53,7 @@ class Fakes {
       ssoToken: async () => ({ state: 'absent' }),
       ssoProfile: async () => null,
       tabHost: async () => ({ known: true, host: null }),
-      hostName: () => 'mdserver1',
+      hostName: () => 'host-a',
       liveTabs: async () => ({
         tabs: [...this.live].map((k) => ({ workspaceId: k.split('/')[0], tabId: k.split('/')[1] })),
         uncertainWorkspaceIds: new Set(this.uncertain),
@@ -95,13 +95,13 @@ describe('harness watches (ADR-0015)', () => {
   };
 
   it('records how the owner was named beside verified (story 36)', async () => {
-    const hook = await m.create({ ...B, verified: false, identity: 'hook' } as ICaller, { kind: 'lease', target: 'merge:nomupay/x', until: 'free' });
+    const hook = await m.create({ ...B, verified: false, identity: 'hook' } as ICaller, { kind: 'lease', target: 'merge:acme/x', until: 'free' });
     expect(hook).toMatchObject({ verified: false, identity: 'hook' });
   });
 
   it('merged false then true: exactly one notice reaches the owner tab and the watch is gone', async () => {
     f.answer('/pulls/517', f.pull(false, 'open', SHA_A), f.pull(false, 'open', SHA_A), f.pull(true, 'closed', SHA_A));
-    const w = await m.create(B, { kind: 'pr', target: 'NomuPay/treasury-ui#517', until: 'merged' });
+    const w = await m.create(B, { kind: 'pr', target: 'Acme/acme-ledger-ui#517', until: 'merged' });
     expect(w).toMatchObject({ baseline: SHA_A, workspaceId: 'ws-b', tabId: 'tab-b', intervalS: 120, verified: true, lastCheckedAt: T0 });
     await m.tick();
     await tickAt(1); // the baseline read at creation was the first check: nothing due yet
@@ -111,7 +111,7 @@ describe('harness watches (ADR-0015)', () => {
     expect(f.ghCalls).toHaveLength(2);
     await tickAt(2);
     expect(f.sent.map((s) => [s.targetWorkspaceId, s.targetTabId, s.line])).toEqual([
-      ['ws-b', 'tab-b', `[purplemux watch ${w.id}] NomuPay/treasury-ui#517 is MERGED (aaaaaaaa) — watch cleared`],
+      ['ws-b', 'tab-b', `[purplemux watch ${w.id}] Acme/acme-ledger-ui#517 is MERGED (aaaaaaaa) — watch cleared`],
     ]);
     expect(f.state.watches).toEqual([]);
     await tickAt(5);

@@ -143,7 +143,7 @@ const checkCuratorValue = (key: string, value: string): void => {
     const bad = text.split(',').map((pair) => pair.trim()).filter((pair) => pair && !/^ws-[A-Za-z0-9_-]+=\S(?:.*\S)?$/.test(pair));
     if (bad.length) {
       throw new FleetConfigError('config-invalid', `${key} takes ws-...=<tab name> pairs, comma-separated, or none: ${bad.join(', ')}. `
-        + 'A value replaces the default ws-ldhziO=v2-scrum-master: keep that pair in it, or treasury-v2 files SO-n');
+        + 'A value replaces the default ws-ldhziO=v2-scrum-master: keep that pair in it, or acme-ledger-v2 files SO-n');
     }
     return;
   }

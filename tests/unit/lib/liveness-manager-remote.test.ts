@@ -31,7 +31,7 @@ vi.mock('@/lib/liveness-store', () => ({
   removeTabEntries: vi.fn(async () => {}),
 }));
 
-const REMOTE = 'ai-lan';
+const REMOTE = 'host-b-lan';
 
 const job = (overrides: Partial<IBackgroundJob> = {}): IBackgroundJob => ({
   workspaceId: 'ws-1',
@@ -70,7 +70,7 @@ const harness = (opts: { probe?: TProbe; resolveJobHost?: ILivenessManagerDeps['
   };
 };
 
-const fail: TProbe = async () => { throw new Error('ssh to ai-lan failed (exit 255)'); };
+const fail: TProbe = async () => { throw new Error('ssh to host-b-lan failed (exit 255)'); };
 
 describe('remote background jobs are judged on their own host (D63)', () => {
   it('remote alive: alive on its host though this server has no such pid, and never read from this host', async () => {
@@ -384,7 +384,7 @@ describe('parseRemoteJobProbe: only one complete frame with this nonce is a repl
   const frame = (body: string[], n = body.length, nonce = 'n1') => [`begin\t${nonce}`, ...body, `end\t${nonce}\t${n}`].join('\n');
 
   it('ignores a login banner outside the frame', () => {
-    expect(parseRemoteJobProbe(`Welcome to ai-server\n${frame(['0\talive', '1\texited\tbMAo=\t-'])}\nbye\n`, 'n1', 2)).toEqual({
+    expect(parseRemoteJobProbe(`Welcome to host-b\n${frame(['0\talive', '1\texited\tbMAo=\t-'])}\nbye\n`, 'n1', 2)).toEqual({
       ok: true,
       readings: [alive, exited('0\n', null)],
     });

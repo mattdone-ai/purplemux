@@ -97,7 +97,7 @@ then the selected workspace token on disk for an unscoped shell.
 Watch progress any time:
 
 ```bash
-watch -n 5 ~/code/ai-server/orchestration/pmux-board.sh -w WS_ID
+watch -n 5 orchestration/pmux-board.sh -w WS_ID
 ```
 
 ## Orchestrator kickoff prompt template

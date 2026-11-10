@@ -87,7 +87,7 @@ export const buildRemoteClaudeCommand = (opts: {
  * per file: a temporary in the same directory, then one rename, every other key kept. A remote tab has no claude
  * home of its own (ADR-0022), so its Claude reads `~/.claude.json` and `~/.claude/settings.json` there. Python, not
  * node: `ssh … sh -s` reads no login profile, and on the pool hosts `node` is on PATH only in a login shell
- * (measured on mdserver1).
+ * (measured on host-a).
  *
  * `trust-seed.py [--first-run] [--bypass-permissions] [--named] <cwd> [<workspace directory>...]`
  *
@@ -416,7 +416,7 @@ const CLI_MODULE = /^bin\/[A-Za-z0-9._-]+\.(?:c?js|json)$/;
 /**
  * The probe's own budget on the host, in seconds (story 12 review r1): inside the create's 10 s ssh deadline after a
  * 5 s `ConnectTimeout`, so a slow login shell reads as a kit verdict, never as a host that did not answer. Measured
- * 2026-11-05: the whole probe takes 0.35-0.37 s on ai-server at load 12.6.
+ * 2026-11-05: the whole probe takes 0.35-0.37 s on host-b at load 12.6.
  */
 export const REMOTE_KIT_PROBE_BUDGET_S = 4;
 

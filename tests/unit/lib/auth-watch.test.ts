@@ -155,7 +155,7 @@ class Harness {
       },
       ssoProfile: (profile) => findSsoProfile(profile),
       tabHost: async () => this.host,
-      hostName: () => 'mdserver1',
+      hostName: () => 'host-a',
       liveTabs: async () => ({ tabs: [{ workspaceId: 'ws-a', tabId: 'tab-a' }], uncertainWorkspaceIds: new Set() }),
       enqueue: async (req) => {
         this.sent.push({ ...req, line: renderInboxLine('watch', req.fields).line });
@@ -246,10 +246,10 @@ describe('watch kind auth (story 14 AC 5)', () => {
 
   it('refuses an auth wait from a remote tab, naming both hosts: its sign-in is not on this server', async () => {
     const h = new Harness();
-    h.host = { known: true, host: 'ai-server' };
+    h.host = { known: true, host: 'host-b' };
     const manager = new WatchManager(h.deps());
     await expect(manager.create(caller('ws-a', 'tab-a'), { kind: 'auth', target: 'dev', until: 'signed-in' }))
-      .rejects.toThrow("an auth watch reads the SSO cache of this server's host (mdserver1); tab tab-a runs on ai-server, whose sign-in it cannot see");
+      .rejects.toThrow("an auth watch reads the SSO cache of this server's host (host-a); tab tab-a runs on host-b, whose sign-in it cannot see");
     expect(h.state.watches).toEqual([]);
   });
 

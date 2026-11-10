@@ -92,7 +92,7 @@ const world = (): IWorld => ({
   restartRefusals: 0, restartBusy: false,
 });
 
-const SEAT: ISeatTab = { workspaceId: 'ws-a', tabId: 'tab-kit', tabName: 'kit', handoffPath: PATH, rotateAt: null, host: 'ai-server' };
+const SEAT: ISeatTab = { workspaceId: 'ws-a', tabId: 'tab-kit', tabName: 'kit', handoffPath: PATH, rotateAt: null, host: 'host-b' };
 
 /** One server process over the world; a start takes a moment, so its ledger event ids never meet the last one's. */
 const server = (w: IWorld, overrides: Partial<IContextLifecycleDeps> = {}): ContextLifecycle => {
@@ -114,17 +114,17 @@ const lifecycle = (w: IWorld, overrides: Partial<IContextLifecycleDeps>): Contex
     return true;
   },
   readHandoff: async (file) => {
-    if (w.hostDown) throw new SeatHostUnreachable('remote host ai-server did not answer over ssh (timed out)');
+    if (w.hostDown) throw new SeatHostUnreachable('remote host host-b did not answer over ssh (timed out)');
     const text = w.files.get(file);
     if (text === undefined) throw new Error('ENOENT');
     return text;
   },
   gitFacts: async (_seat, expectedHead) => {
-    if (w.hostDown) throw new SeatHostUnreachable('remote host ai-server did not answer over ssh (timed out)');
+    if (w.hostDown) throw new SeatHostUnreachable('remote host host-b did not answer over ssh (timed out)');
     return { ...w.facts, ...(expectedHead ? { containsExpected: w.facts.head === expectedHead } : {}) };
   },
   placeCheckpoint: async (_seat, checkpoint, restore) => {
-    if (w.hostDown) throw new SeatHostUnreachable('remote host ai-server did not answer over ssh (timed out)');
+    if (w.hostDown) throw new SeatHostUnreachable('remote host host-b did not answer over ssh (timed out)');
     w.placed += 1;
     if (restore && w.files.get(checkpoint.handoffPath) !== checkpoint.handoffText) {
       w.files.set(checkpoint.handoffPath, checkpoint.handoffText);
@@ -152,7 +152,7 @@ const lifecycle = (w: IWorld, overrides: Partial<IContextLifecycleDeps>): Contex
     if (w.restartBusy) return restartRefusalOutcome('tab-busy', 'the tab is mid-turn; restart it with --interrupt to abandon the turn');
     if (w.restartHostDown) {
       w.restartRefusals += 1;
-      return restartRefusalOutcome('remote-host-unreachable', 'remote host ai-server did not answer over ssh (exit 255)');
+      return restartRefusalOutcome('remote-host-unreachable', 'remote host host-b did not answer over ssh (exit 255)');
     }
     w.clears += 1;
     w.session = null;
@@ -210,7 +210,7 @@ describe('a durable checkpoint gates the clear (AC1)', () => {
     await request(w, life);
     await handoffReady(w, life, POINTS[2]);
     expect(w.clears).toBe(1);
-    expect(latest(w)).toMatchObject({ status: 'cleared', checkpoint: { id: `${TASK}#1`, attempt: 1, host: 'ai-server', facts: FACTS, sessionBefore: 'sess-1' } });
+    expect(latest(w)).toMatchObject({ status: 'cleared', checkpoint: { id: `${TASK}#1`, attempt: 1, host: 'host-b', facts: FACTS, sessionBefore: 'sess-1' } });
     expect(seatItem(w)).toMatchObject({ state: 'rotating', attrs: { checkpointId: `${TASK}#1` } });
     await freshSession(life, w);
     expect(w.typed).toHaveLength(1);
@@ -265,7 +265,7 @@ describe('a durable checkpoint gates the clear (AC1)', () => {
     await request(w, life);
     await handoffReady(w, life, POINTS[0]);
     expect(w.clears).toBe(0);
-    expect(life.view(SEAT.tabId)?.checkpointRefused).toBe('the git facts could not be read on ai-server: sh: git: not found');
+    expect(life.view(SEAT.tabId)?.checkpointRefused).toBe('the git facts could not be read on host-b: sh: git: not found');
   });
 
   it('a seat item (telemetry) that cannot be written never stops the rotation', async () => {
@@ -575,7 +575,7 @@ describe('review r1: the restart hop and the gap after the checkpoint (F2, F4, F
     let readable = false;
     const life = server(w, {
       readHandoff: async (file) => {
-        if (!readable) throw new SeatHostUnreachable('remote host ai-server did not answer over ssh (timed out)');
+        if (!readable) throw new SeatHostUnreachable('remote host host-b did not answer over ssh (timed out)');
         return w.files.get(file) ?? '';
       },
     });
@@ -623,7 +623,7 @@ describe('a remote seat (AC3)', () => {
     expect(w.clears).toBe(0);
     expect(w.rotates).toHaveLength(1);
     expect(life.view(SEAT.tabId)).toMatchObject({ phase: 'handoff-ready', failures: 0, handoffRefusals: 0, pendingMessage: null });
-    expect(life.view(SEAT.tabId)?.checkpointRefused).toContain('the handoff file could not be read: remote host ai-server did not answer');
+    expect(life.view(SEAT.tabId)?.checkpointRefused).toContain('the handoff file could not be read: remote host host-b did not answer');
     w.hostDown = false;
     await life.advance(SEAT.tabId);
     expect(w.clears).toBe(1);

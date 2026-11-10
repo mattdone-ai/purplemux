@@ -25,7 +25,7 @@ vi.mock('@/lib/tmux', () => ({
   exitCopyMode: vi.fn(async () => {}),
   sessionPresence: fx.presence,
 }));
-vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (s === REMOTE ? 'ai-server' : null) }));
+vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (s === REMOTE ? 'host-b' : null) }));
 vi.mock('@/lib/layout-store', () => ({ reconcileTabCwd: fx.reconcile }));
 vi.mock('@/lib/agent-prompt-delivery', () => ({ sessionUsesTypedDelivery: async () => false }));
 vi.mock('@/lib/terminal-input', () => ({ withRecordedTerminalInput: async (_s: string, _d: string, work: () => Promise<void>) => work() }));

@@ -10,7 +10,7 @@ import type { IHostSignalsValue, THostSignals } from '@/types/coordination';
 // in ~/.purplemux/config.json, run every 5 minutes with a 10 s timeout and
 // validated against the schema pinned in architecture.md ("Host-signal JSON").
 // A failing command shows its error, never zeros; a result older than 15
-// minutes is marked stale. Story 21 writes the NomuPay script that fills it.
+// minutes is marked stale. Story 21 writes the Acme script that fills it.
 
 const log = createLogger('host-signals');
 

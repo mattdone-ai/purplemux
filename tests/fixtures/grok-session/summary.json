@@ -1,7 +1,7 @@
 {
   "info": {
     "id": "01a008c1-bb96-71d1-9769-b63ff478fd9f",
-    "cwd": "/tmp/claude-1000/-home-mdone-code-nomupay/0480f3a9-744f-4a31-8579-83ce2fb58dac/scratchpad/grok-probe"
+    "cwd": "/tmp/claude-1000/-home-user-code-acme/0480f3a9-744f-4a31-8579-83ce2fb58dac/scratchpad/grok-probe"
   },
   "session_summary": "",
   "created_at": "2026-08-16T04:08:29.342399252Z",
@@ -12,7 +12,7 @@
   "next_trace_turn": 1,
   "chat_format_version": 1,
   "request_id": "d2dbec27-45d2-4b28-aecf-9ba0d58cac74",
-  "grok_home": "/home/mdone/.grok",
+  "grok_home": "/home/user/.grok",
   "last_active_at": "2026-08-16T04:08:32.093890659Z",
   "agent_name": "grok-build-plan",
   "sandbox_profile": "off",

@@ -48,10 +48,10 @@ afterEach(() => { fs.rmSync(fixture.home, { recursive: true, force: true }); });
 
 describe('guarded orchestration revision and recovery', () => {
   it('a remote tab is never designated coordinator, before any runtime proof is asked (ADR-0022)', async () => {
-    layout([tab('tab-old'), { ...tab('tab-next'), host: 'ai-server' }]);
+    layout([tab('tab-old'), { ...tab('tab-next'), host: 'host-b' }]);
     const { changeOrchestration } = await load();
     await expect(changeOrchestration('ws-a', { enabled: true, orchestratorTabId: 'tab-next' }, options()))
-      .rejects.toMatchObject({ code: 'orchestrator-candidate-invalid', message: expect.stringContaining('remote host ai-server') });
+      .rejects.toMatchObject({ code: 'orchestrator-candidate-invalid', message: expect.stringContaining('remote host host-b') });
     expect(fixture.runtime.mock.calls.map((c) => (c[0] as ITab).id)).not.toContain('tab-next');
   });
 

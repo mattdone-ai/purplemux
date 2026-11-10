@@ -1,18 +1,21 @@
-# The curator tunnel (ADR-0038 §1): purplemux on mdserver1 reaches ai-server's Ollama, which listens on
-# 127.0.0.1:11434 only, through 127.0.0.1:11435 over the LAN alias. No compose change, no tailnet port.
-# Install: scripts/curator/install-tunnel.sh (prints its own undo command).
+# The curator tunnel (ADR-0038 §1): purplemux on the control host reaches the Ollama on the GPU host, which listens on
+# 127.0.0.1:11434 only, through 127.0.0.1:11435 over that host's ssh alias. No compose change, no tailnet port.
+# The alias is CURATOR_TUNNEL_HOST in ~/.config/purplemux/curator-tunnel.env (one line: CURATOR_TUNNEL_HOST=<ssh alias>).
+# Install: scripts/curator/install-tunnel.sh (refuses without that file; prints its own undo command).
 [Unit]
-Description=purplemux curator tunnel 127.0.0.1:11435 -> ai-lan 127.0.0.1:11434 (ADR-0038)
+Description=purplemux curator tunnel 127.0.0.1:11435 -> the GPU host 127.0.0.1:11434 (ADR-0038)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# No '-' prefix: a missing env file fails the start rather than an ssh with no host.
+EnvironmentFile=%h/.config/purplemux/curator-tunnel.env
 # ControlMaster=no: the tunnel owns its connection, so a shared master closing never takes the forward with it.
 # ExitOnForwardFailure: a port already bound exits non-zero, and systemd retries, rather than an ssh with no forward.
-ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none -o LogLevel=INFO -L 127.0.0.1:11435:127.0.0.1:11434 ai-lan
-# Checks the LOCAL listener only (ssh accepts on 127.0.0.1:11435 before it reaches ai-lan); purplemux's /api/tags probe
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none -o LogLevel=INFO -L 127.0.0.1:11435:127.0.0.1:11434 ${CURATOR_TUNNEL_HOST}
+# Checks the LOCAL listener only (ssh accepts on 127.0.0.1:11435 before it reaches the far host); purplemux's /api/tags probe
 # checks the far end. Never fails the start, so systemd's own restart decides.
 ExecStartPost=/bin/bash -c 'for i in $(seq 1 20); do if (exec 3<>/dev/tcp/127.0.0.1/11435) 2>/dev/null; then echo "curator tunnel: local listener 127.0.0.1:11435 accepts connections (ssh pid $MAINPID); the far end is checked by the purplemux probe"; exit 0; fi; sleep 0.5; done; echo "curator tunnel: local listener 127.0.0.1:11435 not accepting 10 s after ssh pid $MAINPID started"'
 ExecStopPost=/bin/sh -c 'echo "curator tunnel: ssh stopped (result=$SERVICE_RESULT code=$EXIT_CODE status=$EXIT_STATUS)"'

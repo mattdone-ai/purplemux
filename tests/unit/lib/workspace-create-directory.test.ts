@@ -116,17 +116,17 @@ describe('createWorkspace name uniqueness and extra directories (CLI create, ADR
   it('refuses a name another workspace holds, ignoring case and outer spaces, before any session starts', async () => {
     const { createWorkspace } = await importStore();
     const { createDefaultLayout } = await import('@/lib/layout-store');
-    const first = await createWorkspace(mockHome.value, 'Treasury v2', undefined, { uniqueName: true });
+    const first = await createWorkspace(mockHome.value, 'Acme-ledger v2', undefined, { uniqueName: true });
     vi.mocked(createDefaultLayout).mockClear();
 
-    const err = await createWorkspace(mockHome.value, '  treasury V2 ', undefined, { uniqueName: true }).catch((e: unknown) => e);
+    const err = await createWorkspace(mockHome.value, '  acme-ledger V2 ', undefined, { uniqueName: true }).catch((e: unknown) => e);
 
     const { isWorkspaceNameTakenError } = await importStore();
     expect(isWorkspaceNameTakenError(err)).toBe(true);
-    expect((err as Error).message).toBe(`a workspace named "Treasury v2" already exists (${first.id})`);
+    expect((err as Error).message).toBe(`a workspace named "Acme-ledger v2" already exists (${first.id})`);
     expect(createDefaultLayout).not.toHaveBeenCalled();
     const stored = JSON.parse(await fs.readFile(path.join(mockHome.value, '.purplemux', 'workspaces.json'), 'utf-8'));
-    expect(stored.workspaces.map((w: { name: string }) => w.name)).toEqual(['Treasury v2']);
+    expect(stored.workspaces.map((w: { name: string }) => w.name)).toEqual(['Acme-ledger v2']);
   });
 
   it('lets exactly one of two concurrent creates of the same name through', async () => {

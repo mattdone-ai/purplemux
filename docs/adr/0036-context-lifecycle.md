@@ -142,7 +142,7 @@ Option 2.
 7. **Paths** (convention, not enforced): v2 `.v2/seats/<seat>/handoff.md`; other workspaces
    `~/.purplemux/workspaces/<ws>/seats/<tab-name>/handoff.md`.
 
-9. **Durable checkpoint (vel-D5, `docs/design/vel-d5-durable-rotation.md`).** A passing check is not enough to
+9. **Durable checkpoint (vel-D5, an internal design record).** A passing check is not enough to
    clear a session. The server probes git on the tab's host (worktree, branch, head, base ref and merge base, dirty
    count) and writes a checkpoint to `rotation_checkpoints` in `ledger.sqlite`. The checkpoint holds those facts and
    the handoff's own fields (resume command, in-flight rows, open decision ids, `Do not`, standing-rule sources,

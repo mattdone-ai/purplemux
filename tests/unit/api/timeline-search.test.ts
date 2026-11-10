@@ -544,7 +544,7 @@ describe('search helpers', () => {
 
 /**
  * The corpus this bound was written for is hundreds of sessions and hundreds of
- * megabytes on ai-server. `PMUX_SEARCH_PERF_MB` shrinks it for a quick local
+ * megabytes on host-b. `PMUX_SEARCH_PERF_MB` shrinks it for a quick local
  * run; the committed default is the size the acceptance criterion names.
  */
 const PERF_CORPUS_MB = Number(process.env.PMUX_SEARCH_PERF_MB ?? 200);

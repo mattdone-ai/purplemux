@@ -133,7 +133,7 @@ describe('the per-workspace cap (story 17 AC 8)', () => {
 });
 
 describe('the count and the admission', () => {
-  const tabs = [tab('a', 'claude-code'), tab('b', 'codex-cli'), tab('c', 'grok-cli', 'ai-server'), tab('d', 'terminal'),
+  const tabs = [tab('a', 'claude-code'), tab('b', 'codex-cli'), tab('c', 'grok-cli', 'host-b'), tab('d', 'terminal'),
     tab('e', 'web-browser'), tab('f', 'diff'), tab('g', 'agent-sessions'), tab('h')];
 
   it('counts agent tabs in every pane, local and remote, and nothing else', () => {

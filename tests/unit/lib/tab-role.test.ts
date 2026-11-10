@@ -58,7 +58,7 @@ describe('checkTabRole (ADR-0040)', () => {
   it('accepts a plain host on another port than this server; refuses a bracketed IPv6 host, naming the MCP limit', () => {
     const ipv6 = checkTabRole('evaluator', undefined, undefined, 'http://[::1]:3100/');
     expect(ipv6).toMatchObject({ ok: false, body: { code: 'invalid-request', error: expect.stringMatching(/IPv6.*chrome-devtools-mcp 1\.12\.0 cannot compile.*URL pattern.*use a hostname/) } });
-    expect(checkTabRole('evaluator', undefined, undefined, 'http://preview-1.ai-server.ts.net:9000')).toMatchObject({ ok: true, previewOrigin: 'http://preview-1.ai-server.ts.net:9000' });
+    expect(checkTabRole('evaluator', undefined, undefined, 'http://preview-1.host-b.ts.net:9000')).toMatchObject({ ok: true, previewOrigin: 'http://preview-1.host-b.ts.net:9000' });
     const saved = process.env.PORT;
     process.env.PORT = '18555';
     try {
@@ -100,7 +100,7 @@ describe('checkTabRole (ADR-0040)', () => {
   it('refuses an unknown role, another engine, a remote host, a missing or non-http preview, and a preview without the role', () => {
     const cases: Array<[unknown, TPanelType | undefined, unknown, unknown]> = [
       ['reviewer', undefined, undefined, ORIGIN], ['evaluator', 'codex-cli', undefined, ORIGIN], ['evaluator', 'terminal', undefined, ORIGIN],
-      ['evaluator', 'claude-code', 'ai-server', ORIGIN], ['evaluator', undefined, undefined, undefined], ['evaluator', undefined, undefined, 'file:///etc/passwd'],
+      ['evaluator', 'claude-code', 'host-b', ORIGIN], ['evaluator', undefined, undefined, undefined], ['evaluator', undefined, undefined, 'file:///etc/passwd'],
       ['evaluator', undefined, undefined, 'http://user:pw@localhost:3100'], ['evaluator', undefined, undefined, 'not a url'], [undefined, undefined, undefined, ORIGIN],
     ];
     for (const preview of ['http://*:8022', 'http://(x):9000', 'http://a+b:9000', 'http://localhost:8022', 'http://127.0.0.1:8022/x']) {
@@ -180,8 +180,8 @@ describe('the evaluator launch (AC 1)', () => {
   });
 
   it('never launches an evaluator through the remote kit', async () => {
-    await expect(buildFreshLaunchCommand('ws-1', { panelType: 'claude-code', host: 'ai-server', ...EVALUATOR }))
-      .rejects.toThrow(/cannot run on remote host ai-server/);
+    await expect(buildFreshLaunchCommand('ws-1', { panelType: 'claude-code', host: 'host-b', ...EVALUATOR }))
+      .rejects.toThrow(/cannot run on remote host host-b/);
   });
 });
 

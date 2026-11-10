@@ -21,7 +21,7 @@ The api-guide (`purplemux api-guide`, section "Web-browser tabs") holds the full
 
 Every route reads the browser bridge. Only the Electron main process makes it: `electron/browser-bridge.ts:322` sets
 `globalThis.__ptBrowserBridge`. A server that runs without Electron has no bridge. Examples are `pnpm start`,
-`purplemux start` and the live service on mdserver1.
+`purplemux start` and the live service on host-a.
 
 For a `web-browser` tab, every route answers 503 `Browser bridge unavailable (Electron-only feature)` on a headless
 server. A retry does not help: no bridge appears until the Electron app runs the server.

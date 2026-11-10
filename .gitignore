@@ -57,3 +57,6 @@ next-env.d.ts
 # Runtime log directory the server logger creates; test runs produce it too,
 # so without this a clean checkout is dirty the moment `pnpm test` is run.
 .purplemux/
+
+# internal records kept out of the public repo (vel-PMX-PUBLIC)
+docs-local/

@@ -34,7 +34,7 @@ export const MAX_SCAN_HITS = 1000;
 
 /**
  * Work budget for one scan, in bytes-read-equivalent, so a query stays inside
- * the latency budget on a corpus that has outgrown it. Measured on ai-server
+ * the latency budget on a corpus that has outgrown it. Measured on host-b
  * (2.2 GB of transcripts): reading runs at ~210 MB/s and parsing at ~55 MB/s,
  * so a parsed session is charged `PARSE_COST_FACTOR` times its size and a
  * session already in the text cache is charged nothing. A scan that stops on

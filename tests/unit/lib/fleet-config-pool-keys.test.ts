@@ -26,14 +26,14 @@ afterEach(() => {
 
 describe('pool fleet keys', () => {
   it.each([
-    ['pool.slots.ai-lan.gate', '6'],
-    ['pool.slots.mdserver1.build', '0'],
-    ['pool.slots.ai-lan.test-service', '4'],
-    ['pool.budget.ai-lan.threads', '64'],
-    ['pool.budget.mdserver1.mem-gb', '91'],
-    ['pool.budget.mdserver1.reserve-threads', '8'],
-    ['pool.budget.mdserver1.reserve-mem-gb', '14.5'],
-    ['pool.budget.ai-lan.max-load', '80'],
+    ['pool.slots.host-b-lan.gate', '6'],
+    ['pool.slots.host-a.build', '0'],
+    ['pool.slots.host-b-lan.test-service', '4'],
+    ['pool.budget.host-b-lan.threads', '64'],
+    ['pool.budget.host-a.mem-gb', '91'],
+    ['pool.budget.host-a.reserve-threads', '8'],
+    ['pool.budget.host-a.reserve-mem-gb', '14.5'],
+    ['pool.budget.host-b-lan.max-load', '80'],
     ['pool.envelope.mutation.threads', '16'],
     ['pool.envelope.browser.mem-gb', '3'],
     ['pool.harness-share-pct', '25'],
@@ -41,8 +41,8 @@ describe('pool fleet keys', () => {
     ['pool.path.slow-ms', '60000'],
     ['pool.mode', 'shadow'],
     ['pool.mode', 'enforce'],
-    ['pool.fallback.ai-lan', 'ai-server'],
-    ['pool.gate-host.ai-lan', 'gatehost-replica'],
+    ['pool.fallback.host-b-lan', 'host-b'],
+    ['pool.gate-host.host-b-lan', 'gatehost-replica'],
     ['tabs.cap-per-workspace.ws-ldhziO', '14'],
     ['tabs.cap-per-workspace', '200'],
     ['tabs.cap-per-workspace.ws-a_B-9z', '1'],
@@ -51,21 +51,21 @@ describe('pool fleet keys', () => {
     expect(await putValue(admin, key, { value }, authority)).toMatchObject({ key, changed: true, value: { value } });
   });
 
-  it.each(['pool.slots.ai-lan.gate', 'tabs.cap-per-workspace.ws-ldhziO'])('an orchestrator may not set %s', async (key) => {
+  it.each(['pool.slots.host-b-lan.gate', 'tabs.cap-per-workspace.ws-ldhziO'])('an orchestrator may not set %s', async (key) => {
     const { putValue } = await import('@/lib/fleet-config-http');
     await expect(putValue(orchestrator, key, { value: '6' }, authority)).rejects.toMatchObject({ code: 'forbidden' });
   });
 
   it.each([
-    ['pool.slots.ai-lan.gate', '65', 'whole number 0..64'],
-    ['pool.slots.ai-lan.gate', 'six', 'whole number 0..64'],
-    ['pool.fallback.ai-lan', '-oProxyCommand=x', 'ssh alias'],
-    ['pool.gate-host.ai-lan', 'two words', 'ssh alias'],
-    ['pool.slots.ai-lan.review', '2', 'not a pool key'],
+    ['pool.slots.host-b-lan.gate', '65', 'whole number 0..64'],
+    ['pool.slots.host-b-lan.gate', 'six', 'whole number 0..64'],
+    ['pool.fallback.host-b-lan', '-oProxyCommand=x', 'ssh alias'],
+    ['pool.gate-host.host-b-lan', 'two words', 'ssh alias'],
+    ['pool.slots.host-b-lan.review', '2', 'not a pool key'],
     ['pool.anything', '2', 'not a pool key'],
-    ['pool.budget.ai-lan.threads', '0', 'whole threads 1..4096'],
-    ['pool.budget.ai-lan.mem-gb', 'lots', 'GiB 1..65536'],
-    ['pool.budget.ai-lan.cores', '8', 'not a pool key'],
+    ['pool.budget.host-b-lan.threads', '0', 'whole threads 1..4096'],
+    ['pool.budget.host-b-lan.mem-gb', 'lots', 'GiB 1..65536'],
+    ['pool.budget.host-b-lan.cores', '8', 'not a pool key'],
     ['pool.envelope.review.threads', '8', 'not a pool key'],
     ['pool.envelope.gate.threads', '1.5', 'whole threads'],
     ['pool.harness-share-pct', '150', 'a whole percent 0..100'],
@@ -75,7 +75,7 @@ describe('pool fleet keys', () => {
     ['pool.path.rtt', '250', 'not a pool key'],
     ['pool.mode', 'on', 'must be shadow or enforce'],
     ['pool.mode', 'Enforce', 'must be shadow or enforce'],
-    ['remote.hosts', 'ai-lan,auto', 'cannot name a host "auto"'],
+    ['remote.hosts', 'host-b-lan,auto', 'cannot name a host "auto"'],
     ['tabs.cap-per-workspace', '0', 'integer 1..200'],
     ['tabs.cap-per-workspace', 'eight', 'integer 1..200'],
     ['tabs.cap-per-workspace.ws-ldhziO', '201', 'integer 1..200'],

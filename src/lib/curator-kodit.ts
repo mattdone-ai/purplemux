@@ -1,10 +1,20 @@
 import { KODIT_DROP_LIMIT } from '@/lib/curator';
-import type { ICuratorKoditWindow } from '@/types/curator';
+import type { ICuratorKoditWindow, TCuratorKoditCheck } from '@/types/curator';
 
-// kodit's enrichment rate (ADR-0038 §7), from `~/stacks/mcp-server/enrich-history.log` on ai-server: one line every
-// 3 h from `enrich-log.sh`, `<ISO time> docs=<indexed>/<total> summaries=<count>`.
+// kodit's enrichment rate (ADR-0038 §7), from `~/stacks/mcp-server/enrich-history.log` on the host that runs kodit: one
+// line every 3 h from `enrich-log.sh`, `<ISO time> docs=<indexed>/<total> summaries=<count>`.
 
-export const KODIT_LOG_HOST = 'ai-lan';
+/** The ssh host that holds the kodit log, from `PMUX_KODIT_LOG_HOST`; null (unset or blank) means no kodit check. */
+export const koditLogHost = (env: Readonly<Record<string, string | undefined>> = process.env): string | null => env.PMUX_KODIT_LOG_HOST?.trim() || null;
+
+export const KODIT_NOT_CONFIGURED = 'PMUX_KODIT_LOG_HOST is not set in the server environment, so the kodit check (ADR-0038 §7) does not run';
+
+/** The check's configuration as the status reports it: the host, or why there is none. There is no default host. */
+export const koditCheckConfig = (env: Readonly<Record<string, string | undefined>> = process.env): TCuratorKoditCheck => {
+  const host = koditLogHost(env);
+  return host === null ? { state: 'not-configured', reason: KODIT_NOT_CONFIGURED } : { state: 'configured', host };
+};
+
 export const KODIT_LOG_PATH = '~/stacks/mcp-server/enrich-history.log';
 export const KODIT_WINDOW_MS = 72 * 60 * 60_000;
 

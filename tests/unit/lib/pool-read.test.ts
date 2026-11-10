@@ -14,8 +14,8 @@ const {
   POOL_PATH_STALE_MS, POOL_READ_INTERVAL_MS, POOL_READ_SCRIPT, POOL_READ_STALE_MS, POOL_READ_TIMEOUT_MS, PoolReader, defaultTailnetPathDeps, parsePoolRead,
 } = await import('@/lib/pool-read');
 
-// ADR-0039 §1. The ai-server output below is the live read of 2026-11-03T07:20Z
-// (`ssh ai-lan sh -s < POOL_READ_SCRIPT`, 0.36 s); the @sweep block is the live
+// ADR-0039 §1. The host-b output below is the live read of 2026-11-03T07:20Z
+// (`ssh host-b-lan sh -s < POOL_READ_SCRIPT`, 0.36 s); the @sweep block is the live
 // `systemctl --user show` answer of 07:45Z (review r2 F6). No test reaches a host.
 const AI_SERVER = `@threads
 64
@@ -119,7 +119,7 @@ describe('PoolReader', () => {
   let hosts: string[];
   const reader = () => new PoolReader({
     now: () => now,
-    localName: () => 'mdserver1',
+    localName: () => 'host-a',
     remoteHosts: async () => hosts,
     fallbackOf: async () => fallback,
     runRemote: runRemote as never,
@@ -129,19 +129,19 @@ describe('PoolReader', () => {
   beforeEach(() => {
     now = Date.parse('2026-11-03T07:00:00Z');
     runRemote = vi.fn(async () => AI_SERVER);
-    fallback = 'ai-server';
-    hosts = ['ai-lan'];
+    fallback = 'host-b';
+    hosts = ['host-b-lan'];
   });
 
   it('reads this host now and the remote host by one ssh read with a 5 s hard timeout', async () => {
     const r = reader();
     await r.refresh();
     expect(runRemote).toHaveBeenCalledTimes(1);
-    expect(runRemote).toHaveBeenCalledWith('ai-lan', POOL_READ_SCRIPT, POOL_READ_TIMEOUT_MS);
+    expect(runRemote).toHaveBeenCalledWith('host-b-lan', POOL_READ_SCRIPT, POOL_READ_TIMEOUT_MS);
     expect(POOL_READ_TIMEOUT_MS).toBe(5_000);
     const [local, remote] = await r.snapshot();
-    expect(local).toMatchObject({ host: 'mdserver1', local: true, state: 'known', metrics: LOCAL });
-    expect(remote).toMatchObject({ host: 'ai-lan', local: false, state: 'known', via: 'ai-lan', metrics: { threads: 64 } });
+    expect(local).toMatchObject({ host: 'host-a', local: true, state: 'known', metrics: LOCAL });
+    expect(remote).toMatchObject({ host: 'host-b-lan', local: false, state: 'known', via: 'host-b-lan', metrics: { threads: 64 } });
   });
 
   it('a host never read is unknown, and a snapshot never waits on ssh', async () => {
@@ -152,13 +152,13 @@ describe('PoolReader', () => {
 
   it('a failed LAN read tries the fallback alias once; it answering is known, via the fallback', async () => {
     runRemote.mockImplementation(async (alias: string) => {
-      if (alias === 'ai-lan') throw sshFailure('Permission denied (publickey).');
+      if (alias === 'host-b-lan') throw sshFailure('Permission denied (publickey).');
       return AI_SERVER;
     });
     const r = reader();
     await r.refresh();
-    expect(runRemote.mock.calls.map((c) => c[0])).toEqual(['ai-lan', 'ai-server']);
-    expect((await r.snapshot())[1]).toMatchObject({ state: 'known', via: 'ai-server', primaryFailure: 'ai-lan: exit 255: Permission denied (publickey).' });
+    expect(runRemote.mock.calls.map((c) => c[0])).toEqual(['host-b-lan', 'host-b']);
+    expect((await r.snapshot())[1]).toMatchObject({ state: 'known', via: 'host-b', primaryFailure: 'host-b-lan: exit 255: Permission denied (publickey).' });
   });
 
   it('both aliases failing marks the host unknown for 30 s with both reasons; no metrics, never zero', async () => {
@@ -168,7 +168,7 @@ describe('PoolReader', () => {
     const unknown = (await r.snapshot())[1];
     expect(unknown).toMatchObject({ state: 'unknown', retryAt: now + POOL_READ_INTERVAL_MS });
     expect(unknown).not.toHaveProperty('metrics');
-    expect(unknown.state === 'unknown' && unknown.reason).toBe('read failed (ai-lan: timed out; ai-server: timed out)');
+    expect(unknown.state === 'unknown' && unknown.reason).toBe('read failed (host-b-lan: timed out; host-b: timed out)');
     expect(runRemote).toHaveBeenCalledTimes(2);
 
     now += POOL_READ_INTERVAL_MS - 1;
@@ -178,12 +178,12 @@ describe('PoolReader', () => {
     runRemote.mockResolvedValue(AI_SERVER);
     now += 1;
     await r.refresh();
-    expect((await r.snapshot())[1]).toMatchObject({ state: 'known', via: 'ai-lan' });
+    expect((await r.snapshot())[1]).toMatchObject({ state: 'known', via: 'host-b-lan' });
   });
 
   it('no fallback configured: one alias, one try', async () => {
     fallback = null;
-    runRemote.mockRejectedValue(sshFailure('ssh: connect to host ai-lan port 22: No route to host'));
+    runRemote.mockRejectedValue(sshFailure('ssh: connect to host host-b-lan port 22: No route to host'));
     const r = reader();
     await r.refresh();
     expect(runRemote).toHaveBeenCalledTimes(1);
@@ -211,15 +211,15 @@ describe('PoolReader', () => {
     expect(runRemote).toHaveBeenCalledTimes(1);
     hosts = [];
     await r.refresh();
-    expect((await r.snapshot()).map((h) => h.host)).toEqual(['mdserver1']);
+    expect((await r.snapshot()).map((h) => h.host)).toEqual(['host-a']);
   });
 
   it('this host unreadable is unknown with its reason', async () => {
     const r = new PoolReader({
-      now: () => now, localName: () => 'mdserver1', remoteHosts: async () => [], fallbackOf: async () => null,
+      now: () => now, localName: () => 'host-a', remoteHosts: async () => [], fallbackOf: async () => null,
       runRemote: runRemote as never, readLocal: async () => ({ error: 'host metrics are Linux only (this host is darwin)' }),
     });
-    expect((await r.snapshot())[0]).toMatchObject({ host: 'mdserver1', state: 'unknown', reason: expect.stringContaining('Linux only') });
+    expect((await r.snapshot())[0]).toMatchObject({ host: 'host-a', state: 'unknown', reason: expect.stringContaining('Linux only') });
   });
 });
 

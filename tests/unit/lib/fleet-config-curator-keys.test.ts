@@ -38,7 +38,7 @@ describe('curator fleet keys', () => {
   });
 
   it.each([
-    ['curator.routing.workspaces', 'treasury-v2', 'takes workspace ids (ws-...), comma-separated: treasury-v2'],
+    ['curator.routing.workspaces', 'acme-ledger-v2', 'takes workspace ids (ws-...), comma-separated: acme-ledger-v2'],
     ['curator.min-interval-ms', '-1', 'must be whole milliseconds 0..600000, got "-1"'],
     ['curator.min-interval-ms', '700000', 'must be whole milliseconds 0..600000'],
     ['curator.enabled', 'yes', 'must be on or off, got "yes"'],

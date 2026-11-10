@@ -94,18 +94,18 @@ describe('purplemux workspace create — the installed CLI against the real rout
   });
 
   it('creates the workspace from a shell outside every tab and prints only the new id', async () => {
-    const r = await cli(['workspace', 'create', '-n', 'Treasury v2', '-d', dirs.primary, '-d', dirs.other], env.outside);
+    const r = await cli(['workspace', 'create', '-n', 'Acme-ledger v2', '-d', dirs.primary, '-d', dirs.other], env.outside);
 
     expect(r.code, r.stderr).toBe(0);
     const id = r.stdout.trim();
     expect(id).toMatch(/^ws-[\w-]{6}$/);
     const created = (await storedWorkspaces()).find((w) => w.id === id);
-    expect(created).toEqual({ id, name: 'Treasury v2', directories: [dirs.primary, dirs.other] });
+    expect(created).toEqual({ id, name: 'Acme-ledger v2', directories: [dirs.primary, dirs.other] });
     const layout = JSON.parse(await fs.readFile(path.join(mockHome.value, '.purplemux', 'workspaces', id, 'layout.json'), 'utf-8'));
     const firstTab = layout.root.tabs[0];
     expect(status.registerTab).toHaveBeenCalledWith(firstTab.id, expect.objectContaining({ workspaceId: id, cliState: 'inactive' }));
     const audit = await fs.readFile(path.join(mockHome.value, '.purplemux', 'audit', 'coordination.jsonl'), 'utf-8');
-    expect(JSON.parse(audit.trim())).toMatchObject({ event: 'workspace-create', workspaceId: id, name: 'Treasury v2', by: 'admin' });
+    expect(JSON.parse(audit.trim())).toMatchObject({ event: 'workspace-create', workspaceId: id, name: 'Acme-ledger v2', by: 'admin' });
   });
 
   it('--json prints the created workspace with its first tab id', async () => {

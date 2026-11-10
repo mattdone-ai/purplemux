@@ -38,7 +38,7 @@ const call = async (method: string, body?: unknown): Promise<IResult> => {
 
 const valid = { valid: true, exists: true, isDirectory: true, canCreate: true };
 const missing = { valid: false, error: 'Directory does not exist', exists: false, isDirectory: false, canCreate: true };
-const created = { id: 'ws-new123', name: 'Treasury v2', directories: ['/srv/a', '/srv/b'] };
+const created = { id: 'ws-new123', name: 'Acme-ledger v2', directories: ['/srv/a', '/srv/b'] };
 const tab = { id: 'tab-first', sessionName: 'pt-ws-new123-pane-1-tab-first', name: '', order: 0 };
 
 describe('POST /api/cli/workspaces', () => {
@@ -51,11 +51,11 @@ describe('POST /api/cli/workspaces', () => {
   });
 
   it('creates through the store call the UI uses, registers the first tab and audits the admin write', async () => {
-    const r = await call('POST', { name: '  Treasury v2 ', directories: ['/srv/a', '/srv/b/'] });
+    const r = await call('POST', { name: '  Acme-ledger v2 ', directories: ['/srv/a', '/srv/b/'] });
 
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual({ ...created, defaultTabId: 'tab-first' });
-    expect(createWorkspace).toHaveBeenCalledWith('/srv/a', 'Treasury v2', undefined, { uniqueName: true, extraDirectories: ['/srv/b'] });
+    expect(createWorkspace).toHaveBeenCalledWith('/srv/a', 'Acme-ledger v2', undefined, { uniqueName: true, extraDirectories: ['/srv/b'] });
     expect(registerDefaultTab).toHaveBeenCalledWith(created, tab);
     expect(appendCoordinationAudit).toHaveBeenCalledWith(expect.objectContaining({ event: 'workspace-create', workspaceId: 'ws-new123', by: 'admin' }));
   });
@@ -90,11 +90,11 @@ describe('POST /api/cli/workspaces', () => {
 
   it('maps a taken name to 409 conflict', async () => {
     vi.mocked(createWorkspace).mockRejectedValue(
-      Object.assign(new Error('a workspace named "Treasury v2" already exists (ws-old)'), { code: 'WORKSPACE_NAME_TAKEN' }),
+      Object.assign(new Error('a workspace named "Acme-ledger v2" already exists (ws-old)'), { code: 'WORKSPACE_NAME_TAKEN' }),
     );
-    const r = await call('POST', { name: 'treasury V2', directories: ['/srv/a'] });
+    const r = await call('POST', { name: 'acme-ledger V2', directories: ['/srv/a'] });
     expect(r.statusCode).toBe(409);
-    expect(r.body).toEqual({ error: 'a workspace named "Treasury v2" already exists (ws-old)', code: 'conflict' });
+    expect(r.body).toEqual({ error: 'a workspace named "Acme-ledger v2" already exists (ws-old)', code: 'conflict' });
     expect(appendCoordinationAudit).not.toHaveBeenCalled();
   });
 

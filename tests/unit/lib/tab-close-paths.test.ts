@@ -125,7 +125,7 @@ describe('every close path reaps by tab id (ADR-0016)', () => {
     const withRemote = (): ILayoutData => {
       const l = layout();
       const paneB = (l.root as unknown as { children: Array<{ tabs: ILayoutData['root'] extends never ? never : Array<Record<string, unknown>> }> }).children[1];
-      paneB.tabs.push({ id: 'tab-r', sessionName: 's-r', name: 'r', order: 1, host: 'ai-server' });
+      paneB.tabs.push({ id: 'tab-r', sessionName: 's-r', name: 'r', order: 1, host: 'host-b' });
       return l;
     };
     const create = async () => {
@@ -142,8 +142,8 @@ describe('every close path reaps by tab id (ADR-0016)', () => {
     it('a host that does not answer refuses the delete before any tab is reaped or any file changes', async () => {
       const { workspaces, ws, store } = await create();
       const { RemoteHostError } = await import('@/lib/remote-host');
-      tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
-      await expect(workspaces.deleteWorkspace(ws.id)).rejects.toMatchObject({ name: 'RemoteHostError', host: 'ai-server' });
+      tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('host-b', 'did not answer'));
+      await expect(workspaces.deleteWorkspace(ws.id)).rejects.toMatchObject({ name: 'RemoteHostError', host: 'host-b' });
       expect(tmux.killSession).not.toHaveBeenCalled();
       expect((await workspaces.getWorkspaces()).workspaces.map((w) => w.id)).toContain(ws.id);
       expect(await store.readLayoutFile(store.resolveLayoutFile(ws.id))).not.toBeNull();
@@ -153,7 +153,7 @@ describe('every close path reaps by tab id (ADR-0016)', () => {
       const { workspaces, ws } = await create();
       const { RemoteHostError } = await import('@/lib/remote-host');
       tmux.killSession.mockImplementation(async (name: string) => {
-        if (name === 's-r') throw new RemoteHostError('ai-server', 'could not close');
+        if (name === 's-r') throw new RemoteHostError('host-b', 'could not close');
         return REAP;
       });
       await expect(workspaces.deleteWorkspace(ws.id)).rejects.toMatchObject({ name: 'RemoteHostError' });

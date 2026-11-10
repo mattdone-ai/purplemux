@@ -7,7 +7,7 @@ import type { TPanelType } from '@/types/terminal';
  * vel-RETRO-R3 (retro 2026-11-09): a `/party` brief sent to a fresh tab was typed and never submitted, `tab send`
  * exited 0, and the receiver sat idle for 15 minutes. After the typing, the send now looks for proof that the
  * agent took the turn, presses Enter once more for text that stayed in the composer (L37), and names the failure
- * when no proof comes. Ruling: `docs/design/vel-retro-r3-send-confirm.md`.
+ * when no proof comes. Ruling: the vel-RETRO-R3 design check (an internal record).
  */
 
 export const SUBMIT_CONFIRM_POLL_MS = 250;

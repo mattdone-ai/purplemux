@@ -29,9 +29,10 @@ vi.mock('@/lib/ledger-store', () => ({
 vi.mock('@/lib/mission-control-store', () => ({ getMissionControlStore: () => ({
   latestAnswer: () => latestAnswer, itemQuestion: (_ws: string, id: string) => mcItems[id] ?? null,
 }) }));
+const sshHosts: string[] = [];
 vi.mock('@/lib/remote-host', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/remote-host')>()),
-  runSsh: vi.fn(async () => ({ stdout: koditLog, stderr: '' })),
+  runSsh: vi.fn(async (host: string) => { sshHosts.push(host); return { stdout: koditLog, stderr: '' }; }),
 }));
 
 const HOUR = 3_600_000;
@@ -88,6 +89,7 @@ beforeEach(() => {
   latestAnswer = null;
   mcItems = {};
   koditLog = '';
+  sshHosts.length = 0;
   digestNow.value = 'sha256:d1';
   fetchMock = vi.fn(async () => { throw new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:11435') }); });
   vi.stubGlobal('fetch', fetchMock);
@@ -118,7 +120,7 @@ describe('routing is per workspace and opt-in (AC 3)', () => {
     expect(await service.curatorRoutesIn('classify-owner-message', 'ws-a')).toBe(false);
   });
 
-  it('the routing list is empty by default: treasury-v2 is not in it', async () => {
+  it('the routing list is empty by default: acme-ledger-v2 is not in it', async () => {
     const service = await load();
     expect(service.parseRoutingWorkspaces(null)).toEqual([]);
     expect(service.parseRoutingWorkspaces(' ws-a , ,ws-b')).toEqual(['ws-a', 'ws-b']);
@@ -456,6 +458,7 @@ describe('the kodit rule (AC 7)', () => {
       line('2026-10-31T12:17:00Z', 300_000), line('2026-11-03T09:17:00Z', 360_000),
       line('2026-11-03T12:17:00Z', 361_000), line('2026-11-06T09:17:00Z', 400_000),
     ].join('\n');
+    vi.stubEnv('PMUX_KODIT_LOG_HOST', ' host-b-lan ');
     const service = await load();
     await service.startCurator();
     await vi.waitFor(async () => expect((await service.readCuratorStatus()).kodit?.after).toBeTruthy());
@@ -463,6 +466,29 @@ describe('the kodit rule (AC 7)', () => {
     expect(status.kodit!.before.docsPerHour).toBeCloseTo(60_000 / 69, 1);
     expect(status.kodit!.drop).toBeGreaterThan(0.2);
     expect(status.rateLimitMs).toBe(10_000);
+    expect(sshHosts).toEqual(['host-b-lan']);
+    expect(status.koditCheck).toEqual({ state: 'configured', host: 'host-b-lan' });
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it('with PMUX_KODIT_LOG_HOST unset, the check reads no host over ssh, and the status says it is not configured', async () => {
+    const live = Date.parse('2026-11-03T12:00:00Z');
+    vi.setSystemTime(live + 73 * HOUR);
+    vi.stubEnv('PMUX_KODIT_LOG_HOST', '');
+    writeState({ version: 1, liveSince: live, tasks: {}, kodit: null, rateLimitMs: 0 });
+    koditLog = line('2026-11-03T09:17:00Z', 360_000);
+    const service = await load();
+    await service.startCurator();
+    // startCurator fires the kodit check without awaiting it. The AC 7 case reads its host within one state-file read;
+    // 200 ms is far past that, so a read that the unset host failed to stop would be in sshHosts by now.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(sshHosts).toEqual([]);
+    const status = await service.readCuratorStatus();
+    expect(status.kodit).toBeNull();
+    expect(status.koditCheck).toEqual({ state: 'not-configured', reason: expect.stringContaining('PMUX_KODIT_LOG_HOST is not set') });
+    vi.unstubAllEnvs();
     vi.useRealTimers();
   });
 });

@@ -13,7 +13,7 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, default: { ...actual, homedir: () => mockHome.value }, homedir: () => mockHome.value };
 });
 vi.mock('@/lib/session-host', () => ({
-  sessionHostOf: async (s: string) => (s.includes('tab-r') ? 'ai-server' : null),
+  sessionHostOf: async (s: string) => (s.includes('tab-r') ? 'host-b' : null),
 }));
 vi.mock('@/lib/remote-host', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/remote-host')>();
@@ -34,7 +34,7 @@ vi.mock('@/lib/remote-host', async (importOriginal) => {
 
 const SESSION = 'pt-ws-a-pane-b-tab-r';
 const SID = '0f9e2c4a-1111-2222-3333-444455556666';
-const REMOTE_PATH = `/home/mdone/.claude/projects/-home-mdone-code/${SID}.jsonl`;
+const REMOTE_PATH = `/home/user/.claude/projects/-home-user-code/${SID}.jsonl`;
 
 describe('remote transcript copy (ADR-0022)', () => {
   beforeEach(async () => {
@@ -54,9 +54,9 @@ describe('remote transcript copy (ADR-0022)', () => {
 
   it.each([
     [REMOTE_PATH, SID, true],
-    ['/home/mdone/.claude/projects/x/other.jsonl', SID, false],
-    [`/home/mdone/.ssh/${SID}.jsonl`, SID, false],
-    [`/home/mdone/.claude/projects/../../etc/${SID}.jsonl`, SID, false],
+    ['/home/user/.claude/projects/x/other.jsonl', SID, false],
+    [`/home/user/.ssh/${SID}.jsonl`, SID, false],
+    [`/home/user/.claude/projects/../../etc/${SID}.jsonl`, SID, false],
     [`relative/projects/x/${SID}.jsonl`, SID, false],
     [REMOTE_PATH, '../x', false],
   ])('accepts only a Claude transcript path: %s', async (p, sid, ok) => {
@@ -67,7 +67,7 @@ describe('remote transcript copy (ADR-0022)', () => {
   it('copies the remote bytes incrementally and keeps a multi-byte character whole across reads', async () => {
     await fs.writeFile(mockHome.remote, '{"a":"é"}\n');
     const { bindRemoteTranscript, syncRemoteTranscript, mirrorPathFor } = await import('@/lib/remote-transcript');
-    const local = await bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: REMOTE_PATH });
+    const local = await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
     expect(local).toBe(mirrorPathFor('tab-r', SID));
     expect(await syncRemoteTranscript(SESSION)).toBe(true);
     expect(await fs.readFile(local, 'utf-8')).toBe('{"a":"é"}\n');
@@ -81,7 +81,7 @@ describe('remote transcript copy (ADR-0022)', () => {
   it('restarts the copy when the remote file was rewritten shorter', async () => {
     await fs.writeFile(mockHome.remote, 'one\ntwo\nthree\n');
     const { bindRemoteTranscript, syncRemoteTranscript } = await import('@/lib/remote-transcript');
-    const local = await bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: REMOTE_PATH });
+    const local = await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
     await syncRemoteTranscript(SESSION);
     await fs.writeFile(mockHome.remote, 'new\n');
     await syncRemoteTranscript(SESSION);
@@ -91,7 +91,7 @@ describe('remote transcript copy (ADR-0022)', () => {
   it('a restarted server resumes the copy from mirror.json', async () => {
     await fs.writeFile(mockHome.remote, 'one\n');
     const first = await import('@/lib/remote-transcript');
-    const local = await first.bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: REMOTE_PATH });
+    const local = await first.bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
     await first.syncRemoteTranscript(SESSION);
     vi.resetModules();
     delete (globalThis as Record<string, unknown>).__ptRemoteMirrors;
@@ -106,20 +106,20 @@ describe('remote transcript copy (ADR-0022)', () => {
     expect(await syncRemoteTranscript('pt-ws-a-pane-b-tab-local')).toBe(false);
     expect(await syncRemoteTranscript(SESSION)).toBe(false);
     expect(ssh.calls).toEqual([]);
-    await bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: REMOTE_PATH });
+    await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
     ssh.fail = { code: 3 };
     expect(await syncRemoteTranscript(SESSION)).toBe(false);
   });
 
   it('refuses to bind a path that is not a Claude transcript', async () => {
     const { bindRemoteTranscript } = await import('@/lib/remote-transcript');
-    await expect(bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: '/etc/passwd' })).rejects.toThrow('not a Claude transcript path');
+    await expect(bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: '/etc/passwd' })).rejects.toThrow('not a Claude transcript path');
   });
 
   it('removing a closed tab drops its copies', async () => {
     await fs.writeFile(mockHome.remote, 'x\n');
     const { bindRemoteTranscript, syncRemoteTranscript, removeRemoteTranscripts, remoteTranscriptRoot } = await import('@/lib/remote-transcript');
-    await bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: REMOTE_PATH });
+    await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
     await syncRemoteTranscript(SESSION);
     await removeRemoteTranscripts(SESSION);
     await expect(fs.stat(path.join(remoteTranscriptRoot(), 'tab-r'))).rejects.toThrow();
@@ -128,7 +128,7 @@ describe('remote transcript copy (ADR-0022)', () => {
   it('a tab-closed event, from any close path, drops the tab\'s copies', async () => {
     await fs.writeFile(mockHome.remote, 'x\n');
     const { bindRemoteTranscript, syncRemoteTranscript, remoteTranscriptRoot } = await import('@/lib/remote-transcript');
-    await bindRemoteTranscript({ session: SESSION, host: 'ai-server', sessionId: SID, remotePath: REMOTE_PATH });
+    await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
     await syncRemoteTranscript(SESSION);
     const { emitTabClosed } = await import('@/lib/tab-lifecycle');
     emitTabClosed({ workspaceId: 'ws-a', tabId: 'tab-r', sessionName: SESSION, reason: 'closed' } as never);

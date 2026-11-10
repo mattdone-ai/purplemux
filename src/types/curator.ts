@@ -184,6 +184,9 @@ export interface ICuratorKoditMeasure {
   measuredAt: number;
 }
 
+/** Whether this server can run the kodit check (ADR-0038 §7): it reads the log on the host PMUX_KODIT_LOG_HOST names. */
+export type TCuratorKoditCheck = { state: 'configured'; host: string } | { state: 'not-configured'; reason: string };
+
 export interface ICuratorState {
   version: 1;
   /** First start of a server carrying the client: the shadow clock's start (ADR-0038 §5). */

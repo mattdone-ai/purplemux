@@ -31,7 +31,7 @@ const needsOwner: TMissionHumanReviewInput = { humanNeed: 'decision', humanReaso
 const noOwner: TMissionHumanReviewInput = { humanNeed: 'none', handling: 'SM handles it.', reviewerTabId: binding.tabId };
 
 const workspace: IWorkspace = {
-  id: 'ws-a', name: 'Treasury v2', directories: ['/tmp/ws-a'],
+  id: 'ws-a', name: 'Acme-ledger v2', directories: ['/tmp/ws-a'],
   orchestration: { enabled: true, orchestratorTabId: 'tab-orch' },
 } as IWorkspace;
 const tabs: Record<string, ITab> = {
@@ -100,7 +100,7 @@ describe('dispatchAttentionOpenedAlerts', () => {
         providerId: 'codex',
         isOrchestrator: false,
         workspaceId: 'ws-a',
-        workspaceName: 'Treasury v2',
+        workspaceName: 'Acme-ledger v2',
         at: expect.any(Number),
         question: {
           formatVersion: 1, decision: 'Raise the budget for lane H-3?', answerType: 'multi', revision: 1,

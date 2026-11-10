@@ -126,7 +126,7 @@ server was down would never be alarmed at all. The guard keeps a busy or dead ho
 router's held-tab report (ADR-0035 §3) tells the human after an hour.
 
 ## Amendment vel-RETRO-R2 (2026-11-09): pool path flags, §5 source `pool`
-Consult ruling: `docs/design/vel-retro-r2-tailnet-path.md`. ADR-0039 amendment vel-RETRO-R2 measures the path.
+Consult ruling: the vel-RETRO-R2 design check (an internal record). ADR-0039 amendment vel-RETRO-R2 measures the path.
 
 1. **Source and rules.** `TAlertFlagSource` gains `pool`. The rules are `tailnet-relayed` and `tailnet-slow`, and the
    subject is the host. A host raises at most one rule per tick, and `relayed` wins. The key is

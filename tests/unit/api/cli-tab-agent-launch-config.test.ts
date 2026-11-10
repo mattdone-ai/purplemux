@@ -220,7 +220,7 @@ describe('POST /api/cli/tabs launch config', () => {
     const preview = 'http://localhost:3100';
     for (const body of [
       { workspaceId: 'ws-pins', panelType: 'codex-cli', role: 'evaluator', previewUrl: preview },
-      { workspaceId: 'ws-pins', role: 'evaluator', host: 'ai-server', previewUrl: preview },
+      { workspaceId: 'ws-pins', role: 'evaluator', host: 'host-b', previewUrl: preview },
       { workspaceId: 'ws-pins', panelType: 'claude-code', role: 'reviewer', previewUrl: preview },
       { workspaceId: 'ws-pins', role: 'evaluator' },
       { workspaceId: 'ws-pins', role: 'evaluator', previewUrl: preview, pgService: 'bad name' },

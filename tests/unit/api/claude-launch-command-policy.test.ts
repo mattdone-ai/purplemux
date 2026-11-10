@@ -24,7 +24,7 @@ vi.mock('@/lib/agent-availability', () => ({
 }));
 vi.mock('@/lib/workspace-store', () => ({ getActiveWorkspaceId: vi.fn(async () => 'ws-active') }));
 const hosts = vi.hoisted(() => ({ remote: new Set<string>() }));
-vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (hosts.remote.has(s) ? 'ai-server' : null) }));
+vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (hosts.remote.has(s) ? 'host-b' : null) }));
 
 const fakeResponse = () => {
   const state = { statusCode: 0, body: undefined as unknown };

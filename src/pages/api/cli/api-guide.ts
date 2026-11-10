@@ -194,14 +194,14 @@ what, so treat it as a refusal.
 ## Pool (ADR-0039)
 
 One scheduler places gates, builds, mutation runs, browsers, test services and agent tabs on this
-host and the remote.hosts hosts (vel-D4: one shared budget per host, docs/design/vel-d4-shared-budget.md).
+host and the remote.hosts hosts (vel-D4: one shared budget per host).
 Each known host has one budget: threads and memory (fleet config pool.budget.<host>.*, else the
 read), less a control-plane reserve (default max(2, 25 % of threads) and max(4 GiB, 15 % of
 memory)). Every kind reserves its envelope (pool.envelope.<kind>.*; defaults gate, build and
 mutation 8 threads / 8 GiB, browser, test-service and tab 2 threads / 4 GiB) from the same worker
 budget for the life of its lease; agent tabs from the layouts reserve the tab envelope, and each
-workspace's enabled orchestrator tab draws on the reserve. Measured: mdserver1 32 threads / 91 GiB
-(8 threads / 14 GiB reserved, 24 / 77 for workers); ai-server 64 / 373 GiB (16 / 56, 48 / 317). This host is read through host-metrics on every call; each remote host by one ssh
+workspace's enabled orchestrator tab draws on the reserve. Measured: host-a 32 threads / 91 GiB
+(8 threads / 14 GiB reserved, 24 / 77 for workers); host-b 64 / 373 GiB (16 / 56, 48 / 317). This host is read through host-metrics on every call; each remote host by one ssh
 read (\`sh -s\`, 5 s hard timeout, then pool.fallback.<alias> once) every 30 s. A failed read
 makes the host unknown for 30 s: it shows no figures, never 0, takes nothing new, and keeps its
 leases. A read older than 90 s is unknown too. A host that answered only through its fallback
@@ -269,7 +269,7 @@ POST /api/cli/pool/acquire   (a tab token, or the admin token)
   held by the caller's tab, default TTL 60m, at most 24h, note "pool mem=<GB> threads=<N>
   class=<C>". It ends with \`pool release\`, its TTL, or its holder tab (the lease sweeper).
   Placement and the slot number are taken inside the lease lock: two callers never get one slot.
-  Response: { "host", "local", "slot": "gate-1", "lease": "pool:ai-lan/gate-1", "expiresAt",
+  Response: { "host", "local", "slot": "gate-1", "lease": "pool:host-b-lan/gate-1", "expiresAt",
   "reason", "gateHost": null | "<pool.gate-host.<host>>", "class", "envelope": { "threads",
   "memGb" } }. A launcher that supports limits passes the envelope on (systemd-run --scope -p
   CPUQuota= -p MemoryMax=, docker --cpus --memory).
@@ -317,7 +317,7 @@ do not change until they read the pool, and every key keeps working until then):
   gate.route=remote           gate.sh asks \`pool acquire --kind gate\` for a repository in
                               gate.remote-repos; local, or a repository outside it, stays here.
   gate.remote-repos           unchanged: the repositories whose gates the pool places.
-  gate.no-local-fallback      (default treasury-api treasury-event-consumer) never runs here: a
+  gate.no-local-fallback      (default acme-ledger-api acme-ledger-event-consumer) never runs here: a
                               local answer, pool-timeout or pool-full is handled as today (queue on
                               the gate host, or REFUSED-REMOTE).
   a remote answer             remote-gate.sh with ORCH_GATEHOST_HOST=<gateHost>: the pin needs no
@@ -325,7 +325,7 @@ do not change until they read the pool, and every key keeps working until then):
   gate.remote-hosts entries   stay until gate.sh reads the pool. alias:slots:api-slots on a pool
                               host maps to pool.gate-host.<host>=<alias> and
                               pool.slots.<host>.gate=<slots> (gatehost-replica:6:2 ->
-                              pool.gate-host.ai-lan=gatehost-replica, pool.slots.ai-lan.gate=6);
+                              pool.gate-host.host-b-lan=gatehost-replica, pool.slots.host-b-lan.gate=6);
                               api slots stay in remote-gate.sh's host queue. gatehost-runner2
                               (lfr-runner2, outside the pool, OD-7) has no pool host.
   gate.slots                  pool.slots.<this host>.gate.
@@ -1077,7 +1077,7 @@ Keys in use:
                pool.budget.<host>.max-load from the log, then sets enforce. Admin token only.
   pool.fallback.<alias>
                The ssh alias the pool read tries once when <alias> fails (the tailnet alias
-               behind a LAN alias, e.g. ai-server behind ai-lan). Unset means one try. Admin
+               behind a LAN alias, e.g. host-b behind host-b-lan). Unset means one try. Admin
                token only.
   pool.gate-host.<host>
                The gate-host container on <host> that a remote gate pins (its ssh alias, e.g.
@@ -1086,7 +1086,7 @@ Keys in use:
   curator.routing.workspaces
                The workspaces where a curator task in state routing routes (ADR-0038; consult v2
                point 6): workspace ids, comma-separated. Unset (the default) routes nowhere; every
-               other workspace only logs. treasury-v2's workspace stays out until v2 records its
+               other workspace only logs. acme-ledger-v2's workspace stays out until v2 records its
                own row. Admin token only.
   curator.min-interval-ms
                The least gap between two curator call starts, whole ms 0..600000 (default 0). The
@@ -1100,7 +1100,7 @@ Keys in use:
                as one digest line to the named tab, a candidate for its own decision record (story
                23; consult v2 point 6). ws-...=<tab name> pairs, comma-separated, or none. Unset means
                ws-ldhziO=v2-scrum-master. A value REPLACES that default: keep the pair in it, or
-               treasury-v2's workspace files SO-n. It applies once classify-owner-message routes,
+               acme-ledger-v2's workspace files SO-n. It applies once classify-owner-message routes,
                whether or not the workspace is in curator.routing.workspaces. Admin token only.
   flow.window-minutes  flow.lock-busy-percent  flow.queue-length  flow.oldest-minutes
                The flow-flag thresholds (ADR-0026): the busy-share window in minutes 10..10080
@@ -1466,7 +1466,7 @@ POST /api/cli/workspaces/<workspaceId>/ledger/events   (purplemux ledger emit -w
     purplemux ledger emit -w "$WS" --token-file ~/.purplemux/ledger-tokens/$WS/v2.json --json @- <<'JSON'
     { "event_id": "gate.sh:gate:4f2a9c1d0e3b:1793001600000:open", "at": 1793001600000,
       "item_type": "gate", "item_key": "gate:4f2a9c1d0e3b:1793001600000", "kind": "open",
-      "holder": "lane-a", "attrs": { "host": "ai-server", "mode": "full" } }
+      "holder": "lane-a", "attrs": { "host": "host-b", "mode": "full" } }
     JSON
     ok accepted=1 duplicates=0 drained=0
 
@@ -1671,8 +1671,8 @@ GET /api/mission-control/board[?workspaceId=all|WS]    (human session; all answe
 
 ## Curator (ADR-0038)
 
-gemma4:26b on ai-server's Ollama, reached through the user unit purplemux-curator-tunnel
-(127.0.0.1:11435 -> ai-lan 127.0.0.1:11434). It classifies harness text; it never decides,
+gemma4:26b on host-b's Ollama, reached through the user unit purplemux-curator-tunnel
+(127.0.0.1:11435 -> host-b-lan 127.0.0.1:11434). It classifies harness text; it never decides,
 answers or writes. One call at a time, 30 s timeout; a call queued over 10 min drops to the rules;
 after a down result the queue backs off 30 s doubling to 5 min; inputs keep their last 6,000 tokens
 (the cut is logged). Every call is a tab_events row, class log, kind curator, text the JSON record
@@ -1705,7 +1705,9 @@ target | null, reason? }, never the text. More than 2% of a week's filed orders 
 classify-owner-message back to shadow.
 
 GET  /api/cli/curator                       (purplemux curator status [--json])
-  Any scope: { model, health, queued, liveSince | null, rateLimitMs, kodit | null, evals: [...],
+  Any scope: { model, health, queued, liveSince | null, rateLimitMs, kodit | null,
+  koditCheck: { state: "configured", host } | { state: "not-configured", reason } (PMUX_KODIT_LOG_HOST in
+  the server environment names the host whose kodit log the check reads; unset, the check does not run), evals: [...],
   tasks: [{ task, state, promptVersion, shadowSince | null (this version's first live call),
   shadowEndsAt | null, promotedAt, promotedPromptVersion, queue: { size, oldestAt },
   gate: { checks | null: [{ label, metric, threshold, measured, successes, trials, lowerBound,

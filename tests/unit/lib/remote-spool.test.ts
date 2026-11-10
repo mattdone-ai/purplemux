@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // ADR-0022 slice (b), review r3 nits 2, 3, 6: remote hook events no server answered come over in
 // bounded batches, only from hosts that own a tab, only for a remote session of THAT host.
 
-const remote = vi.hoisted(() => ({ lines: [] as string[], commands: [] as string[], fail: false, hosts: ['ai-server'] as string[], hold: null as Promise<void> | null }));
+const remote = vi.hoisted(() => ({ lines: [] as string[], commands: [] as string[], fail: false, hosts: ['host-b'] as string[], hold: null as Promise<void> | null }));
 const audit = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@/lib/remote-host', async (importOriginal) => ({
@@ -15,19 +15,19 @@ vi.mock('@/lib/remote-host', async (importOriginal) => ({
   runSsh: async (host: string, command: string) => {
     remote.commands.push(`${host}: ${command}`);
     if (remote.hold) await remote.hold;
-    if (remote.fail) throw Object.assign(new Error('failed'), { code: 255, stderr: 'ssh: connect to host ai-server port 22: Connection timed out' });
+    if (remote.fail) throw Object.assign(new Error('failed'), { code: 255, stderr: 'ssh: connect to host host-b port 22: Connection timed out' });
     if (command === 'sh -s') return { stdout: remote.lines.map((l) => `${l}\n`).join(''), stderr: '' };
     return { stdout: '', stderr: '' };
   },
 }));
 vi.mock('@/lib/session-host', () => ({
   remoteHostsInUse: async () => remote.hosts,
-  sessionHostOf: async (s: string) => (s === 'pt-ws-a-pane-p-tab-r' ? 'ai-server' : s === 'pt-ws-a-pane-p-tab-g' ? 'gpu2' : null),
+  sessionHostOf: async (s: string) => (s === 'pt-ws-a-pane-p-tab-r' ? 'host-b' : s === 'pt-ws-a-pane-p-tab-g' ? 'gpu2' : null),
 }));
 vi.mock('@/lib/coordination-audit', () => ({ appendCoordinationAudit: audit }));
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
-  return { ...actual, default: { ...actual, hostname: () => 'mdserver1' }, hostname: () => 'mdserver1' };
+  return { ...actual, default: { ...actual, hostname: () => 'host-a' }, hostname: () => 'host-a' };
 });
 
 const spooled = (session: string, query: string, at = 1791660000123) =>
@@ -45,7 +45,7 @@ describe('pulling remote hook spools (ADR-0022)', () => {
     remote.lines = [];
     remote.commands = [];
     remote.fail = false;
-    remote.hosts = ['ai-server'];
+    remote.hosts = ['host-b'];
     audit.mockClear();
   });
   afterEach(async () => fs.rm(dir, { recursive: true, force: true }));
@@ -61,16 +61,16 @@ describe('pulling remote hook spools (ADR-0022)', () => {
     ];
     const { pullRemoteHookSpools } = await import('@/lib/remote-spool');
     const [pull] = await pullRemoteHookSpools(dir);
-    expect(pull).toEqual({ host: 'ai-server', taken: 1, dropped: 4, quarantined: 0 });
+    expect(pull).toEqual({ host: 'host-b', taken: 1, dropped: 4, quarantined: 0 });
     expect(await fs.readdir(dir)).toEqual(['1791660000123-r4242-0a1b2c3d.json']);
-    expect(remote.commands.at(-1)).toBe(`ai-server: cd "$HOME/.purplemux-remote/mdserver1/hook-spool" && rm -f -- '1791660000123-4242-0a1b2c3d.json' '1791660000150-4246-0a1b2c41.json' '1791660000200-4243-0a1b2c3e.json' '1791660000300-4244-0a1b2c3f.json' '1791660000400-4245-0a1b2c40.json'`);
+    expect(remote.commands.at(-1)).toBe(`host-b: cd "$HOME/.purplemux-remote/host-a/hook-spool" && rm -f -- '1791660000123-4242-0a1b2c3d.json' '1791660000150-4246-0a1b2c41.json' '1791660000200-4243-0a1b2c3e.json' '1791660000300-4244-0a1b2c3f.json' '1791660000400-4245-0a1b2c40.json'`);
   });
 
   it('audits and logs an oversize file the host moved aside', async () => {
     remote.lines = ['oversize\t1791660000123-4242-0a1b2c3d.json\t13000000'];
     const { pullRemoteHookSpools } = await import('@/lib/remote-spool');
-    expect(await pullRemoteHookSpools(dir)).toEqual([{ host: 'ai-server', taken: 0, dropped: 0, quarantined: 1 }]);
-    expect(audit).toHaveBeenCalledWith({ event: 'remote-hook-spool-quarantined', host: 'ai-server', file: '1791660000123-4242-0a1b2c3d.json', bytes: 13000000 });
+    expect(await pullRemoteHookSpools(dir)).toEqual([{ host: 'host-b', taken: 0, dropped: 0, quarantined: 1 }]);
+    expect(audit).toHaveBeenCalledWith({ event: 'remote-hook-spool-quarantined', host: 'host-b', file: '1791660000123-4242-0a1b2c3d.json', bytes: 13000000 });
   });
 
   it('asks only hosts that own a tab, and skips a failed host for 30 s', async () => {
@@ -78,11 +78,11 @@ describe('pulling remote hook spools (ADR-0022)', () => {
     const { pullRemoteHookSpools } = await import('@/lib/remote-spool');
     await pullRemoteHookSpools(dir);
     expect(remote.commands).toEqual([]);
-    remote.hosts = ['ai-server'];
+    remote.hosts = ['host-b'];
     remote.fail = true;
     let t = 1_000_000;
     const now = () => t;
-    expect(await pullRemoteHookSpools(dir, now)).toEqual([{ host: 'ai-server', taken: 0, dropped: 0, quarantined: 0 }]);
+    expect(await pullRemoteHookSpools(dir, now)).toEqual([{ host: 'host-b', taken: 0, dropped: 0, quarantined: 0 }]);
     t += 10_000;
     await pullRemoteHookSpools(dir, now);
     expect(remote.commands).toHaveLength(1);
@@ -107,7 +107,7 @@ describe('pulling remote hook spools (ADR-0022)', () => {
 
 describe('the remote list script, run for real', () => {
   let home: string;
-  const spool = () => path.join(home, '.purplemux-remote', 'mdserver1', 'hook-spool');
+  const spool = () => path.join(home, '.purplemux-remote', 'host-a', 'hook-spool');
   beforeEach(async () => {
     vi.resetModules();
     home = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-remote-spool-sh-'));

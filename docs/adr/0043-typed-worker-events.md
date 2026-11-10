@@ -1,7 +1,7 @@
 # ADR-0043: Typed worker events, validated by the server, delivered as notes
 
 ## Status
-Proposed (2026-11-08, story vel-D6). Design check: `docs/design/vel-d6-typed-events.md`. Builds on ADR-0011 (leases),
+Proposed (2026-11-08, story vel-D6). Design check: an internal record. Builds on ADR-0011 (leases),
 ADR-0012 (the inbox's fixed lines) and ADR-0013 (notes route to the epic owner).
 
 ## Context

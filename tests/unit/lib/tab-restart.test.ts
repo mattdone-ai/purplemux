@@ -399,17 +399,17 @@ describe('restartTab (ADR-0028)', () => {
     tmux.killSession.mockResolvedValue({ ...REAP, reaper: 'remote', sessionGone: true });
     // Present before the reap, gone after it, as the remote tmux answers.
     tmux.hasSessionOrUnreachable.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const { restartTab } = await import('@/lib/tab-restart');
     const { sessionHostOf } = await import('@/lib/session-host');
 
     const result = await restartTab(input());
 
     expect(result.body).toMatchObject({ ok: true, resumed: false, resumeSkipped: 'remote' });
-    expect(await sessionHostOf(session('tab-t'))).toBe('ai-server');
+    expect(await sessionHostOf(session('tab-t'))).toBe('host-b');
     expect(tmux.hasSessionOrUnreachable).toHaveBeenCalledWith(session('tab-t'));
     expect(launcher.launchAgentInTab).toHaveBeenCalledWith(
-      expect.objectContaining({ host: 'ai-server' }),
+      expect.objectContaining({ host: 'host-b' }),
       expect.objectContaining({ resumeSessionId: null }),
     );
     // The identity is what makes createRemoteSession rewrite the prompt file and ship it: a remote restart
@@ -425,13 +425,13 @@ describe('restartTab (ADR-0028)', () => {
     tmux.hasSessionOrUnreachable.mockImplementationOnce(async () => { order.push('presence'); return true; });
     tmux.probeRemoteKit.mockImplementationOnce(async () => {
       order.push('probe');
-      throw new RemoteKitBrokenError('ai-server', "Error: Cannot find module './x.js'");
+      throw new RemoteKitBrokenError('host-b', "Error: Cannot find module './x.js'");
     });
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const events = await lifecycleEvents();
     const { restartTab } = await import('@/lib/tab-restart');
 
-    await expect(restartTab(input())).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'ai-server' });
+    await expect(restartTab(input())).rejects.toMatchObject({ name: 'RemoteKitBrokenError', host: 'host-b' });
     expect(order).toEqual(['presence', 'probe']);
     expect(tmux.probeRemoteKit).toHaveBeenCalledWith(session('tab-t'));
     expect(tmux.killSession).not.toHaveBeenCalled();
@@ -451,7 +451,7 @@ describe('restartTab (ADR-0028)', () => {
     tmux.probeRemoteKit.mockImplementationOnce(async () => { order.push('probe'); });
     tmux.killSession.mockImplementation(async () => { order.push('kill'); return { ...REAP, reaper: 'remote', sessionGone: true }; });
     tmux.hasSessionOrUnreachable.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const { restartTab } = await import('@/lib/tab-restart');
     expect((await restartTab(input())).body).toMatchObject({ ok: true });
     expect(order).toEqual(['probe', 'kill']);
@@ -459,21 +459,21 @@ describe('restartTab (ADR-0028)', () => {
 
   it('a remote host that does not answer kills nothing: 503 remote-host-unreachable', async () => {
     const { RemoteHostError } = await import('@/lib/remote-host');
-    tmux.hasSessionOrUnreachable.mockRejectedValue(new RemoteHostError('ai-server', 'remote host ai-server did not answer over ssh'));
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    tmux.hasSessionOrUnreachable.mockRejectedValue(new RemoteHostError('host-b', 'remote host host-b did not answer over ssh'));
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const events = await lifecycleEvents();
     const { restartTab } = await import('@/lib/tab-restart');
 
     const result = await restartTab(input());
 
-    expect(result).toEqual({ status: 503, body: { error: 'remote host ai-server did not answer over ssh', code: 'remote-host-unreachable', host: 'ai-server' } });
+    expect(result).toEqual({ status: 503, body: { error: 'remote host host-b did not answer over ssh', code: 'remote-host-unreachable', host: 'host-b' } });
     expect(tmux.killSession).not.toHaveBeenCalled();
     expect(events).toEqual([]);
   });
 
   it('a remote reap that leaves the session is not confirmed', async () => {
     tmux.killSession.mockResolvedValue({ ...REAP, reaper: 'remote', sessionGone: false });
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const { restartTab } = await import('@/lib/tab-restart');
     expect((await restartTab(input())).body).toMatchObject({ code: 'restart-not-confirmed' });
   });
@@ -632,26 +632,26 @@ describe('restartTab (ADR-0028)', () => {
     tmux.killSession.mockResolvedValue({ ...REAP, reaper: 'remote', sessionGone: true });
     tmux.hasSessionOrUnreachable
       .mockResolvedValueOnce(true)
-      .mockRejectedValueOnce(new RemoteHostError('ai-server', 'remote host ai-server did not answer over ssh'));
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+      .mockRejectedValueOnce(new RemoteHostError('host-b', 'remote host host-b did not answer over ssh'));
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const events = await lifecycleEvents();
     const { restartTab } = await import('@/lib/tab-restart');
 
     const result = await restartTab(input());
 
-    expect(result).toEqual({ status: 500, body: { error: 'remote host ai-server did not answer over ssh', code: 'restart-not-confirmed', tabId: 'tab-t', reaped: { killed: 1, survivors: 0 } } });
+    expect(result).toEqual({ status: 500, body: { error: 'remote host host-b did not answer over ssh', code: 'restart-not-confirmed', tabId: 'tab-t', reaped: { killed: 1, survivors: 0 } } });
     expect(events).toEqual(['restart:tab-t:restarting', 'restart:tab-t:failed']);
-    expect(await auditLines()).toEqual([expect.objectContaining({ outcome: 'failed', error: 'remote host ai-server did not answer over ssh' })]);
+    expect(await auditLines()).toEqual([expect.objectContaining({ outcome: 'failed', error: 'remote host host-b did not answer over ssh' })]);
   });
 
   it('a remote kill that fails over ssh is restart-not-confirmed with unknown counts', async () => {
     const { RemoteHostError } = await import('@/lib/remote-host');
-    tmux.killSession.mockRejectedValue(new RemoteHostError('ai-server', 'could not close the session on ai-server'));
-    await writeLayout([claudeTab({ host: 'ai-server' })]);
+    tmux.killSession.mockRejectedValue(new RemoteHostError('host-b', 'could not close the session on host-b'));
+    await writeLayout([claudeTab({ host: 'host-b' })]);
     const { restartTab } = await import('@/lib/tab-restart');
     expect(await restartTab(input())).toEqual({
       status: 500,
-      body: { error: 'could not close the session on ai-server', code: 'restart-not-confirmed', tabId: 'tab-t', reaped: null },
+      body: { error: 'could not close the session on host-b', code: 'restart-not-confirmed', tabId: 'tab-t', reaped: null },
     });
   });
 

@@ -132,7 +132,7 @@ describe('credential patterns', () => {
   });
 
   it.each([
-    'from now on use AEDT', '/home/mdone/code/nomupay/treasury-v2/.worktrees/kit/src/billing', 'commit 0f978cc2 landed',
+    'from now on use AEDT', '/home/user/code/acme/acme-ledger-v2/.worktrees/kit/src/billing', 'commit 0f978cc2 landed',
     'the password policy should be in the spec',
   ])('%s does not', (text) => {
     expect(looksLikeSecret(text)).toBe(false);

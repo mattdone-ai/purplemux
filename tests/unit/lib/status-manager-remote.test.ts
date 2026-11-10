@@ -33,9 +33,9 @@ vi.mock('@/lib/tmux', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tmux')>()),
   getAllPanesInfo: vi.fn(async () => Object.assign(
     state.pane
-      ? new Map([['pt-ws-1-pane-a-tab-r', { pid: 0, command: state.command, path: '/home/mdone', windowActivity: 0, host: 'ai-server' }]])
+      ? new Map([['pt-ws-1-pane-a-tab-r', { pid: 0, command: state.command, path: '/home/user', windowActivity: 0, host: 'host-b' }]])
       : new Map(),
-    { answeredRemoteHosts: new Set(state.answered ? ['ai-server'] : []) },
+    { answeredRemoteHosts: new Set(state.answered ? ['host-b'] : []) },
   )),
   getListeningPorts: tmux.getListeningPorts,
   getChildPids: tmux.getChildPids,
@@ -49,7 +49,7 @@ vi.mock('@/lib/notification-dispatcher', () => ({
 vi.mock('@/lib/fcm-channel', () => ({ registerFcmChannel: vi.fn() }));
 vi.mock('@/lib/session-host', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/session-host')>()),
-  sessionHostOf: async (s: string) => (s === 'pt-ws-1-pane-a-tab-r' ? 'ai-server' : null),
+  sessionHostOf: async (s: string) => (s === 'pt-ws-1-pane-a-tab-r' ? 'host-b' : null),
 }));
 
 // The first load of this module graph costs about 1 s alone and passed the 5 s test budget on a loaded gate
@@ -64,7 +64,7 @@ describe('status of a remote terminal tab (ADR-0022 §11)', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    state.tab = { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-1-pane-a-tab-r', panelType: 'terminal', host: 'ai-server' };
+    state.tab = { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-1-pane-a-tab-r', panelType: 'terminal', host: 'host-b' };
   });
   afterEach(() => { state.command = 'bash'; state.pane = true; state.answered = true; });
 
@@ -91,7 +91,7 @@ describe('status of a remote terminal tab (ADR-0022 §11)', () => {
   describe('a remote Claude tab whose pane is unread (review r3 B1)', () => {
     const T0 = new Date('2026-10-10T12:00:00Z').getTime();
     const setupAgent = async (cliState: 'busy' | 'ready-for-review' | 'unknown') => {
-      state.tab = { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-1-pane-a-tab-r', panelType: 'claude-code', host: 'ai-server' };
+      state.tab = { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-1-pane-a-tab-r', panelType: 'claude-code', host: 'host-b' };
       await import('@/lib/providers');
       const { StatusManager } = await import('@/lib/status-manager');
       const manager = new StatusManager(undefined, vi.fn(async () => true), vi.fn(async () => {}));
@@ -100,7 +100,7 @@ describe('status of a remote terminal tab (ADR-0022 §11)', () => {
         lastEvent: { name: 'prompt-submit', at: T0 - 30 * 60_000, seq: 1 }, eventSeq: 1,
       });
       const entry = (manager as unknown as { tabs: Map<string, ITabStatusEntry> }).tabs.get('tab-r')!;
-      entry.paneTitle = 'claude|/home/mdone';
+      entry.paneTitle = 'claude|/home/user';
       return { manager, entry };
     };
     beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(T0); });
@@ -115,7 +115,7 @@ describe('status of a remote terminal tab (ADR-0022 §11)', () => {
       vi.setSystemTime(T0 + 20_000);
       await manager.poll();
       expect(entry.cliState).toBe('busy');
-      expect(entry.paneTitle).toBe('claude|/home/mdone');
+      expect(entry.paneTitle).toBe('claude|/home/user');
     });
 
     it('a ready-for-review tab is not made inactive while its pane is unread', async () => {

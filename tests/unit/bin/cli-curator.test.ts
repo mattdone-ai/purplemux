@@ -140,6 +140,7 @@ describe('purplemux curator (ADR-0038)', { timeout: 30_000 }, () => {
       model: 'gemma4:26b', health: { state: 'down', reason: 'tunnel (refused)', since: Date.UTC(2026, 10, 3, 6, 0), checkedAt: 1 }, queued: 2,
       liveSince: Date.UTC(2026, 10, 3, 6, 0), rateLimitMs: 10000,
       kodit: { before: { docsPerHour: 851.4, summariesPerHour: 4153.3, samples: 25 }, after: null, drop: null, measuredAt: 1 },
+      koditCheck: { state: 'configured', host: 'host-b-lan' },
       tasks: [{
         task: 'classify-owner-message', state: 'shadow', promptVersion: 'com-v1-7f8e6a02', shadowEndsAt: Date.UTC(2026, 10, 6, 6, 0), promotedAt: null,
         queue: { size: 4, oldestAt: Date.UTC(2026, 10, 4, 0, 0) },
@@ -159,7 +160,24 @@ describe('purplemux curator (ADR-0038)', { timeout: 30_000 }, () => {
     expect(res.stdout).toContain('  shadow standing-order precision 2/2 (needs n >= 30, >= 0.90): FAIL\n');
     expect(res.stdout).toContain('  pool: no usable held-out evaluation of this prompt\n');
     expect(res.stdout).toContain('kodit before: 851 docs/h, 4153 summaries/h (25 samples)');
+    expect(res.stdout).toContain('kodit check: reads the log on host-b-lan\n');
     expect(res.stdout).toContain('eval classify-owner-message: running 3/10');
+  });
+
+  it('status says when the kodit check is not configured, and an older server without koditCheck prints no such line', async () => {
+    const body = (koditCheck?: unknown) => ({
+      model: 'gemma4:26b', health: { state: 'ok', checkedAt: 1 }, queued: 0, liveSince: null, rateLimitMs: 0, kodit: null, tasks: [], evals: [],
+      ...(koditCheck ? { koditCheck } : {}),
+    });
+    const reason = 'PMUX_KODIT_LOG_HOST is not set in the server environment, so the kodit check (ADR-0038 §7) does not run';
+    routes['GET /api/cli/curator'] = () => ({ status: 200, body: body({ state: 'not-configured', reason }) });
+    const unset = await cli(['status']);
+    expect(unset.code, unset.stderr).toBe(0);
+    expect(unset.stdout).toContain(`kodit check: NOT CONFIGURED: ${reason}\n`);
+    routes['GET /api/cli/curator'] = () => ({ status: 200, body: body() });
+    const older = await cli(['status']);
+    expect(older.code, older.stderr).toBe(0);
+    expect(older.stdout).not.toContain('kodit check');
   });
 
   it('spot-check open drafts the item and posts it as the bound run\'s attention.opened, with the owner review', async () => {

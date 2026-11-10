@@ -45,8 +45,8 @@ describe('the NEEDS-DECISION end line', () => {
   it('reads an optional class tag and up to four (a)/(1) options', () => {
     expect(parseNeedsDecisionLine('NEEDS-DECISION: [money] Pay the vendor invoice now? (a) pay today (b) wait for the credit note'))
       .toEqual({ class: 'money', question: 'Pay the vendor invoice now?', options: [{ id: 'a', label: 'pay today' }, { id: 'b', label: 'wait for the credit note' }] });
-    expect(parseNeedsDecisionLine('NEEDS-DECISION: Which host runs the gate? (1) mdserver1, (2) ai-server, (3) both'))
-      .toEqual({ class: null, question: 'Which host runs the gate?', options: [{ id: '1', label: 'mdserver1' }, { id: '2', label: 'ai-server' }, { id: '3', label: 'both' }] });
+    expect(parseNeedsDecisionLine('NEEDS-DECISION: Which host runs the gate? (1) host-a, (2) host-b, (3) both'))
+      .toEqual({ class: null, question: 'Which host runs the gate?', options: [{ id: '1', label: 'host-a' }, { id: '2', label: 'host-b' }, { id: '3', label: 'both' }] });
     expect(parseNeedsDecisionLine('NEEDS-DECISION: [Scope] Is the export in this epic?')).toEqual({ class: 'scope', question: 'Is the export in this epic?', options: [] });
     expect(parseNeedsDecisionLine('NEEDS-DECISION: [urgent] keep (b) then (a)').options).toEqual([]);
     expect(parseNeedsDecisionLine('NEEDS-DECISION: [urgent] keep (b) then (a)').class).toBeNull();

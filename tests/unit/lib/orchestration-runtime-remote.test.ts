@@ -5,7 +5,7 @@ import type { ITab } from '@/types/terminal';
 // pid, so launch and turn evidence (ADR-0021) can retire for a remote worker.
 
 const fx = vi.hoisted(() => ({
-  remote: vi.fn(async () => ({ state: 'present' as const, identity: 'remote:ai-server:s:%0:10:11:12:claude' })),
+  remote: vi.fn(async () => ({ state: 'present' as const, identity: 'remote:host-b:s:%0:10:11:12:claude' })),
   strict: vi.fn(async () => ({ state: 'present' as const, panePid: 10, identity: 's:%0:10' })),
   local: vi.fn(async () => ({ state: 'present' as const, identity: '11:12:claude' })),
 }));
@@ -22,7 +22,7 @@ describe('agent process proof of a remote tab (ADR-0022)', () => {
 
   it('a remote tab is observed on its host, never by a local pid', async () => {
     const { observeOrchestrationProcess } = await import('@/lib/orchestration-runtime');
-    expect(await observeOrchestrationProcess(tab({ host: 'ai-server' }))).toEqual({ state: 'present', identity: 'remote:ai-server:s:%0:10:11:12:claude' });
+    expect(await observeOrchestrationProcess(tab({ host: 'host-b' }))).toEqual({ state: 'present', identity: 'remote:host-b:s:%0:10:11:12:claude' });
     expect(fx.remote).toHaveBeenCalledWith('pt-ws-a-pane-p-tab-r', 'claude');
     expect(fx.strict).not.toHaveBeenCalled();
     expect(fx.local).not.toHaveBeenCalled();

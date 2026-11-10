@@ -114,7 +114,7 @@ describe('extractTurnMarker', () => {
 
   describe('one end line carries one marker, at its start (D28)', () => {
     // v2-scope, ws-ldhziO, 2026-11-05: this line opened owner item nd-cf48b3c9f54f03b198611166b93df723.
-    const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: /home/mdone/.local/share/v2-scope/HANDOFF-SO9-1103.md …';
+    const D28 = 'NEEDS-DECISION: is not mine to send — ORCH holds it. CHECKPOINTED: /home/user/.local/share/v2-scope/HANDOFF-SO9-1103.md …';
 
     it('reads the D28 line as no marker, and says why', () => {
       expect(extractTurnMarker(`Scope pass done.\n\n${D28}`)).toBeNull();

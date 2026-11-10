@@ -40,7 +40,7 @@ const FACTS: IGitFacts = {
 };
 
 const checkpoint = (overrides: Partial<Parameters<typeof buildCheckpoint>[0]> = {}) => buildCheckpoint({
-  taskId: 'seat:ws-a:kit', attempt: 3, workspaceId: 'ws-a', tabId: 'tab-kit', tabName: 'kit', host: 'ai-server', createdAt: 1_000,
+  taskId: 'seat:ws-a:kit', attempt: 3, workspaceId: 'ws-a', tabId: 'tab-kit', tabName: 'kit', host: 'host-b', createdAt: 1_000,
   handoffPath: '/srv/wt/.v2/seats/kit/handoff.md', handoffText: HANDOFF, facts: FACTS, sessionBefore: 'sess-1', ...overrides,
 });
 
@@ -65,7 +65,7 @@ describe('the checkpoint (AC2)', () => {
   it('carries the task, the attempt, the tool facts and the agent fields; its key names no session or account', () => {
     const cp = checkpoint();
     expect(cp).toMatchObject({
-      id: 'seat:ws-a:kit#3', taskId: 'seat:ws-a:kit', attempt: 3, host: 'ai-server', facts: FACTS,
+      id: 'seat:ws-a:kit#3', taskId: 'seat:ws-a:kit', attempt: 3, host: 'host-b', facts: FACTS,
       intendedNextAction: '/implement story-7 --fix-findings', outstandingDecisionIds: ['MC-102', 'MC-103'],
       failedApproaches: ['Retry the flaky gate unchanged: it failed twice on the same seed.'],
       evidenceRefs: ['DEC-58', 'lane ledger ORCH-1 2026-11-03T02:58:09Z'], rationale: ['Kept the old index (DEC-61).'],

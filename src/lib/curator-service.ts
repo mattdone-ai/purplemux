@@ -7,7 +7,7 @@ import {
 import { CuratorClient, type ICuratorJob } from '@/lib/curator-client';
 import { isFiledOrderItem } from '@/lib/curator-filed-order';
 import { CURATOR_EVAL_WORKSPACE, runCuratorEval, scoreLabels, type TCuratorSplit } from '@/lib/curator-eval';
-import { KODIT_LOG_HOST, KODIT_LOG_PATH, KODIT_WINDOW_MS, koditDrop, koditNeedsRateLimit, koditRate, parseKoditLog } from '@/lib/curator-kodit';
+import { KODIT_LOG_PATH, KODIT_WINDOW_MS, KODIT_NOT_CONFIGURED, koditCheckConfig, koditDrop, koditLogHost, koditNeedsRateLimit, koditRate, parseKoditLog } from '@/lib/curator-kodit';
 import { queueAdditions, queueView, validateImport, type IShadowCall } from '@/lib/curator-labels';
 import { findTwin, missionAskText, resolveLabelledText, transcriptUserEntries, workspaceTranscripts } from '@/lib/curator-sources';
 import { SPOT_CHECK_ITEM_PREFIX, buildSpotCheckQuestion, drawMatchSpotCheck, drawSpotCheck, isSpotCheckItem, readSpotCheckAnswer } from '@/lib/curator-spot-check';
@@ -139,8 +139,14 @@ export const DIGEST_UNKNOWN = 'served model digest unknown: no probe of the cura
 const checkKodit = async (now: number): Promise<void> => {
   const state = await readCuratorState();
   if (state.liveSince === null || (state.kodit?.after && state.kodit.after.docsPerHour !== null)) return;
+  const host = koditLogHost();
+  if (host === null) {
+    // Visible twice: this warning, and `koditCheck` in the curator status (`purplemux curator status`).
+    log.warn(`curator: ${KODIT_NOT_CONFIGURED}`);
+    return;
+  }
   const { runSsh } = await import('@/lib/remote-host');
-  const { stdout } = await runSsh(KODIT_LOG_HOST, `cat ${KODIT_LOG_PATH}`, { timeoutMs: 10_000 });
+  const { stdout } = await runSsh(host, `cat ${KODIT_LOG_PATH}`, { timeoutMs: 10_000 });
   const samples = parseKoditLog(stdout);
   const before = koditRate(samples, state.liveSince - KODIT_WINDOW_MS, state.liveSince);
   const after = now >= state.liveSince + KODIT_WINDOW_MS ? koditRate(samples, state.liveSince, state.liveSince + KODIT_WINDOW_MS) : null;
@@ -407,6 +413,7 @@ export const readCuratorStatus = async () => {
     liveSince: state.liveSince,
     rateLimitMs: state.rateLimitMs,
     kodit: state.kodit,
+    koditCheck: koditCheckConfig(),
     tasks,
     evals: [...g.__ptCuratorEvals!.values()],
   };

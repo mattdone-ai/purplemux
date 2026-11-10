@@ -6,9 +6,9 @@ import { RemoteHostError } from '@/lib/remote-host';
 // 503 remote-host-unreachable, never "the tab is dead" and never a 500; a remote tab cannot be
 // switched to an agent from the web UI.
 
-const REMOTE_TAB = { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-a-pane-p-tab-r', panelType: 'terminal' as const, host: 'ai-server' };
+const REMOTE_TAB = { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-a-pane-p-tab-r', panelType: 'terminal' as const, host: 'host-b' };
 const LOCAL_TAB = { id: 'tab-l', name: 'l', order: 1, sessionName: 'pt-ws-a-pane-p-tab-l', panelType: 'terminal' as const };
-const unreachable = () => new RemoteHostError('ai-server', 'remote host ai-server did not answer over ssh');
+const unreachable = () => new RemoteHostError('host-b', 'remote host host-b did not answer over ssh');
 
 const fx = vi.hoisted(() => ({
   findTab: vi.fn(),
@@ -75,7 +75,7 @@ const call = async (route: string, method: string, query: Record<string, string>
   return state;
 };
 
-const UNREACHABLE = { code: 'remote-host-unreachable', host: 'ai-server' };
+const UNREACHABLE = { code: 'remote-host-unreachable', host: 'host-b' };
 
 describe('routes a remote tab reaches (ADR-0022, review r1)', () => {
   beforeEach(() => {
@@ -86,7 +86,7 @@ describe('routes a remote tab reaches (ADR-0022, review r1)', () => {
 
   it('tab status serves the host of a remote tab and none for a local one', async () => {
     const remote = await call('@/pages/api/cli/tabs/[tabId]/status', 'GET', { tabId: 'tab-r', workspaceId: 'ws-a' });
-    expect(remote.body).toMatchObject({ tabId: 'tab-r', host: 'ai-server', alive: true, command: 'bash' });
+    expect(remote.body).toMatchObject({ tabId: 'tab-r', host: 'host-b', alive: true, command: 'bash' });
     fx.findTab.mockResolvedValue({ workspaceId: 'ws-a', paneId: 'pane-p', tab: LOCAL_TAB });
     const local = await call('@/pages/api/cli/tabs/[tabId]/status', 'GET', { tabId: 'tab-l', workspaceId: 'ws-a' });
     expect(local.body).not.toHaveProperty('host');

@@ -244,10 +244,10 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
 
   it('a remote host that does not answer is retryable 503 remote-host-unreachable, never session-not-running (ADR-0022)', async () => {
     const { RemoteHostError } = await import('@/lib/remote-host');
-    tmux.hasSession.mockRejectedValue(new RemoteHostError('ai-server', 'remote host ai-server did not answer over ssh'));
+    tmux.hasSession.mockRejectedValue(new RemoteHostError('host-b', 'remote host host-b did not answer over ssh'));
     const response = await call({ content: 'run the tests' });
     expect(response.statusCode).toBe(503);
-    expect(response.body).toMatchObject({ code: 'remote-host-unreachable', host: 'ai-server' });
+    expect(response.body).toMatchObject({ code: 'remote-host-unreachable', host: 'host-b' });
     expect(delivery.deliverPrompt).not.toHaveBeenCalled();
   });
 

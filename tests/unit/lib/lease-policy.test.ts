@@ -36,7 +36,7 @@ describe('lease kind policy table (architecture.md "Lease kinds")', () => {
 
 describe('parseLeaseName', () => {
   it('lower-cases so two spellings are one lease', () => {
-    expect(parseLeaseName('merge:NomuPay/treasury-api')).toEqual({ name: 'merge:nomupay/treasury-api', kind: 'merge', resource: 'nomupay/treasury-api' });
+    expect(parseLeaseName('merge:Acme/acme-ledger-api')).toEqual({ name: 'merge:acme/acme-ledger-api', kind: 'merge', resource: 'acme/acme-ledger-api' });
   });
 
   it.each([
@@ -45,22 +45,22 @@ describe('parseLeaseName', () => {
     ['m:x/y', 'does not match'],
     ['1merge:x/y', 'does not match'],
     ['merge:x y', 'does not match'],
-    ['merge:nomupay', 'must be <owner>/<repo>'],
+    ['merge:acme', 'must be <owner>/<repo>'],
     ['dev-deploy:a/b/c', 'must be <owner>/<repo>'],
-    ['num:nomupay/treasury-api:adr', 'must be <owner>/<repo>:<adr|migration>:<nnnn>'],
-    ['num:nomupay/treasury-api:rfc:0001', 'must be <owner>/<repo>:<adr|migration>:<nnnn>'],
+    ['num:acme/acme-ledger-api:adr', 'must be <owner>/<repo>:<adr|migration>:<nnnn>'],
+    ['num:acme/acme-ledger-api:rfc:0001', 'must be <owner>/<repo>:<adr|migration>:<nnnn>'],
     ['epic:a/b', 'must be an epic slug'],
     [`epic:${'a'.repeat(101)}`, 'must be an epic slug'],
-    ['pool:ai-lan/review-1', 'must be <host>/<gate|build|mutation|browser|test-service|tab>-<n>'],
-    ['pool:ai-lan/gate-1000', 'must be <host>/<gate|build|mutation|browser|test-service|tab>-<n>'],
+    ['pool:host-b-lan/review-1', 'must be <host>/<gate|build|mutation|browser|test-service|tab>-<n>'],
+    ['pool:host-b-lan/gate-1000', 'must be <host>/<gate|build|mutation|browser|test-service|tab>-<n>'],
   ])('refuses %j with a named rule', (raw, message) => {
     expect(() => parseLeaseName(raw)).toThrow(LeasePolicyError);
     expect(() => parseLeaseName(raw)).toThrow(message);
   });
 
   it('accepts every kind in its resource form', () => {
-    for (const name of ['merge:nomupay/treasury-api', 'dev-deploy:nomupay/treasury-ui', 'dev-write:dev', 'deploy:purplemux',
-      'epic:purplemux-portfolio-coordination', 'num:nomupay/treasury-api:adr:0373', 'num:nomupay/treasury-event-consumer:migration:415', 'pool:ai-lan/gate-1', 'pool:mdserver1/tab-12', 'smoke:anything/goes#1']) {
+    for (const name of ['merge:acme/acme-ledger-api', 'dev-deploy:acme/acme-ledger-ui', 'dev-write:dev', 'deploy:purplemux',
+      'epic:purplemux-portfolio-coordination', 'num:acme/acme-ledger-api:adr:0373', 'num:acme/acme-ledger-event-consumer:migration:415', 'pool:host-b-lan/gate-1', 'pool:host-a/tab-12', 'smoke:anything/goes#1']) {
       expect(parseLeaseName(name).name).toBe(name);
     }
   });

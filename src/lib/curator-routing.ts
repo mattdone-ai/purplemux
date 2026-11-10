@@ -8,7 +8,7 @@ import type { ICuratorResult } from '@/types/curator';
 
 export const ORDER_CANDIDATES_KEY = 'curator.standing-order.candidates';
 /**
- * treasury-v2's workspace files no SO-n: its owner rules live in its own decisions record (consult v2 point 6). Its SM
+ * acme-ledger-v2's workspace files no SO-n: its owner rules live in its own decisions record (consult v2 point 6). Its SM
  * receives the label as a candidate for `/v2-scope` until v2 records its own row and the admin removes the entry.
  */
 export const DEFAULT_ORDER_CANDIDATES = 'ws-ldhziO=v2-scrum-master';

@@ -6,7 +6,7 @@ import path from 'path';
 // on a libuv threadpool of 4 workers shared by the whole server (tab status, session parsing,
 // static files). A read on an sshfs mount that hangs keeps its worker blocked in the kernel even
 // after the caller's deadline abandons the promise, so unbounded pulse reads on the `_output` mount
-// could pin every worker while ai-server is unreachable. Paths under a `fuse.sshfs` mount therefore
+// could pin every worker while host-b is unreachable. Paths under a `fuse.sshfs` mount therefore
 // go through one process-wide limiter (at most 2 in flight, a slot freed only when the call
 // returns) and a breaker per mount (after a timeout no new read is issued there until one probe
 // `stat` of the mount returns). Local paths are called directly.

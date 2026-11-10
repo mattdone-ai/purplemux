@@ -30,7 +30,7 @@ beforeEach(() => {
   deps = {
     workspaces: async () => [{ id: 'ws-1', name: 'Portfolio' }],
     agentTabs: async () => [
-      tab('tab-busy'), tab('tab-typed'), tab('tab-idle'), tab('tab-remote', { host: 'ai-server' }),
+      tab('tab-busy'), tab('tab-typed'), tab('tab-idle'), tab('tab-remote', { host: 'host-b' }),
     ],
     statuses: () => ({
       'tab-busy': status('busy', { busySince: NOW - 3 * MIN, lastEvent: { name: 'prompt-submit', at: NOW - 3 * MIN, seq: 9 } }),
@@ -172,7 +172,7 @@ describe('buildFleetView', () => {
 describe('buildFleetView: WIP per workspace (ADR-0027)', () => {
   it('counts each workspace\'s agent tabs against the fleet cap; an unread layout has no count', async () => {
     deps.workspaces = async () => [{ id: 'ws-1', name: 'Portfolio' }, { id: 'ws-2', name: 'Quiet' }, { id: 'ws-3', name: 'Broken' }];
-    deps.agentTabs = async (id) => (id === 'ws-3' ? null : id === 'ws-2' ? [] : [tab('tab-a'), tab('tab-b', { host: 'ai-server' }), tab('tab-c')]);
+    deps.agentTabs = async (id) => (id === 'ws-3' ? null : id === 'ws-2' ? [] : [tab('tab-a'), tab('tab-b', { host: 'host-b' }), tab('tab-c')]);
     deps.config = async (key) => (key === 'tabs.cap-per-workspace' ? '2' : null);
     const view = await buildFleetView(deps, NOW);
     expect(view.wip).toEqual({ 'ws-1': { count: 3, cap: 2, overCap: true }, 'ws-2': { count: 0, cap: 2, overCap: false } });
@@ -240,7 +240,7 @@ describe('readComposer', () => {
 });
 
 describe('the pool would-refuse counter on the fleet view (vel-D4 review r1 F1)', () => {
-  const counter = { mode: 'shadow' as const, total: 2, since: new Date(NOW - 60 * MIN).toISOString(), byHost: { 'ai-lan': { total: 2, byRefusal: { overloaded: 2 } } }, last: null };
+  const counter = { mode: 'shadow' as const, total: 2, since: new Date(NOW - 60 * MIN).toISOString(), byHost: { 'host-b-lan': { total: 2, byRefusal: { overloaded: 2 } } }, last: null };
 
   it('carries the counter when it is read', async () => {
     expect((await buildFleetView({ ...deps, poolWouldRefuse: async () => counter }, NOW)).pool).toEqual(counter);

@@ -18,7 +18,7 @@ const active: IGrant = {
   id: 'g-live1', capability: 'drive', grantee: { workspaceId: 'ws-1', tabId: 'tab-orch' }, workspaces: ['ws-2', 'ws-3'], reason: 'r',
   createdAt: NOW - 1, createdBy: 'human', expiresAt: NOW + 3_600_000, revokedAt: null, revokedBy: null, revokeReason: null, expiryNotedAt: null,
 };
-const names = { 'ws-1': 'Portfolio', 'ws-2': 'Billing', 'ws-3': 'Treasury' };
+const names = { 'ws-1': 'Portfolio', 'ws-2': 'Billing', 'ws-3': 'Acme-ledger' };
 
 const panel = (over: Partial<IPortfolioGrantsPanelProps> = {}) => renderToStaticMarkup(
   <NextIntlClientProvider locale="en" timeZone="UTC" messages={{ grants }}>
@@ -55,7 +55,7 @@ describe('portfolio grants dialog content', () => {
   it('lists an active grant with its workspaces, expiry and a Revoke button; revoked and expired ones are gone', () => {
     const html = panel({ grants: [active, { ...active, id: 'g-rev1', revokedAt: NOW - 1 }, { ...active, id: 'g-exp1', expiresAt: NOW }] });
     expect(html).toContain('data-grant="g-live1"');
-    expect(html).toContain('reads Billing, Treasury');
+    expect(html).toContain('reads Billing, Acme-ledger');
     expect(html).toContain('Revoke');
     expect(html).not.toContain('g-rev1');
     expect(html).not.toContain('g-exp1');
@@ -84,7 +84,7 @@ describe('portfolio grants dialog content', () => {
 
   it('unreadable workspaces are named, and an empty list then does not claim "no tabs"', () => {
     const html = panel({ grantees: [], unreadableWorkspaceIds: ['ws-3'] });
-    expect(html).toContain('Tabs of Treasury could not be read');
+    expect(html).toContain('Tabs of Acme-ledger could not be read');
     expect(html).not.toContain('No tabs to grant');
   });
 
@@ -118,7 +118,7 @@ describe('grant badge', () => {
     );
     expect(html).toContain('reads 2 workspaces');
     expect(html).toContain('data-grant-badge="2"');
-    expect(html).toMatch(/aria-label="Reads Billing, Treasury until [^"]+"/);
+    expect(html).toMatch(/aria-label="Reads Billing, Acme-ledger until [^"]+"/);
     expect(html).not.toContain('data-stale');
   });
 

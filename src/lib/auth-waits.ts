@@ -11,7 +11,7 @@ const PROFILE_CHAR = 'A-Za-z0-9._-';
 
 const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** The clear input names the profile as a whole word: `aws sso login --profile nomupay-dev`. */
+/** The clear input names the profile as a whole word: `aws sso login --profile acme-dev`. */
 export const namesProfile = (clearInput: string | null, profile: string): boolean =>
   clearInput !== null && new RegExp(`(?:^|[^${PROFILE_CHAR}])${escape(profile)}(?:$|[^${PROFILE_CHAR}])`).test(clearInput);
 

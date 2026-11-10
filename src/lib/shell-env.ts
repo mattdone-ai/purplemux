@@ -74,7 +74,7 @@ const REMOTE_INHERITED_KEYS = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'XDG_
 /**
  * One command in the shell a remote pane gets (harness-flow-loop-2 story 12): the same `env -i` floor and the remote
  * account's `$SHELL`, interactive and login, as the pane's own shell is. `sh -s` reads no profile, so it can find no
- * `node` that the pane finds (measured on mdserver1: only `-ilc` finds nvm's node). Its stdin is `/dev/null`: in a
+ * `node` that the pane finds (measured on host-a: only `-ilc` finds nvm's node). Its stdin is `/dev/null`: in a
  * create script, stdin is the rest of the script. Its stderr is the caller's to redirect.
  */
 export const buildRemoteLoginShellCommand = (command: string): string => {

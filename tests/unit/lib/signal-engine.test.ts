@@ -168,9 +168,9 @@ describe('parseClaudeToolActivity', () => {
 
 describe('normalizeScopePattern / isInScope with real-world scopes', () => {
   it('reads an absolute scope path relative to the cwd', () => {
-    expect(normalizeScopePattern('/repo/treasury/.worktrees/story-01', '/repo')).toBe('treasury/.worktrees/story-01/**');
-    expect(isInScope('treasury/.worktrees/story-01/src/a.ts', ['/repo/treasury/.worktrees/story-01'], '/repo')).toBe(true);
-    expect(isInScope('treasury/.worktrees/story-02/src/a.ts', ['/repo/treasury/.worktrees/story-01'], '/repo')).toBe(false);
+    expect(normalizeScopePattern('/repo/acme-ledger/.worktrees/story-01', '/repo')).toBe('acme-ledger/.worktrees/story-01/**');
+    expect(isInScope('acme-ledger/.worktrees/story-01/src/a.ts', ['/repo/acme-ledger/.worktrees/story-01'], '/repo')).toBe(true);
+    expect(isInScope('acme-ledger/.worktrees/story-02/src/a.ts', ['/repo/acme-ledger/.worktrees/story-01'], '/repo')).toBe(false);
   });
 
   it('treats a glob-free pattern as the directory and everything beneath it', () => {
@@ -199,9 +199,9 @@ describe('off-scope re-fire discipline', () => {
   });
 
   it('does not fire for edits inside an absolute worktree scope', () => {
-    const scope = [`${CWD}/treasury/.worktrees/story-01`];
-    engine.record('t1', edit('treasury/.worktrees/story-01/a.ts', 'treasury/.worktrees/story-01/b.ts'), scope, CWD);
-    engine.record('t1', edit('treasury/.worktrees/story-01/c.ts'), scope, CWD);
+    const scope = [`${CWD}/acme-ledger/.worktrees/story-01`];
+    engine.record('t1', edit('acme-ledger/.worktrees/story-01/a.ts', 'acme-ledger/.worktrees/story-01/b.ts'), scope, CWD);
+    engine.record('t1', edit('acme-ledger/.worktrees/story-01/c.ts'), scope, CWD);
     expect(fired).toHaveLength(0);
   });
 

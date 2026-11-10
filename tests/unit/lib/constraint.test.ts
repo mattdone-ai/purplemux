@@ -309,7 +309,7 @@ describe('missing inputs (AC 7)', () => {
   });
 
   it('shows the ledger unreadable as unknown: no constraint, no windows, every anomaly unknown', () => {
-    const result = deriveConstraint(null, flowRecord(NOW - MIN), READY_SPEND, { hosts: [{ name: 'mdserver1', slotsUsed: 2, slotsTotal: 8 }] }, NOW);
+    const result = deriveConstraint(null, flowRecord(NOW - MIN), READY_SPEND, { hosts: [{ name: 'host-a', slotsUsed: 2, slotsTotal: 8 }] }, NOW);
     expect(result.inputs.ledger).toEqual({ state: 'unknown', reason: 'ledger unreadable', at: null });
     expect(result.constraint).toBeNull();
     expect(result.windows).toEqual([]);
@@ -319,7 +319,7 @@ describe('missing inputs (AC 7)', () => {
     expect(result.line).toBe('no goal set · items left — · constraint unknown (ledger unreadable)');
     expect(result.inputs.flow.state).toBe('ok');
     expect(result.flowLocks).toEqual([{ name: 'landing', heldBy: 'lane-a', since: NOW - 6 * MIN }]);
-    expect(result.pool).toEqual({ hosts: [{ name: 'mdserver1', slotsUsed: 2, slotsTotal: 8 }], slotsUsed: 2, slotsTotal: 8 });
+    expect(result.pool).toEqual({ hosts: [{ name: 'host-a', slotsUsed: 2, slotsTotal: 8 }], slotsUsed: 2, slotsTotal: 8 });
   });
 
   it('shows a ledger holding no event for the workspace as unknown, not as nothing waited (F1)', () => {

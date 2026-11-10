@@ -8,7 +8,7 @@ const MISSION_ANSWER = { answerId: '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b', works
 
 const VALID: IInboxFields = {
   note: { noteId: 'n-AbC123', fromWorkspaceId: 'ws-fOvEfz', fromTabId: 'tab-csMTHf', sentAt: AT },
-  watch: { watchId: 'w-9xYz01', target: 'NomuPay/treasury-api#897', notice: 'merged', sha: '66f4647d0123456789abcdef0123456789abcdef' },
+  watch: { watchId: 'w-9xYz01', target: 'Acme/acme-ledger-api#897', notice: 'merged', sha: '66f4647d0123456789abcdef0123456789abcdef' },
   deploy: { deployId: 'd-abcd12', restartAt: AT, inMinutes: 10 },
   mission: MISSION_ANSWER,
   resume: { resumeId: 'r-abcd12' },
@@ -29,7 +29,7 @@ const HOSTILE = [
 describe('inbox templates (ADR-0012)', () => {
   it.each([
     ['note', '[purplemux note n-AbC123] from ws-fOvEfz/tab-csMTHf at 2026-09-26T06:00:00Z — purplemux note show n-AbC123, then purplemux note ack n-AbC123'],
-    ['watch', '[purplemux watch w-9xYz01] NomuPay/treasury-api#897 is MERGED (66f4647d) — watch cleared'],
+    ['watch', '[purplemux watch w-9xYz01] Acme/acme-ledger-api#897 is MERGED (66f4647d) — watch cleared'],
     ['deploy', '[purplemux deploy d-abcd12] purplemux restarts at ~2026-09-26T06:00:00Z (in 10 min) — details: purplemux deploy status d-abcd12; reach a checkpoint; tabs survive, in-flight hook events do not'],
     ['mission', '[purplemux mission 3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b] an answer is ready at 2026-09-26T06:00:00Z — purplemux mission answers -w ws-fOvEfz; ack it with the command shown there after applying it'],
     ['resume', '[purplemux resume r-abcd12] the last turn ended on an API error — continue from where it was cut off'],
@@ -61,22 +61,22 @@ describe('inbox templates (ADR-0012)', () => {
     expect(() => renderInboxLine('note', { ...VALID.note, event: 'acked' } as never)).toThrow(InboxFieldError);
   });
 
-  it.each(['NomuPay/treasury-ui@feature/x-1', 'merge:nomupay/treasury-api'])('accepts a watch target %s', (target) => {
+  it.each(['Acme/acme-ledger-ui@feature/x-1', 'merge:acme/acme-ledger-api'])('accepts a watch target %s', (target) => {
     expect(renderInboxLine('watch', { ...VALID.watch, target }).line).toContain(` ${target} is MERGED`);
   });
 
   const SHA = '66f4647d0123456789abcdef0123456789abcdef';
   const OLD = '1234567890abcdef1234567890abcdef12345678';
   it.each([
-    [{ notice: 'closed', sha: SHA }, 'NomuPay/treasury-api#897 is CLOSED without a merge (66f4647d) — watch cleared'],
-    [{ notice: 'head-moved', sha: SHA, fromSha: OLD }, 'NomuPay/treasury-api#897 head moved 12345678 -> 66f4647d — watch cleared'],
-    [{ notice: 'checks-settled', sha: SHA, green: 12, red: 1 }, 'NomuPay/treasury-api#897 checks settled at 66f4647d: 12 green, 1 red — watch cleared'],
-    [{ notice: 'moved', sha: SHA, fromSha: OLD }, 'NomuPay/treasury-api#897 moved 12345678 -> 66f4647d — watch cleared'],
-    [{ notice: 'free' }, 'NomuPay/treasury-api#897 is free — watch cleared'],
-    [{ notice: 'failing', code: 'http-404' }, 'NomuPay/treasury-api#897 is failing: http-404 — purplemux watch list shows the error; still trying until it expires'],
-    [{ notice: 'expired', until: 'merged' }, 'NomuPay/treasury-api#897 expired without merged — watch cleared'],
+    [{ notice: 'closed', sha: SHA }, 'Acme/acme-ledger-api#897 is CLOSED without a merge (66f4647d) — watch cleared'],
+    [{ notice: 'head-moved', sha: SHA, fromSha: OLD }, 'Acme/acme-ledger-api#897 head moved 12345678 -> 66f4647d — watch cleared'],
+    [{ notice: 'checks-settled', sha: SHA, green: 12, red: 1 }, 'Acme/acme-ledger-api#897 checks settled at 66f4647d: 12 green, 1 red — watch cleared'],
+    [{ notice: 'moved', sha: SHA, fromSha: OLD }, 'Acme/acme-ledger-api#897 moved 12345678 -> 66f4647d — watch cleared'],
+    [{ notice: 'free' }, 'Acme/acme-ledger-api#897 is free — watch cleared'],
+    [{ notice: 'failing', code: 'http-404' }, 'Acme/acme-ledger-api#897 is failing: http-404 — purplemux watch list shows the error; still trying until it expires'],
+    [{ notice: 'expired', until: 'merged' }, 'Acme/acme-ledger-api#897 expired without merged — watch cleared'],
   ] as const)('renders the watch line for %j (ADR-0015)', (fields, text) => {
-    expect(renderInboxLine('watch', { watchId: 'w-9xYz01', target: 'NomuPay/treasury-api#897', ...fields } as never).line)
+    expect(renderInboxLine('watch', { watchId: 'w-9xYz01', target: 'Acme/acme-ledger-api#897', ...fields } as never).line)
       .toBe(`[purplemux watch w-9xYz01] ${text}`);
   });
 

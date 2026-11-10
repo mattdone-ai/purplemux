@@ -51,9 +51,9 @@ describe('mounts', () => {
   it('reads fuse.sshfs mount points from /proc/mounts, octal escapes decoded; a local path has no mount', () => {
     expect(parseSshfsMounts([
       '/dev/mapper/vg-root / ext4 rw 0 0',
-      'mdone@ai-server:/srv/out /home/mdone/code/nomupay/_output fuse.sshfs rw,nosuid 0 0',
+      'user@host-b:/srv/out /home/user/code/acme/_output fuse.sshfs rw,nosuid 0 0',
       'host:/x /mnt/with\\040space fuse.sshfs rw 0 0',
-    ].join('\n'))).toEqual(['/home/mdone/code/nomupay/_output', '/mnt/with space']);
+    ].join('\n'))).toEqual(['/home/user/code/acme/_output', '/mnt/with space']);
     expect(mountOf(path.join(mount, '_output', 'x'))).toBe(path.resolve(mount));
     expect(mountOf(local)).toBeNull();
   });
@@ -129,7 +129,7 @@ describe('confirm r2 fixes', () => {
     const target = path.join(mount, '_output');
     expect(mountOf(target)).toBeNull();
     // The mount unit brings _output up after the server started.
-    mountsText += `ai-server:/srv/out ${path.resolve(mount)} fuse.sshfs rw,nosuid 0 0\n`;
+    mountsText += `host-b:/srv/out ${path.resolve(mount)} fuse.sshfs rw,nosuid 0 0\n`;
     clock += PULSE_FS_MOUNTS_TTL_MS - 1;
     expect(mountOf(target)).toBeNull();
     clock += 1;

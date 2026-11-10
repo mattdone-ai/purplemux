@@ -10,7 +10,7 @@ vi.mock('@/lib/browser-bridge-client', () => ({ getBrowserBridge: vi.fn() }));
 const workspace = (id: string, allowedPeers?: string[]): IWorkspace => ({
   id,
   name: id,
-  directories: ['/home/mdone/code/nomupay'],
+  directories: ['/home/user/code/acme'],
   ...(allowedPeers ? { allowedPeers } : {}),
 });
 

@@ -393,9 +393,9 @@ describe('review round 1 rulings', () => {
   });
 
   it('refuses a remote tab, and a tab whose host is unknown, before reading any evidence (R1-4)', async () => {
-    world.hosts.set('ws-1/tab-w1', 'ai-lan');
+    world.hosts.set('ws-1/tab-w1', 'host-b-lan');
     expect((await refused(reviewReady(), 'event-check-unavailable')).message)
-      .toBe('ws-1/tab-w1 runs on host ai-lan (ADR-0022); the server reads evidence on its own host only, so a remote tab reports through the coordinator');
+      .toBe('ws-1/tab-w1 runs on host host-b-lan (ADR-0022); the server reads evidence on its own host only, so a remote tab reports through the coordinator');
     world.hosts.set('ws-1/tab-w1', 'unknown');
     expect((await refused(reviewReady(), 'event-check-unavailable')).message).toContain('cannot be read from its layout');
     expect(world.evidence.runs).toEqual([]);

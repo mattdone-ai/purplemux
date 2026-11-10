@@ -43,7 +43,7 @@ describe('buildFreshLaunchCommand', () => {
 
   it('builds the remote claude launch for a remote tab', async () => {
     const { buildFreshLaunchCommand } = await import('@/lib/agent-launch');
-    expect(await buildFreshLaunchCommand('ws-a', { panelType: 'claude-code', host: 'ai-server', agentLaunchConfig: PINS })).toBe('remote-claude-launch');
+    expect(await buildFreshLaunchCommand('ws-a', { panelType: 'claude-code', host: 'host-b', agentLaunchConfig: PINS })).toBe('remote-claude-launch');
     expect(claude.buildRemoteClaudeLaunch).toHaveBeenCalledWith('ws-a', PINS);
   });
 

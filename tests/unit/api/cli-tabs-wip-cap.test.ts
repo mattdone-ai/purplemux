@@ -171,7 +171,7 @@ describe('POST /api/cli/tabs: the WIP cap (ADR-0027)', () => {
 
   it('counts remote agent tabs and agent tabs in every pane; terminal, web-browser, diff and agent-sessions do not count', async () => {
     await writeLayout([
-      ...agents(5), fixtureTab('tab-remote', 'claude-code', { host: 'ai-server' }),
+      ...agents(5), fixtureTab('tab-remote', 'claude-code', { host: 'host-b' }),
       fixtureTab('t1', 'terminal'), fixtureTab('t2', 'web-browser'), fixtureTab('t3', 'diff'),
       fixtureTab('t4', 'agent-sessions'), fixtureTab('t5', undefined),
     ]);

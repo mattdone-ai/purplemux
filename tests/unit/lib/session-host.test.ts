@@ -39,26 +39,26 @@ describe('session → host map (ADR-0022 §3)', () => {
   });
 
   it('reads the host from the layout and keeps the answer', async () => {
-    await writeLayout('ws-a', [{ id: 'tab-r', host: 'ai-server' }, { id: 'tab-l' }]);
+    await writeLayout('ws-a', [{ id: 'tab-r', host: 'host-b' }, { id: 'tab-l' }]);
     const { sessionHostOf, knownRemoteHosts } = await import('@/lib/session-host');
-    expect(await sessionHostOf('pt-ws-a-pane-1-tab-r')).toBe('ai-server');
+    expect(await sessionHostOf('pt-ws-a-pane-1-tab-r')).toBe('host-b');
     expect(await sessionHostOf('pt-ws-a-pane-1-tab-l')).toBeNull();
-    expect(knownRemoteHosts()).toEqual(['ai-server']);
+    expect(knownRemoteHosts()).toEqual(['host-b']);
     await fs.rm(path.join(mockHome.value, '.purplemux'), { recursive: true });
-    expect(await sessionHostOf('pt-ws-a-pane-1-tab-r')).toBe('ai-server');
+    expect(await sessionHostOf('pt-ws-a-pane-1-tab-r')).toBe('host-b');
   });
 
   it('answers local for a session no layout names yet, without keeping it', async () => {
     const { sessionHostOf } = await import('@/lib/session-host');
     expect(await sessionHostOf('pt-ws-b-pane-1-tab-new')).toBeNull();
-    await writeLayout('ws-b', [{ id: 'tab-new', host: 'ai-server' }]);
-    expect(await sessionHostOf('pt-ws-b-pane-1-tab-new')).toBe('ai-server');
+    await writeLayout('ws-b', [{ id: 'tab-new', host: 'host-b' }]);
+    expect(await sessionHostOf('pt-ws-b-pane-1-tab-new')).toBe('host-b');
   });
 
   it('a registered session answers before its layout exists; a forgotten one is read again', async () => {
     const { forgetSessionHost, registerSessionHost, sessionHostOf } = await import('@/lib/session-host');
-    registerSessionHost('pt-ws-c-pane-1-tab-x', 'ai-server');
-    expect(await sessionHostOf('pt-ws-c-pane-1-tab-x')).toBe('ai-server');
+    registerSessionHost('pt-ws-c-pane-1-tab-x', 'host-b');
+    expect(await sessionHostOf('pt-ws-c-pane-1-tab-x')).toBe('host-b');
     forgetSessionHost('pt-ws-c-pane-1-tab-x');
     expect(await sessionHostOf('pt-ws-c-pane-1-tab-x')).toBeNull();
   });

@@ -45,7 +45,7 @@ export const nearestWorkspaceDirectory = (target: string, directories: readonly 
  * `hasClaudeMdExternalIncludesApproved: false` with `hasClaudeMdExternalIncludesWarningShown: true`.
  * Claude records no trust refusal ("No, exit" ends the process), and its default project object fills
  * `false` for all three keys, so a `false` is a refusal only in that pair. Measured on 2.1.318: 15 of 15
- * `hasTrustDialogAccepted: false` entries on ai-server were the default triple.
+ * `hasTrustDialogAccepted: false` entries on host-b were the default triple.
  */
 export const isImportsDecline = (entry: TProjectEntry): boolean =>
   entry.hasClaudeMdExternalIncludesApproved === false && entry.hasClaudeMdExternalIncludesWarningShown === true;

@@ -11,14 +11,14 @@ import {
   planDirectoryCreate,
 } from '@/lib/path-safety';
 
-const HOME = '/home/mdone';
+const HOME = '/home/user';
 
 describe('canCreateDirectory', () => {
   it('accepts absolute paths inside home, including home itself', () => {
-    expect(canCreateDirectory('/home/mdone/code/fresh', HOME)).toBe(true);
-    expect(canCreateDirectory('/home/mdone/a/b/c', HOME)).toBe(true);
-    expect(canCreateDirectory('/home/mdone', HOME)).toBe(true);
-    expect(canCreateDirectory('/home/mdone/', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/code/fresh', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/a/b/c', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/', HOME)).toBe(true);
   });
 
   it('rejects paths outside home', () => {
@@ -29,17 +29,17 @@ describe('canCreateDirectory', () => {
   });
 
   it('rejects a sibling home whose name merely starts with the home path', () => {
-    expect(canCreateDirectory('/home/mdone-backup/x', HOME)).toBe(false);
+    expect(canCreateDirectory('/home/user-backup/x', HOME)).toBe(false);
   });
 
   it('rejects any path containing a .. segment, even one that resolves inside home', () => {
-    expect(canCreateDirectory('/home/mdone/../mdone/x', HOME)).toBe(false);
-    expect(canCreateDirectory('/home/mdone/../../etc/x', HOME)).toBe(false);
-    expect(canCreateDirectory('/home/mdone/..', HOME)).toBe(false);
+    expect(canCreateDirectory('/home/user/../user/x', HOME)).toBe(false);
+    expect(canCreateDirectory('/home/user/../../etc/x', HOME)).toBe(false);
+    expect(canCreateDirectory('/home/user/..', HOME)).toBe(false);
   });
 
   it('allows .. inside a path segment name', () => {
-    expect(canCreateDirectory('/home/mdone/we..ird', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/we..ird', HOME)).toBe(true);
   });
 
   it('rejects relative paths', () => {
@@ -51,27 +51,27 @@ describe('canCreateDirectory', () => {
   it('treats a leading ~ as a literal directory name, never as home', () => {
     expect(canCreateDirectory('~/code/fresh', HOME)).toBe(false);
     expect(canCreateDirectory('~', HOME)).toBe(false);
-    expect(canCreateDirectory('/home/mdone/~/x', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/~/x', HOME)).toBe(true);
   });
 
   it('never consults the filesystem — containment is lexical by design', () => {
-    expect(canCreateDirectory('/home/mdone/projects/newthing', HOME)).toBe(true);
-    expect(canCreateDirectory('/home/mdone/does-not-exist/at/all', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/projects/newthing', HOME)).toBe(true);
+    expect(canCreateDirectory('/home/user/does-not-exist/at/all', HOME)).toBe(true);
   });
 
   it('rejects blank, non-string, and non-absolute home values', () => {
     expect(canCreateDirectory('', HOME)).toBe(false);
     expect(canCreateDirectory('   ', HOME)).toBe(false);
-    expect(canCreateDirectory('/home/mdone/x', '')).toBe(false);
-    expect(canCreateDirectory('/home/mdone/x', 'home/mdone')).toBe(false);
+    expect(canCreateDirectory('/home/user/x', '')).toBe(false);
+    expect(canCreateDirectory('/home/user/x', 'home/user')).toBe(false);
     expect(canCreateDirectory(undefined as unknown as string, HOME)).toBe(false);
-    expect(canCreateDirectory('/home/mdone/x', null as unknown as string)).toBe(false);
+    expect(canCreateDirectory('/home/user/x', null as unknown as string)).toBe(false);
   });
 });
 
 describe('buildDirectoryValidation', () => {
   it('reports an existing directory as valid with a suggested name', () => {
-    expect(buildDirectoryValidation({ directory: '/home/mdone/code', home: HOME, stat: 'directory' })).toEqual({
+    expect(buildDirectoryValidation({ directory: '/home/user/code', home: HOME, stat: 'directory' })).toEqual({
       valid: true,
       suggestedName: 'code',
       exists: true,
@@ -91,7 +91,7 @@ describe('buildDirectoryValidation', () => {
   });
 
   it('reports a missing in-home path as creatable', () => {
-    expect(buildDirectoryValidation({ directory: '/home/mdone/fresh', home: HOME, stat: 'missing' })).toEqual({
+    expect(buildDirectoryValidation({ directory: '/home/user/fresh', home: HOME, stat: 'missing' })).toEqual({
       valid: false,
       error: DIRECTORY_MISSING_ERROR,
       exists: false,
@@ -111,7 +111,7 @@ describe('buildDirectoryValidation', () => {
   });
 
   it('reports an existing file as existing, not a directory, and never creatable', () => {
-    expect(buildDirectoryValidation({ directory: '/home/mdone/notes.txt', home: HOME, stat: 'file' })).toEqual({
+    expect(buildDirectoryValidation({ directory: '/home/user/notes.txt', home: HOME, stat: 'file' })).toEqual({
       valid: false,
       error: NOT_A_DIRECTORY_ERROR,
       exists: true,
@@ -123,20 +123,20 @@ describe('buildDirectoryValidation', () => {
 
 describe('planDirectoryCreate', () => {
   it('uses an existing directory whether or not mkdir was asked for', () => {
-    expect(planDirectoryCreate({ directory: '/home/mdone/code', home: HOME, stat: 'directory', mkdir: false })).toEqual({ action: 'use' });
+    expect(planDirectoryCreate({ directory: '/home/user/code', home: HOME, stat: 'directory', mkdir: false })).toEqual({ action: 'use' });
     expect(planDirectoryCreate({ directory: '/etc', home: HOME, stat: 'directory', mkdir: true })).toEqual({ action: 'use' });
   });
 
   it('creates a missing in-home path only when mkdir is opted in', () => {
-    expect(planDirectoryCreate({ directory: '/home/mdone/fresh', home: HOME, stat: 'missing', mkdir: true })).toEqual({ action: 'create' });
-    expect(planDirectoryCreate({ directory: '/home/mdone/fresh', home: HOME, stat: 'missing', mkdir: false })).toEqual({
+    expect(planDirectoryCreate({ directory: '/home/user/fresh', home: HOME, stat: 'missing', mkdir: true })).toEqual({ action: 'create' });
+    expect(planDirectoryCreate({ directory: '/home/user/fresh', home: HOME, stat: 'missing', mkdir: false })).toEqual({
       action: 'reject',
       error: DIRECTORY_MISSING_ERROR,
     });
   });
 
   it('refuses to create outside home even with mkdir', () => {
-    for (const directory of ['/etc/x', '/home/mdone/../x', '~/../x', 'relative/x']) {
+    for (const directory of ['/etc/x', '/home/user/../x', '~/../x', 'relative/x']) {
       expect(planDirectoryCreate({ directory, home: HOME, stat: 'missing', mkdir: true })).toEqual({
         action: 'reject',
         error: OUTSIDE_HOME_ERROR,
@@ -145,7 +145,7 @@ describe('planDirectoryCreate', () => {
   });
 
   it('refuses an existing file without attempting a create', () => {
-    expect(planDirectoryCreate({ directory: '/home/mdone/notes.txt', home: HOME, stat: 'file', mkdir: true })).toEqual({
+    expect(planDirectoryCreate({ directory: '/home/user/notes.txt', home: HOME, stat: 'file', mkdir: true })).toEqual({
       action: 'reject',
       error: NOT_A_DIRECTORY_ERROR,
     });

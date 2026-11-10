@@ -48,7 +48,7 @@ const checks = async (inst, { parseJson, brief }, results) => {
   push(spot.rc === 0 && spot.out.trim() === 'spot check (not opened): unanswered', 'curator-spot-check-unopened',
     'the spot check reads unanswered before it is opened', `rc ${spot.rc} ${brief(spot.out)} ${brief(spot.err)}`, 'spot check (not opened): unanswered');
 
-  const refused = await inst.cli(['config', 'set', 'curator.routing.workspaces', 'treasury-v2']);
+  const refused = await inst.cli(['config', 'set', 'curator.routing.workspaces', 'acme-ledger-v2']);
   push(refused.rc === 2 && refused.err.includes('takes workspace ids'), 'curator-routing-key', 'routing opts in by workspace id only (AC 3)',
     `rc ${refused.rc} ${brief(refused.err)}`, 'rc 2 config-invalid');
 

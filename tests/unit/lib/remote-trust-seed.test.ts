@@ -17,7 +17,7 @@ describe('the remote trust-seed script (story 05 AC 2)', () => {
 
   beforeEach(() => {
     home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pmux-remote-home-')));
-    kit = path.join(home, '.purplemux-remote', 'mdserver1');
+    kit = path.join(home, '.purplemux-remote', 'host-a');
     fs.mkdirSync(kit, { recursive: true });
     fs.writeFileSync(path.join(kit, REMOTE_TRUST_SEED_RELATIVE), REMOTE_TRUST_SEED_SCRIPT);
     workspace = path.join(home, 'code', 'purplemux');

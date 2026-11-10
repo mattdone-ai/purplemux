@@ -21,8 +21,8 @@ const entry = (id: string, extra: Partial<ITabStatusEntry> = {}): ITabStatusEntr
   cliState: 'idle', workspaceId: 'ws-1', tabName: id, tmuxSession: `tmux-${id}`, panelType: 'claude-code', ...extra,
 });
 
-const remoteJob: IBackgroundJob = { workspaceId: 'ws-1', tabId: 'w', pid: 157985, host: 'ai-lan', label: 'gate-r1.log', notify: 'self', registeredAt: 0 };
-const unreachable: TLivenessEvent = { kind: 'bg-host-unreachable', job: remoteJob, host: 'ai-lan', failures: 3, error: 'ssh to ai-lan failed (exit 255)' };
+const remoteJob: IBackgroundJob = { workspaceId: 'ws-1', tabId: 'w', pid: 157985, host: 'host-b-lan', label: 'gate-r1.log', notify: 'self', registeredAt: 0 };
+const unreachable: TLivenessEvent = { kind: 'bg-host-unreachable', job: remoteJob, host: 'host-b-lan', failures: 3, error: 'ssh to host-b-lan failed (exit 255)' };
 
 const setup = async (orchestration: { enabled: boolean; orchestratorTabId: string | null }, w: Partial<ITabStatusEntry> = {}) => {
   const ws = { id: 'ws-1', name: 'ws', directories: ['/tmp'], orchestration };
@@ -68,7 +68,7 @@ describe('a remote job whose host does not answer (D63, AC 3)', () => {
     const message = paste.mock.calls[0][1];
     expect(paste.mock.calls.map(([session]) => session)).toEqual(['tmux-o1']);
     expect(message).toContain('HOST UNREACHABLE');
-    expect(message).toContain('pid 157985 on ai-lan');
+    expect(message).toContain('pid 157985 on host-b-lan');
     expect(message).toContain('NOT known to have exited');
     expect(message).not.toMatch(/exited with/);
     expect(alerts.mock.calls.map(([p]) => p.kind)).toEqual(['bg-host-unreachable']);

@@ -111,7 +111,7 @@ describe('the gate and the opt-in (AC 5)', () => {
   });
 });
 
-describe('treasury-v2 (AC 5, consult C1)', () => {
+describe('acme-ledger-v2 (AC 5, consult C1)', () => {
   it('a standing-order label in ws-ldhziO goes to v2-scrum-master as a candidate once the task routes, without the opt-in, and files no SO-n', async () => {
     const { deps } = fake();
     const out = await routeOwnerMessage(deps, msg('ws-ldhziO'), result('standing-order'));

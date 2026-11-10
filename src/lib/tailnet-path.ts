@@ -3,7 +3,7 @@ import type { IPoolPathRead, IPoolPathView, TPoolPathAlert } from '@/types/pool'
 // The tailnet path to each remote pool host (vel-RETRO-R2): measured from this host, where tailscale runs, beside each
 // 30 s pool read. Retro 2026-11-09 R2: the exec hosts reached control-host only through a DERP relay (RTT ~1 s, ssh
 // 18-25 s) for hours and no tool noticed. The pool reports the path; it never refuses a host for it.
-// Design: docs/design/vel-retro-r2-tailnet-path.md. No Node imports: the fleet panel renders these lines in the
+// Design: the vel-RETRO-R2 design check (an internal record). No Node imports: the fleet panel renders these lines in the
 // browser (CLAUDE.md, host-warnings.ts); the exec deps are in `pool-read.ts`.
 
 export const POOL_PATH_SLOW_KEY = 'pool.path.slow-ms';

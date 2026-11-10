@@ -72,7 +72,7 @@ describe('host metrics', () => {
   });
 });
 
-const VALID = { schemaVersion: 1, stampedAt: 1790000000000, gateSlots: { total: 6, held: 2, holders: [{ pid: 123, log: '/abs/log' }] }, worktrees: [{ repo: 'treasury-ui', count: 374, byEpic: { 'pft-1386-1397': 12 } }], tmpInodesPct: 41.2 };
+const VALID = { schemaVersion: 1, stampedAt: 1790000000000, gateSlots: { total: 6, held: 2, holders: [{ pid: 123, log: '/abs/log' }] }, worktrees: [{ repo: 'acme-ledger-ui', count: 374, byEpic: { 'pft-1386-1397': 12 } }], tmpInodesPct: 41.2 };
 
 describe('host signals', () => {
   afterEach(() => resetHostSignals());

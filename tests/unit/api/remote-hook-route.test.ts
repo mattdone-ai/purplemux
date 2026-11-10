@@ -28,7 +28,7 @@ vi.mock('@/lib/remote-transcript', async (importOriginal) => ({
   bindRemoteTranscript: transcript.bindRemoteTranscript,
   syncRemoteTranscript: transcript.syncRemoteTranscript,
 }));
-vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (s.endsWith('tab-r') ? 'ai-server' : null) }));
+vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (s.endsWith('tab-r') ? 'host-b' : null) }));
 vi.mock('@/lib/tab-token', () => ({ resolveTabToken: (t: string) => tokens.map[t] ?? null }));
 vi.mock('@/lib/cli-token', () => ({ verifyCliToken: (req: NextApiRequest) => req.headers['x-pmux-token'] === 'global' }));
 vi.mock('@/lib/access-filter', () => ({ isRequestAllowed: () => true }));
@@ -45,11 +45,11 @@ const post = async (query: Record<string, string>, token: string | undefined, bo
     end() { return this; },
     setHeader() { return this; },
   } as unknown as NextApiResponse;
-  await handler({ method: 'POST', query, headers: token ? { 'x-pmux-token': token } : {}, body, socket: { remoteAddress: '100.106.29.22' } } as unknown as NextApiRequest, res);
+  await handler({ method: 'POST', query, headers: token ? { 'x-pmux-token': token } : {}, body, socket: { remoteAddress: '100.64.0.22' } } as unknown as NextApiRequest, res);
   return state;
 };
 
-const stopBody = { session_id: SID, transcript_path: `/home/mdone/.claude/projects/-home-mdone/${SID}.jsonl`, hook_event_name: 'Stop' };
+const stopBody = { session_id: SID, transcript_path: `/home/user/.claude/projects/-home-user/${SID}.jsonl`, hook_event_name: 'Stop' };
 
 describe('remote Claude hooks on /api/status/hook (ADR-0022)', () => {
   beforeEach(() => {
@@ -63,7 +63,7 @@ describe('remote Claude hooks on /api/status/hook (ADR-0022)', () => {
     const state = await post({ remote: 'claude', event: 'stop', session: R, occurredAt: '1791660000000' }, 'tok-r', stopBody);
     expect(state.statusCode).toBe(204);
     expect(transcript.order).toEqual(['bind', 'sync', 'meta', 'event']);
-    expect(transcript.bindRemoteTranscript).toHaveBeenCalledWith({ session: R, host: 'ai-server', sessionId: SID, remotePath: stopBody.transcript_path });
+    expect(transcript.bindRemoteTranscript).toHaveBeenCalledWith({ session: R, host: 'host-b', sessionId: SID, remotePath: stopBody.transcript_path });
     expect(sm.applyAgentHookMeta).toHaveBeenCalledWith('claude', R, { sessionId: SID, jsonlPath: expect.stringContaining(`${SID}.jsonl`) }, 1791660000000);
     expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', R, { kind: 'stop' }, 1791660000000, { replayed: false });
   });
@@ -83,7 +83,7 @@ describe('remote Claude hooks on /api/status/hook (ADR-0022)', () => {
   });
 
   it('a transcript path that is not a Claude transcript is never read; the event still applies', async () => {
-    await post({ remote: 'claude', event: 'stop', session: R }, 'tok-r', { session_id: SID, transcript_path: '/home/mdone/.ssh/id_ed25519' });
+    await post({ remote: 'claude', event: 'stop', session: R }, 'tok-r', { session_id: SID, transcript_path: '/home/user/.ssh/id_ed25519' });
     expect(transcript.bindRemoteTranscript).not.toHaveBeenCalled();
     expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', R, { kind: 'stop' }, undefined, { replayed: false });
   });

@@ -75,18 +75,18 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
   it('registers the host before the session is created and persists it on the tab', async () => {
     await writeLayout('ws-a', baseLayout([]));
     const { addTabToPane } = await import('@/lib/layout-store');
-    const tab = await addTabToPane('ws-a', 'pane-1', 'w1', '/home/mdone/code', 'terminal', undefined, { host: 'ai-server' });
-    expect(tab?.host).toBe('ai-server');
-    expect(hostAtCreate.value).toBe('ai-server');
+    const tab = await addTabToPane('ws-a', 'pane-1', 'w1', '/home/user/code', 'terminal', undefined, { host: 'host-b' });
+    expect(tab?.host).toBe('host-b');
+    expect(hostAtCreate.value).toBe('host-b');
     const saved = JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8')) as ILayoutData;
-    expect((saved.root as { tabs: Array<{ host?: string }> }).tabs[0].host).toBe('ai-server');
+    expect((saved.root as { tabs: Array<{ host?: string }> }).tabs[0].host).toBe('host-b');
   });
 
   it('forgets the host of a remote session whose creation failed', async () => {
     await writeLayout('ws-a', baseLayout([]));
     tmux.createSession.mockRejectedValueOnce(new Error('ssh failed'));
     const { addTabToPane } = await import('@/lib/layout-store');
-    await expect(addTabToPane('ws-a', 'pane-1', 'w1', '/x', 'terminal', undefined, { host: 'ai-server' })).rejects.toThrow('ssh failed');
+    await expect(addTabToPane('ws-a', 'pane-1', 'w1', '/x', 'terminal', undefined, { host: 'host-b' })).rejects.toThrow('ssh failed');
     const { knownRemoteHosts } = await import('@/lib/session-host');
     expect(knownRemoteHosts()).toEqual([]);
   });
@@ -101,7 +101,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
   it('the boot cross-check never recreates a remote agent tab on this host', async () => {
     const { crossCheckLayout } = await import('@/lib/layout-store');
     const layout = baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server' },
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'host-b' },
       { id: 'tab-l', sessionName: 'pt-ws-a-pane-1-tab-l', name: '', order: 1, panelType: 'claude-code' },
     ]);
     await crossCheckLayout(layout, [], 'ws-a', '/home');
@@ -111,7 +111,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
   it('a remote tab adds no directory to the workspace', async () => {
     await writeLayout('ws-a', baseLayout([]));
     const { addTabToPane } = await import('@/lib/layout-store');
-    await addTabToPane('ws-a', 'pane-1', 'w1', '/only/on/ai-server', 'terminal', undefined, { host: 'ai-server' });
+    await addTabToPane('ws-a', 'pane-1', 'w1', '/only/on/host-b', 'terminal', undefined, { host: 'host-b' });
     await addTabToPane('ws-a', 'pane-1', 'l1', '/home/local', 'terminal');
     await vi.waitFor(() => expect(workspaceStore.updateWorkspaceDirectories).toHaveBeenCalled());
     expect(workspaceStore.updateWorkspaceDirectories.mock.calls).toEqual([['ws-a', ['/home/local']]]);
@@ -119,20 +119,20 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('restarting a remote tab keeps its cwd: the local filesystem says nothing about the remote one', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', cwd: '/only/on/ai-server', host: 'ai-server' },
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', cwd: '/only/on/host-b', host: 'host-b' },
     ]));
     const { restartTabSession } = await import('@/lib/layout-store');
     expect(await restartTabSession('ws-a', 'pane-1', 'tab-r')).toBe(true);
     expect(tmux.resolveExistingDir).not.toHaveBeenCalled();
-    expect(tmux.createSession).toHaveBeenCalledWith('pt-ws-a-pane-1-tab-r', 80, 24, '/only/on/ai-server', { workspaceId: 'ws-a', tabId: 'tab-r' });
+    expect(tmux.createSession).toHaveBeenCalledWith('pt-ws-a-pane-1-tab-r', 80, 24, '/only/on/host-b', { workspaceId: 'ws-a', tabId: 'tab-r' });
   });
 
   it('restart never recreates over a host that does not answer (review r1 B2)', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'ai-server' },
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'host-b' },
     ]));
     const { RemoteHostError } = await import('@/lib/remote-host');
-    tmux.hasSessionOrUnreachable.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+    tmux.hasSessionOrUnreachable.mockRejectedValueOnce(new RemoteHostError('host-b', 'did not answer'));
     const { restartTabSession } = await import('@/lib/layout-store');
     await expect(restartTabSession('ws-a', 'pane-1', 'tab-r')).rejects.toMatchObject({ name: 'RemoteHostError' });
     expect(tmux.createSession).not.toHaveBeenCalled();
@@ -145,7 +145,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
         children: [
           { type: 'pane', id: 'pane-1', activeTabId: 'tab-l', tabs: [
             { id: 'tab-l', sessionName: 'pt-ws-a-pane-1-tab-l', name: '', order: 0, panelType: 'terminal' },
-            { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 1, panelType: 'terminal', host: 'ai-server' },
+            { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 1, panelType: 'terminal', host: 'host-b' },
           ] },
           { type: 'pane', id: 'pane-2', activeTabId: null, tabs: [] },
         ],
@@ -155,7 +155,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     };
     await writeLayout('ws-a', twoPanes);
     const { RemoteHostError } = await import('@/lib/remote-host');
-    tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+    tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('host-b', 'did not answer'));
     const { closePaneInLayout } = await import('@/lib/layout-store');
     await expect(closePaneInLayout('ws-a', 'pane-1')).rejects.toMatchObject({ name: 'RemoteHostError' });
     expect(tmux.killSession).not.toHaveBeenCalled();
@@ -168,9 +168,9 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('the legacy pane delete lets a remote refusal through instead of discarding it (review r1 B3)', async () => {
     const { registerSessionHost } = await import('@/lib/session-host');
-    registerSessionHost('pt-ws-a-pane-9-tab-r', 'ai-server');
+    registerSessionHost('pt-ws-a-pane-9-tab-r', 'host-b');
     const { RemoteHostError } = await import('@/lib/remote-host');
-    tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('ai-server', 'did not answer'));
+    tmux.assertRemoteHostsAnswer.mockRejectedValueOnce(new RemoteHostError('host-b', 'did not answer'));
     const { deletePane } = await import('@/lib/layout-store');
     await expect(deletePane('pane-9', ['pt-local-x-y', 'pt-ws-a-pane-9-tab-r'])).rejects.toMatchObject({ name: 'RemoteHostError' });
     expect(tmux.killSession).not.toHaveBeenCalled();
@@ -178,18 +178,18 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('a lost attach never rewrites a remote tab\'s cwd from this host\'s filesystem', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', cwd: '/only/on/ai-server', host: 'ai-server' },
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', cwd: '/only/on/host-b', host: 'host-b' },
     ]));
     tmux.resolveExistingDir.mockResolvedValueOnce('/home');
     const { reconcileTabCwd } = await import('@/lib/layout-store');
     await reconcileTabCwd('pt-ws-a-pane-1-tab-r');
     expect(tmux.resolveExistingDir).not.toHaveBeenCalled();
-    expect((JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8')) as { root: { tabs: Array<{ cwd: string }> } }).root.tabs[0].cwd).toBe('/only/on/ai-server');
+    expect((JSON.parse(await fs.readFile(layoutFile('ws-a'), 'utf-8')) as { root: { tabs: Array<{ cwd: string }> } }).root.tabs[0].cwd).toBe('/only/on/host-b');
   });
 
   it('a remote tab with pending agent work closes on a remote reap with no survivors and tmux-proven absence', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'host-b',
         orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 }, turn: { generation: 't', runtimeGeneration: 'g', at: 2 } } },
     ]));
     tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [] } as never);
@@ -199,7 +199,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('a pending remote tab whose session was the last on its socket closes: the reap\'s own "session gone" is the proof (review r3 B2)', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'host-b',
         orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 } } },
     ]));
     tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [], sessionGone: true } as never);
@@ -210,7 +210,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('a pending remote tab on a host taken out of remote.hosts closes on the skipped reap (§9 escape, review r3 nit 7)', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'host-b',
         orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', turn: { generation: 't', runtimeGeneration: 'g', at: 2 } } },
     ]));
     tmux.killSession.mockResolvedValueOnce({ reaper: 'remote-skipped', envMarker: 'unknown', killed: [], survivors: [] } as never);
@@ -221,7 +221,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('a pending remote close that is still refused revokes the tab token anyway (review r3 B2)', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'host-b',
         orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 } } },
     ]));
     const { ensureTabToken, getTabTokenRecord } = await import('@/lib/tab-token');
@@ -235,7 +235,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
 
   it('a remote reap with a survivor keeps the pending tab', async () => {
     await writeLayout('ws-a', baseLayout([
-      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'ai-server',
+      { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'claude-code', host: 'host-b',
         orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-r', runtimeGeneration: 'g', launch: { at: 1 } } },
     ]));
     tmux.killSession.mockResolvedValueOnce({ reaper: 'remote', envMarker: 'present', killed: [], survivors: [{ pid: 9, comm: 'x', args: 'x' }] } as never);
@@ -247,7 +247,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     const twoPanes: ILayoutData = {
       root: { type: 'split', orientation: 'horizontal', ratio: 50, children: [
         { type: 'pane', id: 'pane-1', activeTabId: 'tab-r', tabs: [
-          { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'ai-server' },
+          { id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'host-b' },
           { id: 'tab-l', sessionName: 'pt-ws-a-pane-1-tab-l', name: '', order: 1, panelType: 'claude-code',
             orchestrationActivity: { sessionName: 'pt-ws-a-pane-1-tab-l', runtimeGeneration: 'g', launch: { at: 1 } } },
         ] },
@@ -271,14 +271,14 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
     const { registerSessionHost, knownRemoteHosts } = await import('@/lib/session-host');
     const twoPanes: ILayoutData = {
       root: { type: 'split', orientation: 'horizontal', ratio: 50, children: [
-        { type: 'pane', id: 'pane-1', activeTabId: 'tab-r', tabs: [{ id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'ai-server' }] },
+        { type: 'pane', id: 'pane-1', activeTabId: 'tab-r', tabs: [{ id: 'tab-r', sessionName: 'pt-ws-a-pane-1-tab-r', name: '', order: 0, panelType: 'terminal', host: 'host-b' }] },
         { type: 'pane', id: 'pane-2', activeTabId: null, tabs: [] },
       ] } as never,
       activePaneId: 'pane-1',
       updatedAt: '2026-10-10T00:00:00.000Z',
     };
     await writeLayout('ws-a', twoPanes);
-    registerSessionHost('pt-ws-a-pane-1-tab-r', 'ai-server');
+    registerSessionHost('pt-ws-a-pane-1-tab-r', 'host-b');
     const { closePaneInLayout } = await import('@/lib/layout-store');
     await closePaneInLayout('ws-a', 'pane-1');
     expect(knownRemoteHosts()).toEqual([]);
@@ -287,7 +287,7 @@ describe('remote tabs in the layout store (ADR-0022)', () => {
   it('closing a remote tab forgets its host', async () => {
     await writeLayout('ws-a', baseLayout([]));
     const { addTabToPane, closeTab } = await import('@/lib/layout-store');
-    const tab = await addTabToPane('ws-a', 'pane-1', 'w1', '/x', 'terminal', undefined, { host: 'ai-server' });
+    const tab = await addTabToPane('ws-a', 'pane-1', 'w1', '/x', 'terminal', undefined, { host: 'host-b' });
     expect((await closeTab('ws-a', 'pane-1', tab!.id)).ok).toBe(true);
     const { knownRemoteHosts } = await import('@/lib/session-host');
     expect(knownRemoteHosts()).toEqual([]);

@@ -60,40 +60,40 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
   };
 
   it('sends the host with the create', async () => {
-    reply = { status: 201, body: { tabId: 'tab-new', host: 'ai-server' } };
-    const result = await cli(['tab', 'create', '-w', 'ws-a', '-n', 'w1', '--host', 'ai-server']);
+    reply = { status: 201, body: { tabId: 'tab-new', host: 'host-b' } };
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '-n', 'w1', '--host', 'host-b']);
     expect(result.code).toBe(0);
-    expect(requests).toEqual([{ method: 'POST', url: '/api/cli/tabs', body: { workspaceId: 'ws-a', name: 'w1', host: 'ai-server' } }]);
-    expect(JSON.parse(result.stdout)).toMatchObject({ host: 'ai-server' });
+    expect(requests).toEqual([{ method: 'POST', url: '/api/cli/tabs', body: { workspaceId: 'ws-a', name: 'w1', host: 'host-b' } }]);
+    expect(JSON.parse(result.stdout)).toMatchObject({ host: 'host-b' });
   });
 
   it('sends --host auto as given: the server places the tab (ADR-0039)', async () => {
-    reply = { status: 201, body: { tabId: 'tab-new', host: 'ai-lan', placement: { host: 'ai-lan', local: false, reason: 'r', fallback: false } } };
+    reply = { status: 201, body: { tabId: 'tab-new', host: 'host-b-lan', placement: { host: 'host-b-lan', local: false, reason: 'r', fallback: false } } };
     const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'auto']);
     expect(result.code).toBe(0);
     expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'auto' });
-    expect(JSON.parse(result.stdout)).toMatchObject({ placement: { host: 'ai-lan' } });
+    expect(JSON.parse(result.stdout)).toMatchObject({ placement: { host: 'host-b-lan' } });
   });
 
   const queuedTab = (position: number) => ({
     status: 202,
     body: {
       code: 'pool-queued', queued: true, ticket: 'pool-queue:tab-3', kind: 'tab', class: 'product', position, of: 3, refusal: 'no-budget',
-      reason: `queued: position ${position} of 3; mdserver1: budget threads 24/24 used, needs 2`, expiresAt: null, retryAfterSeconds: 0.05, envelope: { threads: 2, memGb: 4 },
+      reason: `queued: position ${position} of 3; host-a: budget threads 24/24 used, needs 2`, expiresAt: null, retryAfterSeconds: 0.05, envelope: { threads: 2, memGb: 4 },
     },
   });
 
   it('a queued --host auto start waits, re-asks with its ticket, prints a line only when the position changes, and creates when admitted (vel-D4)', async () => {
     replies = [queuedTab(2), queuedTab(2), queuedTab(1)];
-    reply = { status: 201, body: { tabId: 'tab-new', host: 'ai-lan' } };
+    reply = { status: 201, body: { tabId: 'tab-new', host: 'host-b-lan' } };
     const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'auto', '--class', 'harness']);
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({ tabId: 'tab-new' });
     expect(requests.map((r) => (r.body as { queueTicket?: string }).queueTicket ?? null)).toEqual([null, 'pool-queue:tab-3', 'pool-queue:tab-3', 'pool-queue:tab-3']);
     expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'auto', poolClass: 'harness' });
     expect(result.stderr.trim().split('\n')).toEqual([
-      'queued: pool-queue:tab-3 position 2 of 3 — queued: position 2 of 3; mdserver1: budget threads 24/24 used, needs 2',
-      'queued: pool-queue:tab-3 position 1 of 3 — queued: position 1 of 3; mdserver1: budget threads 24/24 used, needs 2',
+      'queued: pool-queue:tab-3 position 2 of 3 — queued: position 2 of 3; host-a: budget threads 24/24 used, needs 2',
+      'queued: pool-queue:tab-3 position 1 of 3 — queued: position 1 of 3; host-a: budget threads 24/24 used, needs 2',
     ]);
   });
 
@@ -112,7 +112,7 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
   it.each([
     [['--class', 'urgent', '--host', 'auto'], '--class must be'],
     [['--class', 'harness'], 'go with --host auto'],
-    [['--ticket', 'pool-queue:tab-1', '--host', 'ai-server'], 'go with --host auto'],
+    [['--ticket', 'pool-queue:tab-1', '--host', 'host-b'], 'go with --host auto'],
     [['--host', 'auto', '--wait', 'soon'], '--wait must be whole seconds'],
   ])('%j is a usage error and sends nothing', async (extra, message) => {
     const result = await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', ...extra]);
@@ -123,8 +123,8 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
 
   it('sends --cwd with the create', async () => {
     reply = { status: 201, body: { tabId: 'tab-new' } };
-    await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'ai-server', '--cwd', '/home/mdone/wt/x']);
-    expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'ai-server', cwd: '/home/mdone/wt/x' });
+    await cli(['tab', 'create', '-w', 'ws-a', '-t', 'claude-code', '--host', 'host-b', '--cwd', '/home/user/wt/x']);
+    expect(requests[0].body).toEqual({ workspaceId: 'ws-a', panelType: 'claude-code', host: 'host-b', cwd: '/home/user/wt/x' });
   });
 
   it('sends --role with the create; the server picks the type (ADR-0040)', async () => {
@@ -159,14 +159,14 @@ describe('purplemux tab create --host (ADR-0022)', { timeout: 30_000 }, () => {
     [502, 'remote-kit-broken', 1],
   ])('HTTP %i %s exits %i', async (status, code, exit) => {
     reply = { status, body: { error: 'refused', code } };
-    const result = await cli(['tab', 'create', '-w', 'ws-a', '--host', 'ai-server']);
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '--host', 'host-b']);
     expect(result.code).toBe(exit);
     expect(result.stderr).toContain(code);
   });
 
   it('remote-kit-broken tells the caller a retry fails until the kit or the host is repaired', async () => {
-    reply = { status: 502, body: { error: 'the CLI kit does not run on ai-server', code: 'remote-kit-broken', host: 'ai-server', line: "Error: Cannot find module './x.js'" } };
-    const result = await cli(['tab', 'create', '-w', 'ws-a', '--host', 'ai-server']);
+    reply = { status: 502, body: { error: 'the CLI kit does not run on host-b', code: 'remote-kit-broken', host: 'host-b', line: "Error: Cannot find module './x.js'" } };
+    const result = await cli(['tab', 'create', '-w', 'ws-a', '--host', 'host-b']);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('a retry fails the same way until a person repairs the kit or the host');
   });

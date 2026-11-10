@@ -58,7 +58,7 @@ const fakeResponse = (): IFakeResponse => {
   return state;
 };
 
-const workspace = { id: 'ws-abc123', name: 'Workspace 1', directories: ['/home/mdone/fresh'] };
+const workspace = { id: 'ws-abc123', name: 'Workspace 1', directories: ['/home/user/fresh'] };
 
 const post = async (body: unknown): Promise<IFakeResponse> => {
   const state = fakeResponse();
@@ -73,24 +73,24 @@ describe('POST /api/workspace mkdir', () => {
   });
 
   it('opts the create in when mkdir is true', async () => {
-    const state = await post({ directory: '/home/mdone/fresh', mkdir: true });
+    const state = await post({ directory: '/home/user/fresh', mkdir: true });
 
     expect(state.statusCode).toBe(200);
     expect(state.body).toEqual(workspace);
-    expect(createWorkspace).toHaveBeenCalledWith('/home/mdone/fresh', undefined, undefined, { mkdir: true });
+    expect(createWorkspace).toHaveBeenCalledWith('/home/user/fresh', undefined, undefined, { mkdir: true });
   });
 
   it('leaves the create opted out when mkdir is absent or false', async () => {
-    await post({ directory: '/home/mdone/fresh' });
-    expect(createWorkspace).toHaveBeenLastCalledWith('/home/mdone/fresh', undefined, undefined, { mkdir: false });
+    await post({ directory: '/home/user/fresh' });
+    expect(createWorkspace).toHaveBeenLastCalledWith('/home/user/fresh', undefined, undefined, { mkdir: false });
 
-    await post({ directory: '/home/mdone/fresh', mkdir: false });
-    expect(createWorkspace).toHaveBeenLastCalledWith('/home/mdone/fresh', undefined, undefined, { mkdir: false });
+    await post({ directory: '/home/user/fresh', mkdir: false });
+    expect(createWorkspace).toHaveBeenLastCalledWith('/home/user/fresh', undefined, undefined, { mkdir: false });
   });
 
   it('only accepts a real boolean as opt-in', async () => {
-    await post({ directory: '/home/mdone/fresh', mkdir: 'true' });
-    expect(createWorkspace).toHaveBeenLastCalledWith('/home/mdone/fresh', undefined, undefined, { mkdir: false });
+    await post({ directory: '/home/user/fresh', mkdir: 'true' });
+    expect(createWorkspace).toHaveBeenLastCalledWith('/home/user/fresh', undefined, undefined, { mkdir: false });
   });
 
   it('still defaults the directory to the home directory', async () => {
@@ -105,7 +105,7 @@ describe('POST /api/workspace mkdir', () => {
   ])('answers 400 with the message preserved for %s', async (_case, message) => {
     vi.mocked(createWorkspace).mockRejectedValue(directoryError(message));
 
-    const state = await post({ directory: '/home/mdone/fresh', mkdir: true });
+    const state = await post({ directory: '/home/user/fresh', mkdir: true });
 
     expect(state.statusCode).toBe(400);
     expect(state.body).toEqual({ error: message });
@@ -114,7 +114,7 @@ describe('POST /api/workspace mkdir', () => {
   it('keeps answering 500 for a failure that is not about the directory', async () => {
     vi.mocked(createWorkspace).mockRejectedValue(new Error('EACCES: permission denied'));
 
-    const state = await post({ directory: '/home/mdone/fresh', mkdir: true });
+    const state = await post({ directory: '/home/user/fresh', mkdir: true });
 
     expect(state.statusCode).toBe(500);
     expect(state.body).toEqual({ error: 'EACCES: permission denied' });
@@ -135,7 +135,7 @@ describe('GET /api/workspace/validate', () => {
 
     const state = fakeResponse();
     await validateHandler(
-      { method: 'GET', query: { directory: '/home/mdone/fresh' } } as unknown as NextApiRequest,
+      { method: 'GET', query: { directory: '/home/user/fresh' } } as unknown as NextApiRequest,
       state.res,
     );
 
@@ -147,7 +147,7 @@ describe('GET /api/workspace/validate', () => {
       isDirectory: false,
       canCreate: true,
     });
-    expect(validateDirectory).toHaveBeenCalledWith('/home/mdone/fresh');
+    expect(validateDirectory).toHaveBeenCalledWith('/home/user/fresh');
   });
 
   it('still keeps suggestedName for a valid directory', async () => {
@@ -161,7 +161,7 @@ describe('GET /api/workspace/validate', () => {
 
     const state = fakeResponse();
     await validateHandler(
-      { method: 'GET', query: { directory: '/home/mdone/code' } } as unknown as NextApiRequest,
+      { method: 'GET', query: { directory: '/home/user/code' } } as unknown as NextApiRequest,
       state.res,
     );
 

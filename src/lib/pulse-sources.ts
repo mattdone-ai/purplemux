@@ -37,7 +37,7 @@ export const parseCommitLines = (stdout: string): Array<{ sha: string; at: numbe
 /**
  * Commits on the scope's refs (an epic's integration and `story/*` branches; v2's `main`; in the
  * fallback, `main`, `master` and `feature/*`), by committer time. Lane branches are never read: a
- * rebase re-creates their commits (on treasury-v2, 2,255 commits in 48 h across every branch against
+ * rebase re-creates their commits (on acme-ledger-v2, 2,255 commits in 48 h across every branch against
  * 685 on main, 2026-11-03). Worktrees of one repository share its refs, so each repository is read
  * once (keyed by its common git dir, refs merged), and a commit reachable twice counts once.
  */

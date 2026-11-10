@@ -38,7 +38,7 @@ describe('auto-resume and remote tabs (ADR-0022)', () => {
 
   it('resumes a local claude tab and skips a remote one', async () => {
     fx.tabs = [
-      { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-a-pane-p-tab-r', panelType: 'claude-code', host: 'ai-server' },
+      { id: 'tab-r', name: 'r', order: 0, sessionName: 'pt-ws-a-pane-p-tab-r', panelType: 'claude-code', host: 'host-b' },
       { id: 'tab-l', name: 'l', order: 1, sessionName: 'pt-ws-a-pane-p-tab-l', panelType: 'claude-code' },
     ];
     const { autoResumeOnStartup } = await import('@/lib/auto-resume');

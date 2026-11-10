@@ -143,7 +143,7 @@ describe('paneStartupPrompt (story 05, D14)', () => {
   });
 
   it('reads the older numbered trust wording', () => {
-    const older = ' Do you trust the files in this folder?\n\n /home/mdone/portfolio\n\n ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to exit\n';
+    const older = ' Do you trust the files in this folder?\n\n /home/user/portfolio\n\n ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to exit\n';
     expect(paneStartupPrompt('claude-code', older)).toBe('folder-trust');
   });
 
@@ -173,7 +173,7 @@ describe('paneStartupPrompt (story 05, D14)', () => {
     expect(paneStartupPrompt('claude-code', '  ❯ No, disable external imports\n')).toBeNull();
   });
 
-  // Synthetic (no capture was kept): the 2026-11-05 ai-server incident, a UserPromptSubmit hook that failed and
+  // Synthetic (no capture was kept): the 2026-11-05 host-b incident, a UserPromptSubmit hook that failed and
   // restored the prompt with "Original prompt:". It is not a startup dialog and must not read as one.
   it('does not read a hook-blocked prompt as a startup dialog', () => {
     const blocked = '⏺ UserPromptSubmit operation blocked by hook:\n  hook exited 127\n\n  Original prompt: Read the brief\n\n────────\n❯ Read the brief\n────────\n';

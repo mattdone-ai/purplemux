@@ -25,13 +25,13 @@ vi.mock('@/lib/tmux', () => ({
   exitCopyMode: vi.fn(async () => {}),
   sessionPresence: fx.presence,
 }));
-vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (s === REMOTE ? 'ai-server' : null) }));
+vi.mock('@/lib/session-host', () => ({ sessionHostOf: async (s: string) => (s === REMOTE ? 'host-b' : null) }));
 vi.mock('@/lib/layout-store', () => ({ reconcileTabCwd: vi.fn(async () => {}) }));
 vi.mock('@/lib/agent-prompt-delivery', () => ({ sessionUsesTypedDelivery: async () => false }));
 vi.mock('@/lib/terminal-input', () => ({ withRecordedTerminalInput: async (_s: string, _d: string, work: () => Promise<void>) => work() }));
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
-  return { ...actual, default: { ...actual, hostname: () => 'mdserver1' }, hostname: () => 'mdserver1' };
+  return { ...actual, default: { ...actual, hostname: () => 'host-a' }, hostname: () => 'host-a' };
 });
 
 const connect = async (session: string) => {
@@ -61,7 +61,7 @@ describe('remote attach (ADR-0022 §10, review r1 B1)', () => {
     expect(file).toBe('ssh');
     expect(args[0]).toBe('-tt');
     expect(args).toEqual(expect.arrayContaining(['-o', 'BatchMode=yes']));
-    expect(args.slice(-3)).toEqual(['--', 'ai-server', `'tmux' '-L' 'pmux-mdserver1' '-u' 'attach-session' '-t' '${REMOTE}'`]);
+    expect(args.slice(-3)).toEqual(['--', 'host-b', `'tmux' '-L' 'pmux-host-a' '-u' 'attach-session' '-t' '${REMOTE}'`]);
   });
 
   it('a local session still attaches with tmux on purple', async () => {

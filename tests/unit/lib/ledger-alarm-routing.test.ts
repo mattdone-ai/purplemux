@@ -26,13 +26,13 @@ const WS = 'ws-ldhziO';
 const ITEM = 'range:visa:abcdef012345';
 
 const row = (tabId: string, tabName: string, extra: Partial<IFleetRow> = {}): IFleetRow => ({
-  workspaceId: WS, workspaceName: 'Treasury v2', tabId, tabName, panelType: 'claude-code', providerId: 'claude', epic: null,
+  workspaceId: WS, workspaceName: 'Acme-ledger v2', tabId, tabName, panelType: 'claude-code', providerId: 'claude', epic: null,
   state: 'idle', rawCliState: 'idle', since: T0, lastActivityAt: T0, waits: [], lastLine: null, endLineUnknown: false,
   inbox: null, flags: [], ...extra,
 });
 
 const ROWS = [row('tab-orch', 'v2-orchestrator'), row('tab-visa', 'v2-w-visa'), row('tab-mc', 'v2-w-mc'), row('tab-kit', 'v2-kit')];
-const WORKSPACE: IWorkspace = { id: WS, name: 'Treasury v2', directories: ['/work/v2'], orchestration: { enabled: true, orchestratorTabId: 'tab-orch' } } as IWorkspace;
+const WORKSPACE: IWorkspace = { id: WS, name: 'Acme-ledger v2', directories: ['/work/v2'], orchestration: { enabled: true, orchestratorTabId: 'tab-orch' } } as IWorkspace;
 
 const stuckItem = (extra: Partial<IBoardStuckItem> = {}): IBoardStuckItem => ({
   key: ITEM, itemType: 'range', holder: 'v2-w-visa', reason: 'not-armed', since: T0, clearInput: 'arm visa', critical: false,

@@ -76,7 +76,7 @@ const snapshot = (items: IMissionAttentionItem[]): IMissionSnapshot => ({
   schemaVersion: 1,
   cursor: 4,
   generatedAt: now,
-  workspaces: [workspace('ws-pay', 'Payments'), workspace('ws-tre', 'Treasury')],
+  workspaces: [workspace('ws-pay', 'Payments'), workspace('ws-tre', 'Acme-ledger')],
   runs: [],
   items,
   answers: [],
@@ -132,7 +132,7 @@ describe('Needs you on the Mission Control answers view', () => {
   it('shows every confirmed question as an answer card, grouped by workspace, oldest first, with a count', () => {
     const items = [
       question({ id: 'pay-new', title: 'Pay newer question', createdAt: now - 10_000 }),
-      question({ id: 'tre-old', workspaceId: 'ws-tre', title: 'Treasury oldest question', createdAt: now - 90_000 }),
+      question({ id: 'tre-old', workspaceId: 'ws-tre', title: 'Acme-ledger oldest question', createdAt: now - 90_000 }),
       question({ id: 'pay-old', title: 'Pay older question', createdAt: now - 50_000 }),
       question({ id: 'candidate', state: 'candidate', title: 'Candidate only', humanReview: null, candidateReason: 'historical-context' }),
       question({ id: 'handled', title: 'Orchestrator handles this',
@@ -147,10 +147,10 @@ describe('Needs you on the Mission Control answers view', () => {
     for (const hidden of ['Candidate only', 'Orchestrator handles this', 'Already answered']) {
       expect(html).not.toContain(hidden);
     }
-    const order = ['Treasury oldest question', 'Pay older question', 'Pay newer question'].map((title) => html.indexOf(title));
+    const order = ['Acme-ledger oldest question', 'Pay older question', 'Pay newer question'].map((title) => html.indexOf(title));
     expect(order.every((position) => position > -1)).toBe(true);
     expect(order).toEqual([...order].sort((left, right) => left - right));
-    expect(html.indexOf('>Treasury</p>')).toBeLessThan(html.indexOf('>Payments</p>'));
+    expect(html.indexOf('>Acme-ledger</p>')).toBeLessThan(html.indexOf('>Payments</p>'));
   });
 
   it('shows the empty state with a zero count when nothing needs an answer', () => {
@@ -282,7 +282,7 @@ describe('Needs you grouped by attention class (ADR-0031)', () => {
       question({ id: 'm-tre', workspaceId: 'ws-tre', class: 'money', createdAt: 10 }),
       question({ id: 'u-pay', createdAt: 5 }),
       question({ id: 'proto', class: 'constructor' as never, createdAt: 6 }),
-    ], [workspace('ws-pay', 'Payments'), workspace('ws-tre', 'Treasury')]);
+    ], [workspace('ws-pay', 'Payments'), workspace('ws-tre', 'Acme-ledger')]);
     expect(groups.map((group) => [group.attentionClass, group.workspaces.map((entry) => [entry.workspaceId, entry.items.map((item) => item.id)])])).toEqual([
       ['money', [['ws-tre', ['m-tre']], ['ws-pay', ['m-pay']]]],
       ['unclassified', [['ws-pay', ['u-pay', 'proto']]]],
@@ -368,7 +368,7 @@ describe('Auto-answered section (ADR-0031)', () => {
     expect(html).toContain('Answered, waiting for the agent');
     expect(html).toContain('>Resolved<');
     expect(html).toContain('>Payments</span>');
-    expect(html).toContain('>Treasury</span>');
+    expect(html).toContain('>Acme-ledger</span>');
     expect(html).toContain('data-attention-class="bookkeeping"');
     expect(html).not.toContain('system:auto-answer');
   });

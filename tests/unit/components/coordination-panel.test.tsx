@@ -67,7 +67,7 @@ describe('coordination panel', () => {
         reason: 'Work remains but no orchestrator is designated.', observedAt: AT,
       },
       {
-        workspaceId: 'ws-unknown', workspaceName: 'Treasury', state: 'uncertain', workState: 'remaining',
+        workspaceId: 'ws-unknown', workspaceName: 'Acme-ledger', state: 'uncertain', workState: 'remaining',
         orchestratorState: 'unknown', designatedTabId: 'tab-owner', evidence: ['latest standup is awaiting-human'],
         reason: 'The designated orchestrator liveness is unknown.', observedAt: AT,
       },
@@ -84,8 +84,8 @@ describe('coordination panel', () => {
     expect(render(empty())).toContain('Host signals: not configured');
     const err = { ...empty(), signals: { state: 'error', error: 'invalid: tmpInodesPct — Required', ranAt: AT - 60_000, stale: false } } as ICoordinationSnapshot;
     expect(render(err)).toMatch(/data-signals="error".*invalid: tmpInodesPct — Required · run 1m ago/);
-    const ok = { ...empty(), signals: { state: 'ok', ranAt: AT - 120_000, stale: false, value: { schemaVersion: 1, stampedAt: AT - 130_000, gateSlots: { total: 6, held: 2, holders: [] }, worktrees: [{ repo: 'treasury-ui', count: 374, byEpic: {} }], tmpInodesPct: 41.2 } } } as ICoordinationSnapshot;
-    expect(render(ok)).toMatch(/data-signals="ok".*gate slots 2\/6 held · 374 worktrees \(treasury-ui 374\) · \/tmp inodes 41.2%/);
+    const ok = { ...empty(), signals: { state: 'ok', ranAt: AT - 120_000, stale: false, value: { schemaVersion: 1, stampedAt: AT - 130_000, gateSlots: { total: 6, held: 2, holders: [] }, worktrees: [{ repo: 'acme-ledger-ui', count: 374, byEpic: {} }], tmpInodesPct: 41.2 } } } as ICoordinationSnapshot;
+    expect(render(ok)).toMatch(/data-signals="ok".*gate slots 2\/6 held · 374 worktrees \(acme-ledger-ui 374\) · \/tmp inodes 41.2%/);
     const stale = { ...ok, signals: { ...ok.signals, stale: true } } as ICoordinationSnapshot;
     expect(render(stale)).toContain('(stale)');
   });
@@ -98,7 +98,7 @@ describe('coordination panel', () => {
 
   it('watches and held deliveries show labels, never the raw tokens', () => {
     const snap = empty();
-    snap.watches = { ok: true, items: [{ id: 'w-1', workspaceId: 'ws-1', tabId: 'tab-a', kind: 'pr', target: 'NomuPay/x#1', until: 'head-moved', ageSeconds: 60, expiresInSeconds: 600, owner: 'closed' }] } as unknown as ICoordinationSnapshot['watches'];
+    snap.watches = { ok: true, items: [{ id: 'w-1', workspaceId: 'ws-1', tabId: 'tab-a', kind: 'pr', target: 'Acme/x#1', until: 'head-moved', ageSeconds: 60, expiresInSeconds: 600, owner: 'closed' }] } as unknown as ICoordinationSnapshot['watches'];
     snap.inboxHeld = { ok: true, items: [{ id: 'i-1', kind: 'resume', targetWorkspaceId: 'ws-1', targetTabId: 'tab-a', heldReason: 'stranded-in-composer' }] } as unknown as ICoordinationSnapshot['inboxHeld'];
     const html = render(snap);
     expect(html).toContain('(PR) until head moved');

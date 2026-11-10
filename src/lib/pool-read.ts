@@ -32,7 +32,7 @@ export const POOL_FALLBACK_KEY_PREFIX = 'pool.fallback.';
 /**
  * One `sh -s` run per read. Sections are marked so a missing tool leaves its
  * own section empty instead of shifting the others. `/data` is read where it
- * exists (ai-server holds the build cache and Docker there).
+ * exists (host-b holds the build cache and Docker there).
  */
 export const POOL_READ_SCRIPT = `echo @threads; nproc
 echo @loadavg; cat /proc/loadavg

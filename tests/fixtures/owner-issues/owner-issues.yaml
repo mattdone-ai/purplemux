@@ -1,4 +1,4 @@
-# Synthetic rows in the shape of treasury-v2 `.v2/owner-issues.yaml` (raised = an AEDT date, no time).
+# Synthetic rows in the shape of acme-ledger-v2 `.v2/owner-issues.yaml` (raised = an AEDT date, no time).
 # The file's mtime in the test is 2026-11-03T13:22:33Z (4 Nov 00:22 AEDT), the live feed's first pass.
 updated: 4 Nov 00:22 AEDT
 issues:
