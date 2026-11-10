@@ -804,8 +804,10 @@ receives only the inbox's fixed line "[purplemux note n-…] from <ws>/<tab> at 
 show n-…, then purplemux note ack n-…" (from "owner (<ws>/<tab>)" for an owner note); the subject and
 body are never typed. Every note view carries fromLabel, the same server-made words after "from". If that tab closes
 before the line is delivered, the note re-routes. One reminder reaches the recipient 30 min after
-the line reached its composer, and one notice reaches the sender's tab (if live) at 60 min; no
-more. A note unacked or undeliverable for 14 days expires (one notice to a live sender); acked and
+the line reached its composer, and one notice reaches the sender's tab (if live): at 15 min when the line
+has not reached the recipient's composer (the portfolio Scrum Master seat's digest gets one line too), else at
+60 min; no more. A coordinator's digest, and each watchdog nudge typed to it, carry
+"N notes pending, oldest <age>: run purplemux note list --open --to-me" while notes wait for it. A note unacked or undeliverable for 14 days expires (one notice to a live sender); acked and
 expired notes are pruned 14 days later. An ack types nothing into the sender's tab (F6): the sender
 reads the state, ackedBy and ackComment with \`note list --from-me\` or note show. At turn start, run
 \`note list --open --to-me\`.

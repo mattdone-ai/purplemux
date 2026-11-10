@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ICaller } from '@/lib/caller';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import { renderInboxLine } from '@/lib/inbox-templates';
-import { NoteError, NOTE_EXPIRE_MS, NOTE_EXPIRE_NOTICE_GRACE_MS, NOTE_PRUNE_MS, NOTE_REMIND_MS, NOTE_SENDER_NOTICE_MS } from '@/lib/notes-store';
+import { NoteError, NOTE_EXPIRE_MS, NOTE_EXPIRE_NOTICE_GRACE_MS, NOTE_PRUNE_MS, NOTE_REMIND_MS, NOTE_SENDER_NOTICE_MS, NOTE_UNDELIVERED_NOTICE_MS } from '@/lib/notes-store';
 import { NotesService, NOTES_TICK_MS, startNotes, stopNotes, type INotesDeps } from '@/lib/notes-service';
 import { withOrchestrationMappingRead, withOrchestrationMappingWrite } from '@/lib/orchestration-mapping-lock';
 import type { IInboxItem } from '@/types/inbox';
@@ -419,18 +419,19 @@ describe('notes (ADR-0013)', () => {
     expect(f.sent.filter((s) => s.fields.event === 'reminder').map((s) => s.targetTabId)).toEqual(['tab-a']);
   });
 
-  it('tells the sender once, 60 min after routing, even while the recipient never reads the line', async () => {
+  it('tells the sender once, 15 min after routing, while the recipient never reads the line (G7: undelivered)', async () => {
     await svc.send(B, { toEpic: 'ddh', subject: 's', body: 'b' });
-    f.now = T0 + NOTE_SENDER_NOTICE_MS - 1;
+    f.now = T0 + NOTE_UNDELIVERED_NOTICE_MS - 1;
     await svc.tick();
-    expect(f.sent.filter((s) => s.fields.event === 'unacked')).toHaveLength(0);
-    f.now = T0 + NOTE_SENDER_NOTICE_MS;
+    expect(f.sent.filter((s) => s.fields.event === 'undelivered')).toHaveLength(0);
+    f.now = T0 + NOTE_UNDELIVERED_NOTICE_MS;
     await svc.tick();
     f.now += 5 * NOTE_SENDER_NOTICE_MS;
     await svc.tick();
-    const unacked = f.sent.filter((s) => s.fields.event === 'unacked');
-    expect(unacked).toHaveLength(1);
-    expect(unacked[0]).toMatchObject({ targetWorkspaceId: 'ws-2', targetTabId: 'tab-b' });
+    const undelivered = f.sent.filter((s) => s.fields.event === 'undelivered');
+    expect(undelivered).toHaveLength(1);
+    expect(undelivered[0]).toMatchObject({ targetWorkspaceId: 'ws-2', targetTabId: 'tab-b' });
+    expect(f.sent.filter((s) => s.fields.event === 'unacked')).toHaveLength(0);
     expect(f.sent.filter((s) => s.fields.event === 'reminder')).toHaveLength(0);
   });
 
@@ -583,13 +584,13 @@ describe('notes (ADR-0013)', () => {
     f.uncertain.delete('ws-2');
     f.live.add('ws-2/tab-b');
     await svc.tick();
-    expect(f.sent.filter((s) => s.fields.event === 'unacked')).toHaveLength(1);
+    expect(f.sent.filter((s) => s.fields.event === 'undelivered')).toHaveLength(1);
     f.dropInbox(f.note(id).inboxItemId!); // re-routed after the notice
     f.epics.set('ddh', { workspaceId: 'ws-3', tabId: 'tab-c' });
     await svc.tick();
     f.now += 5 * NOTE_SENDER_NOTICE_MS;
     await svc.tick();
-    expect(f.sent.filter((s) => s.fields.event === 'unacked')).toHaveLength(1);
+    expect(f.sent.filter((s) => s.fields.event === 'undelivered')).toHaveLength(1);
     expect(f.note(id).routedAt).toBe(T0);
 
     const second = await svc.send(B, { toEpic: 'ddh', subject: 's2', body: 'b' });
@@ -597,7 +598,7 @@ describe('notes (ADR-0013)', () => {
     f.now += NOTE_SENDER_NOTICE_MS;
     await svc.tick();
     expect(f.note(second.id).senderNotifiedAt).not.toBeNull();
-    expect(f.sent.filter((s) => s.fields.event === 'unacked')).toHaveLength(1);
+    expect(f.sent.filter((s) => s.fields.event === 'undelivered')).toHaveLength(1);
   });
 
   it('reads the inbox and the live tabs once per pass, however many notes there are', async () => {
