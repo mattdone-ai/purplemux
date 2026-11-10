@@ -14,6 +14,10 @@ const STATUS: Record<TNoteErrorCode, number> = {
   'note-invalid': 400,
   forbidden: 403,
   'note-cap': 409,
+  'tab-not-found': 404,
+  'session-not-running': 409,
+  'note-point-not-ready': 409,
+  'note-point-too-soon': 409,
 };
 
 /**

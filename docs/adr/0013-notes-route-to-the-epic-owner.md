@@ -54,3 +54,27 @@ notice, and 646 of 1,286 note lines to the three coordinators in 24 h were ack n
   on is sent as a note, or as a Mission Control answer, never as an ack comment.
 - F10 step 3 maps `note ack` onto a message's `delivered → processed` write; this amendment adds no ack path for it to
   replace.
+
+## Amendment: a coordinator may point at its own undelivered note (2026-11-10, epic `harness-velocity`, story vel-G7-POINTER)
+A note's notice reaches a composer only through the inbox, and the inbox types only into a ready, empty composer
+(ADR-0012). A coordinator that stays busy for an hour therefore never receives a decision note: on 10 Nov the oldest
+undelivered decision note at a coordinator was more than 60 min old. A `tab send` reaches a busy tab, but the API
+confines agent mutations to the caller's workspace, and that boundary stays.
+- `note point <id>` (`POST /api/cli/notes/<id>/point`) types ONE fixed line for the note into its recipient
+  orchestrator, busy included. The caller is the verified, live orchestrator of its own workspace (not admin, not an
+  owner-granted tab that is not the coordinator). The note is the caller's own, `delivered` (routed) and not yet in
+  any composer; its current route (`recipientOf`) is its routed recipient, the enabled orchestrator of another
+  workspace. The caller chooses neither the text nor the tab, and the request carries no body.
+- The line is an inbox note template: `[purplemux note <id>] from <ws>/<tab> at <time> needs action now: run
+  purplemux note show <id> now, then purplemux note ack <id>`. Only a note sent under an owner grant says "carries an
+  owner decision": a coordinator's admission says nothing about who decided.
+- The target checks are the inbox dispatcher's with `busy` admitted and one look: an agent tab, the dispatch policy,
+  no usage-limit halt, no native prompt, not `needs-input` or `startup-prompt`, no option list and an empty composer
+  on the screen. The ready-only rule of the inbox itself is unchanged.
+- Lock order: the target's dispatch lock, then the notes lock, as the inbox takes them before its preflight. Every
+  check runs again inside both. The caller's mapping lock is never held.
+- Bounds, in memory: one pointer per note and one per target tab per 10 min (`COORDINATOR_WINDOW_MS`), checked and
+  stamped inside the locks, and spent only when text was typed. A submitted line claims the coordinator window.
+- A submitted line is the note's composer receipt: `deliveredAt` is stamped, so the reminder clock starts, and the
+  queued notice is withdrawn (`note-pointed`). A line left in the composer stamps no receipt and answers
+  `typed-not-submitted` (exit 1). Each outcome writes one `note-pointer` coordination audit line.

@@ -723,3 +723,40 @@ describe('inbox (ADR-0012)', () => {
     expect(requests).toHaveLength(0);
   });
 });
+
+describe('note point — one POST with no body, and each refusal its exit (G7)', () => {
+  it('posts to the note\'s point route with no body and exits 0 on a submitted line', async () => {
+    reply = json(200, { status: 'sent', submitted: true, noteId: 'n-abcd1' });
+    const { code, stdout } = await cli(['note', 'point', 'n-abcd1']);
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({ submitted: true });
+    expect(requests).toEqual([expect.objectContaining({ method: 'POST', url: '/api/cli/notes/n-abcd1/point', body: undefined })]);
+  });
+
+  it.each([
+    ['note-point-not-ready', 409, 5],
+    ['note-point-too-soon', 409, 3],
+    ['forbidden', 403, 3],
+    ['tab-not-found', 404, 4],
+    ['session-not-running', 409, 4],
+    ['note-not-found', 404, 7],
+  ])('exits for %s (HTTP %i) with %i', async (codeName, status, exit) => {
+    reply = json(status, { error: `refused: ${codeName}`, code: codeName });
+    const { code, stderr } = await cli(['note', 'point', 'n-abcd1']);
+    expect(code).toBe(exit);
+    expect(stderr).toContain(codeName);
+  });
+
+  it('exits 1 when the line was typed but not submitted: a second pointer would type it twice', async () => {
+    reply = json(200, { status: 'sent', submitted: false, noteId: 'n-abcd1', notSubmitted: 'typed-not-submitted' });
+    const { code, stderr } = await cli(['note', 'point', 'n-abcd1']);
+    expect(code).toBe(1);
+    expect(stderr).toContain('typed-not-submitted');
+  });
+
+  it('refuses a missing or malformed id before any request (exit 2)', async () => {
+    expect((await cli(['note', 'point'])).code).toBe(2);
+    expect((await cli(['note', 'point', 'free text'])).code).toBe(2);
+    expect(requests).toEqual([]);
+  });
+});

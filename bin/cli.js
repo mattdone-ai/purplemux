@@ -154,6 +154,8 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'note-invalid': EXIT.USAGE,
   'lease-held': EXIT.CONFLICT,
   'note-cap': EXIT.CONFLICT,
+  'note-point-too-soon': EXIT.CONFLICT,
+  'note-point-not-ready': EXIT.NOT_READY,
   'lease-held-by-other': EXIT.CONFLICT,
   'watch-cap': EXIT.CONFLICT,
   forbidden: EXIT.CONFLICT,
@@ -1547,7 +1549,7 @@ const cmdInbox = async (args) => {
 // Notes (ADR-0013): a body the recipient pulls; only the inbox's fixed line is typed.
 const NOTE_BODY_MAX_BYTES = 16 * 1024;
 const NOTE_USAGE = 'usage: note send (--to-epic SLUG | --to-workspace WS) --subject TEXT (-f FILE | -f -) [--from-epic SLUG]'
-  + ' | note list [--open] [--to-me] [--from-me] [--epic SLUG] | note show ID | note ack ID [--comment TEXT]';
+  + ' | note list [--open] [--to-me] [--from-me] [--epic SLUG] | note show ID | note ack ID [--comment TEXT] | note point ID';
 const NOTE_VALUE_FLAGS = ['--to-epic', '--to-workspace', '--subject', '--file', '-f', '--from-epic', '--epic', '--comment'];
 const NOTE_BOOL_FLAGS = ['--open', '--to-me', '--from-me'];
 const NOTE_ID = /^n-[A-Za-z0-9_-]{4,32}$/;
@@ -1608,6 +1610,15 @@ const cmdNote = async (args) => {
       requireEnv();
       const { body } = await api('POST', `/api/cli/notes/${id}/ack`, comment === null ? {} : { comment });
       return out(body);
+    }
+    case 'point': {
+      const id = noteId(rest);
+      requireEnv();
+      const { body } = await api('POST', `/api/cli/notes/${id}/point`);
+      out(body);
+      // The line was typed and no turn was proven: a second pointer would type it twice.
+      if (typeof body?.notSubmitted === 'string' && body.notSubmitted) fail(body.notSubmitted, `note ${id}`);
+      return undefined;
     }
     default:
       die(NOTE_USAGE);
@@ -3833,6 +3844,11 @@ Commands:
   note show ID                             The note and its body (recipient or sender workspace, or admin; else exit 3; 7 unknown)
   note ack ID [--comment TEXT]             Acknowledge a local note in your workspace, or a cross-workspace note as
                                            its verified currently routed coordinator (else exit 3)
+  note point ID                            The verified current orchestrator types one fixed line for its own routed,
+                                           undelivered note into the recipient orchestrator, busy included: the note id
+                                           and "run note show". No text, no target choice. Exit 3 forbidden or too soon
+                                           (one per note and per target in 10 min), 4 target gone, 5 not ready
+                                           (a prompt, a halt or text in its composer), 7 unknown note
   event send --type review-ready|landed|blocked-on --to-epic SLUG (--json PAYLOAD | -f FILE | -f -)
                                            A verified worker tab announces a result inside its scope (ADR-0043). The
                                            server checks the evidence, then delivers it as a note to the epic's
