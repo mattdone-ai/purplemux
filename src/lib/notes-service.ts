@@ -11,6 +11,7 @@ import {
   NOTE_OPEN_PER_SENDER,
   NOTE_REMIND_MS,
   NOTE_SENDER_NOTICE_MS,
+  NOTE_UNDELIVERED_NOTICE_MS,
   NoteError,
   OPEN_STATES,
   acked,
@@ -78,6 +79,11 @@ export interface INotesDeps {
   audit?: (entry: Record<string, unknown>) => Promise<unknown>;
   /** F6 change 3: the coordinator window a typed pointer claims, as an inbox paste does; absent or null, none. */
   window?: () => CoordinatorWindow | null;
+  /**
+   * G7: one line to the portfolio Scrum Master seat's digest for a note whose line has not reached its recipient's
+   * composer after 15 min. Best effort: a failure never holds back the sender's notice.
+   */
+  alertUndelivered?: (note: INote, now: number) => Promise<void>;
 }
 
 /** The answer to a typed pointer (G7). `notSubmitted` is set when the line still sits in the composer. */
@@ -334,7 +340,7 @@ export class NotesService {
       return { ok: false as const, reason };
     };
     try {
-      const match = /^note:(n-[A-Za-z0-9_-]{4,32}):(delivered|reminder|unacked|expired|acked):/.exec(item.dedupeKey);
+      const match = /^note:(n-[A-Za-z0-9_-]{4,32}):(delivered|reminder|unacked|undelivered|expired|acked):/.exec(item.dedupeKey);
       if (!match) return reject('note-notice-key-invalid');
       const [, id, event] = match;
       // F6: an ack types nothing. An `acked` notice queued before this release is rejected here (withdrawn, never
@@ -342,10 +348,11 @@ export class NotesService {
       if (event === 'acked') return reject('note-ack-notice-retired');
       const note = (await this.deps.read()).notes.find((candidate) => candidate.id === id);
       if (!note) return reject('note-not-found');
-      if (event === 'unacked' || event === 'expired') {
+      if (event === 'unacked' || event === 'undelivered' || event === 'expired') {
+        // An `undelivered` notice is stale once the line reached the recipient's composer.
         const valid = event === 'expired'
           ? note.state === 'expired' || (OPEN_STATES.has(note.state) && this.deps.now() - note.createdAt >= NOTE_EXPIRE_MS)
-          : note.state === 'delivered';
+          : note.state === 'delivered' && (event === 'unacked' || note.deliveredAt === null);
         if (!valid) return reject(`note-terminal:${note.state}`);
         if (item.targetWorkspaceId !== note.from.workspaceId || item.targetTabId !== note.from.tabId) {
           return reject('note-sender-changed');
@@ -393,7 +400,7 @@ export class NotesService {
    * One notice to the sender's tab when it is live. True when the notice is settled: sent, or the
    * sender has no tab or its tab is confirmed closed. An unknown tab state settles nothing.
    */
-  private async noticeSender(note: INote, event: 'unacked' | 'expired', r: IReads): Promise<boolean> {
+  private async noticeSender(note: INote, event: 'unacked' | 'undelivered' | 'expired', r: IReads): Promise<boolean> {
     const { workspaceId, tabId } = note.from;
     if (!workspaceId || !tabId) return true;
     const state = await r.tabState(workspaceId, tabId);
@@ -488,15 +495,26 @@ export class NotesService {
       if (sent) next = reminded(next, now, sent);
     }
     // The sender's notice counts from the first routing, once per note: it is the escalation for a
-    // recipient that never reads the line, so it must not wait for the line to be read.
-    if (next.senderNotifiedAt === null && next.routedAt !== null && now - next.routedAt >= NOTE_SENDER_NOTICE_MS) {
+    // recipient that never reads the line, so it must not wait for the line to be read. G7: when the line has not
+    // reached the recipient's composer it comes at 15 min, and the Scrum Master seat's digest hears it too.
+    const undelivered = next.deliveredAt === null;
+    const noticeAfter = undelivered ? NOTE_UNDELIVERED_NOTICE_MS : NOTE_SENDER_NOTICE_MS;
+    if (next.senderNotifiedAt === null && next.routedAt !== null && now - next.routedAt >= noticeAfter) {
       try {
-        if (!(await this.noticeSender(next, 'unacked', r))) return next;
+        if (!(await this.noticeSender(next, undelivered ? 'undelivered' : 'unacked', r))) return next;
       } catch (err) {
         log.warn(`note ${note.id} sender notice not sent: ${err instanceof Error ? err.message : err}`);
         return next;
       }
       next = senderNotified(next, now);
+      // Not awaited: the alert may type a digest, which takes a dispatch lock, and this pass holds the notes lock.
+      // The inbox takes them in the other order (dispatch lock, then the notes lock in its preflight).
+      if (undelivered && this.deps.alertUndelivered) {
+        const notified = next;
+        void Promise.resolve().then(() => this.deps.alertUndelivered!(notified, now)).catch((err) => {
+          log.warn(`note ${note.id} undelivered alert not sent: ${err instanceof Error ? err.message : err}`);
+        });
+      }
     }
     return next;
   }
@@ -836,7 +854,7 @@ export class NotesService {
 
   /**
    * The caller is the verified, live orchestrator of its own workspace: the coordinator half of `admissionFor`
-   * (:244), stated on its own. `admissionFor` also returns `owner` or `local` without a throw (design ruling F3).
+   * (:244), stated on its own. `admissionFor` also returns `owner` or `local` without a throw, so its return is no coordinator check.
    */
   private async isCoordinator(caller: ICaller, r: IReads): Promise<boolean> {
     if (caller.admin || !caller.verified || !caller.workspaceId || !caller.tabId) return false;
@@ -890,7 +908,7 @@ export class NotesService {
 
   /**
    * Type one fixed pointer line for the caller's own undelivered note into its recipient orchestrator, busy
-   * included (G7, design ruling vel-G7-POINTER). Lock order: the target's dispatch lock, then the notes lock, as
+   * included (G7, vel-G7-POINTER). Lock order: the target's dispatch lock, then the notes lock, as
    * the inbox takes them before its preflight; every check runs again inside both. The caller's mapping lock is
    * never held. A typed and submitted line is the note's composer receipt, so its queued notice is withdrawn.
    */
@@ -1028,6 +1046,21 @@ const defaultDeps = async (): Promise<INotesDeps> => {
     ownerGrantOf: (tab) => grantStore.findActiveOwnerGrant(grantStore.grantsSnapshot('owner'), tab, Date.now()),
     audit: coordinationAudit.appendCoordinationAudit,
     window: coordinatorWindow.getCoordinatorWindow,
+    alertUndelivered: async (note, now) => {
+      // The portfolio Scrum Master seat hears it as one digest line, as a pool flag does. Its own note needs no copy: it
+      // is the sender, told already, or the recipient that has not read it.
+      const [{ getPortfolioStore }, { getStatusManager }, { renderUndeliveredAlert }] = await Promise.all([
+        import('@/lib/portfolio-store'),
+        import('@/lib/status-manager'),
+        import('@/lib/note-pending'),
+      ]);
+      const seat = getPortfolioStore().currentSelection()?.selection;
+      if (!seat?.managerWorkspaceId || !seat.managerTabId) return;
+      const at = { workspaceId: seat.managerWorkspaceId, tabId: seat.managerTabId };
+      const same = (t: { workspaceId: string | null; tabId: string | null } | null) => !!t && t.workspaceId === at.workspaceId && t.tabId === at.tabId;
+      if (same(note.from) || same(note.deliveredTo)) return;
+      await getStatusManager().routeTabEvent({ ...at, kind: 'note-undelivered', text: renderUndeliveredAlert(note, now), class: 'digest' });
+    },
   };
 };
 

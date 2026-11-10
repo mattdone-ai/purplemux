@@ -4,7 +4,7 @@ import { defaultNotePointPort } from '@/lib/note-pointer';
 import { sendNoteError } from '@/lib/notes-http';
 import { getNotesService } from '@/lib/notes-service';
 
-/** The pointer carries no text: the body is absent, null or `{}` (design ruling, AC1). */
+/** The pointer carries no text: the body is absent, null or `{}`, so nothing the caller writes is typed. */
 const emptyBody = (body: unknown): boolean =>
   body === undefined || body === null || body === ''
   || (typeof body === 'object' && !Array.isArray(body) && Object.keys(body as object).length === 0);

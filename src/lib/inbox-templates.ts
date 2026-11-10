@@ -53,8 +53,9 @@ const count = (name: string, value: unknown): string => {
 
 /** Which note notice this is (ADR-0013). A server enum, never caller text. */
 // No `acked` event (F6): an ack types nothing into the sender, who reads the state with `purplemux note list`.
-export type TNoteEvent = 'delivered' | 'reminder' | 'unacked' | 'expired';
-const NOTE_EVENTS: readonly TNoteEvent[] = ['delivered', 'reminder', 'unacked', 'expired'];
+// `undelivered` (G7) goes to the sender at 15 min when the line has not reached the recipient's composer.
+export type TNoteEvent = 'delivered' | 'reminder' | 'unacked' | 'undelivered' | 'expired';
+const NOTE_EVENTS: readonly TNoteEvent[] = ['delivered', 'reminder', 'unacked', 'undelivered', 'expired'];
 
 /**
  * The words after "from" in a note line, and the note view's `fromLabel` (ADR-0013, ADR-0029): one
@@ -159,6 +160,7 @@ const TEMPLATES: { [K in TInboxKind]: TRenderer<K> } = {
       delivered: `[purplemux note ${id}] from ${from} at ${at} — ${read}, then purplemux note ack ${id}`,
       reminder: `[purplemux note ${id}] from ${from} at ${at} is still unacked — ${read}, then purplemux note ack ${id}`,
       unacked: `[purplemux note ${id}] you sent it at ${at}; it is still unacked after 60 min — ${read}`,
+      undelivered: `[purplemux note ${id}] you sent it at ${at}; it has not reached its recipient's composer after 15 min — ${read}`,
       expired: `[purplemux note ${id}] you sent it at ${at}; it expired unacked — ${read}`,
     }[event];
     return { recordId: id, line };
@@ -218,7 +220,7 @@ export const renderInboxLine = <K extends TInboxKind>(kind: K, fields: IInboxFie
 
 /**
  * The one line `note point` types (G7): the note grammar, server fields only, and "owner decision" only for a note
- * sent under an owner grant, since a coordinator's admission says nothing about who decided (design ruling F2).
+ * sent under an owner grant, since a coordinator's admission says nothing about who decided.
  */
 export const renderNotePointerLine = (f: INoteFields): string => {
   const { id, from, owner } = noteHead(f);

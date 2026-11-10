@@ -55,7 +55,7 @@ notice, and 646 of 1,286 note lines to the three coordinators in 24 h were ack n
 - F10 step 3 maps `note ack` onto a message's `delivered → processed` write; this amendment adds no ack path for it to
   replace.
 
-## Amendment: a coordinator may point at its own undelivered note (2026-11-10, epic `harness-velocity`, story vel-G7-POINTER)
+## Amendment: a coordinator may point at its own undelivered note (2026-11-10, story vel-G7-POINTER)
 A note's notice reaches a composer only through the inbox, and the inbox types only into a ready, empty composer
 (ADR-0012). A coordinator that stays busy for an hour therefore never receives a decision note: on 10 Nov the oldest
 undelivered decision note at a coordinator was more than 60 min old. A `tab send` reaches a busy tab, but the API
@@ -78,3 +78,23 @@ confines agent mutations to the caller's workspace, and that boundary stays.
 - A submitted line is the note's composer receipt: `deliveredAt` is stamped, so the reminder clock starts, and the
   queued notice is withdrawn (`note-pointed`). A line left in the composer stamps no receipt and answers
   `typed-not-submitted` (exit 1). Each outcome writes one `note-pointer` coordination audit line.
+
+## Amendment: pending notes are read where the coordinator reads, and an undelivered note escalates at 15 min (2026-11-10, story vel-G7-PENDING)
+A status line is read by a person, not by the model, and a hold after 30 inbox refusals (about 2.4 h) is too late
+for an owner decision. Readers only: no new store, no new queue, and no change to
+the inbox's ready-only rule.
+- A coordinator's digest (a tab the coordinator window governs) carries, under its `DIGEST` header,
+  `N notes pending, oldest <age>: run purplemux note list --open --to-me`. A watchdog nudge typed to it carries the
+  same line after the nudge. The count is the open notes routed to that tab, exactly what the command lists; the age
+  is the oldest one's, from its creation, in whole minutes. The ledger keeps the nudge's own text, so the duplicate
+  filter and the nudge history read the same row as before. No pending note, or an unreadable note store, types the
+  message without the line.
+- The two-clocks rule above changes for the sender only: its one notice per note comes at 15 min after the first
+  routing when the line has not reached the recipient's composer (`deliveredAt` null), as the new `undelivered`
+  event: `[purplemux note n-…] you sent it at <time>; it has not reached its recipient's composer after 15 min —
+  purplemux note show n-…`. A line in a composer keeps the 60-min `unacked` notice. It is still one notice per note
+  (`senderNotifiedAt`). The paste preflight rejects an `undelivered` notice once the line reached the composer.
+- With the `undelivered` notice, the portfolio Scrum Master seat (the current manager selection) gets one digest line,
+  `note n-… from <ws>/<tab> to <ws>/<tab> has not reached its recipient's composer after <n> min; its sender was told`:
+  ids and times only. The seat gets no copy of a note it sent or that waits for it. The alert is not awaited inside
+  the notes lock: a digest takes a dispatch lock, and the inbox takes those two locks in the other order.

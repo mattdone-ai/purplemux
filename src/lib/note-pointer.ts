@@ -10,7 +10,10 @@ import type { ITab } from '@/types/terminal';
 // pull it. The service (`NotesService.point`) decides who may point at which note; this module holds the bounds and
 // the target-side checks, which are the inbox dispatcher's checks with `busy` admitted and no wait.
 
-/** One pointer per note, and one per target tab from any sender, per coordinator window (design ruling F5). */
+/**
+ * One pointer per note, and one per target tab from any sender, per coordinator window: a coordinator holds up to 50
+ * open notes, so a per-note bound alone would let one sender type 50 lines into one tab at once.
+ */
 export const NOTE_POINT_BOUND_MS = COORDINATOR_WINDOW_MS;
 
 /**

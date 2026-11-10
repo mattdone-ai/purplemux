@@ -28,6 +28,11 @@ const DAY = 24 * 60 * MIN;
 export const NOTE_REMIND_MS = 30 * MIN;
 /** One notice to the sender this long after the first routing, if still unacked; once per note. */
 export const NOTE_SENDER_NOTICE_MS = 60 * MIN;
+/**
+ * G7: the sender's one notice comes this early when the line has not reached the recipient's composer, since an owner
+ * decision cannot wait the 60 min (nor the inbox's 30 refusals, about 2.4 h). A line in a composer keeps the 60 min.
+ */
+export const NOTE_UNDELIVERED_NOTICE_MS = 15 * MIN;
 /** A note unacked (or undeliverable) this long after creation expires. */
 export const NOTE_EXPIRE_MS = 14 * DAY;
 /** How long expiry waits for a sender tab whose liveness is unknown, so its one notice is not lost. */

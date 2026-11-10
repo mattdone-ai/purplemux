@@ -2,7 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NoteError } from '@/lib/notes-store';
 
-// G7 step 0: `POST /api/cli/notes/:id/point` takes no text (AC1) and answers every refusal with a CLI code (AC6).
+// G7 step 0: `POST /api/cli/notes/:id/point` takes no text and answers every refusal with a CLI code.
 
 const state = vi.hoisted(() => ({
   point: vi.fn(),
@@ -39,7 +39,7 @@ describe('POST /api/cli/notes/:id/point', () => {
     ['a target', { tabId: 'tab-x' }],
     ['a string body', 'deploy now'],
     ['an array body', ['x']],
-  ])('refuses %s before any note is read (AC1)', async (_name, body) => {
+  ])('refuses %s before any note is read', async (_name, body) => {
     expect(await call(body)).toEqual({ code: 400, body: { error: 'a pointer carries no text: send no body', code: 'note-invalid' } });
     expect(state.point).not.toHaveBeenCalled();
   });
