@@ -60,9 +60,10 @@ describe('SessionStart source (L30)', () => {
         .toEqual({ event: 'session-start', session: 'pt-ws-1-pane-a-tab-w', source: 'compact' });
     });
 
-    it('forwards no source a plain word would not match, and none for other events', async () => {
+    it('forwards no source a plain word would not match; a stop posts its own JSON, which is no session-start (F6)', async () => {
       expect(await run('session-start', '{"source":"comp\\"act"}')).toEqual({ event: 'session-start', session: 'pt-ws-1-pane-a-tab-w' });
-      expect(await run('stop', JSON.stringify({ source: 'compact' }))).toEqual({ event: 'stop', session: 'pt-ws-1-pane-a-tab-w' });
+      // The stop route reads only hook_event_name, session_id and last_assistant_message; a `source` field means nothing there.
+      expect(await run('stop', JSON.stringify({ source: 'compact' }))).toEqual({ source: 'compact' });
     });
   });
 });

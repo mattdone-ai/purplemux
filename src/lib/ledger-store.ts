@@ -7,6 +7,7 @@ import { brandCodedError } from '@/lib/coded-error';
 import { TabEventsTable } from '@/lib/tab-events-store';
 import { TabTurnsTable } from '@/lib/tab-turns-store';
 import { RotationCheckpointsTable } from '@/lib/rotation-checkpoint-store';
+import { TurnEndsTable } from '@/lib/turn-ends-store';
 import { foldLedgerEvent, isLanding, parseAttrs, PHASE_REPLAY_LOOKBACK_MS, silentFor } from '@/lib/ledger-fold';
 import type { ILedgerItemRow } from '@/lib/ledger-fold';
 import {
@@ -150,6 +151,7 @@ export interface ILedgerRetentionResult {
   landings: number;
   tabEvents: number;
   tabTurns: number;
+  turnEnds: number;
   /** Finished rotation checkpoints past the retention window, a task's newest row kept (vel-D5). */
   checkpoints: number;
   items: number;
@@ -279,6 +281,8 @@ export class LedgerStore {
   readonly tabTurns: TabTurnsTable;
   /** Each seat's rotation checkpoints (vel-D5): written and read back before a session is cleared. */
   readonly checkpoints: RotationCheckpointsTable;
+  /** Each worker turn's typed end (F6, F10 step 2) and each session's turn counter. */
+  readonly turnEnds: TurnEndsTable;
 
   constructor(databasePath = defaultDbPath()) {
     if (databasePath !== ':memory:') fs.mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
@@ -296,6 +300,8 @@ export class LedgerStore {
       this.tabTurns.ensureShape();
       this.checkpoints = new RotationCheckpointsTable(this.database);
       this.checkpoints.ensureShape();
+      this.turnEnds = new TurnEndsTable(this.database);
+      this.turnEnds.ensureShape();
       this.ensureLandings();
       this.database.exec('CREATE INDEX IF NOT EXISTS events_ws_producer_received_idx ON events(workspace_id, producer, received_at)');
     } catch (error) {
@@ -916,6 +922,8 @@ export class LedgerStore {
       tabEvents: await this.deleteInChunks('DELETE FROM tab_events WHERE seq IN (SELECT seq FROM tab_events WHERE at < ? LIMIT ?)',
         [now - LEDGER_TAB_EVENTS_RETENTION_DAYS * DAY_MS]),
       tabTurns: await this.deleteInChunks(TabTurnsTable.RETENTION_DELETE, [now - LEDGER_TAB_EVENTS_RETENTION_DAYS * DAY_MS]),
+      turnEnds: await this.deleteInChunks(TurnEndsTable.RETENTION_DELETE, [now - LEDGER_TAB_EVENTS_RETENTION_DAYS * DAY_MS])
+        + await this.deleteInChunks(TurnEndsTable.STARTS_RETENTION_DELETE, [now - LEDGER_TAB_EVENTS_RETENTION_DAYS * DAY_MS]),
       checkpoints: await this.deleteInChunks(RotationCheckpointsTable.RETENTION_DELETE, [cutoff]),
       items: await this.deleteInChunks(`DELETE FROM items WHERE (workspace_id, item_key) IN (SELECT workspace_id, item_key FROM items
         WHERE closed_at IS NOT NULL AND closed_at < ? LIMIT ?)`, [cutoff]),

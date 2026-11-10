@@ -16,49 +16,6 @@ export const STANDUP_STALE_MS = 20 * 60 * 1000;
 
 export const MAX_STANDUP_HISTORY = 50;
 
-/**
- * Story hfl2-10: the orchestrator's digest says a standup is due when its newest one is this old. Fleet config key
- * `standup.dueMin` (ADR-0019; admin token only) overrides the default; `0` turns the line off.
- */
-export const STANDUP_DUE_CONFIG_KEY = 'standup.dueMin';
-export const STANDUP_DUE_DEFAULT_MS = 45 * 60 * 1000;
-const STANDUP_DUE_MAX_MINUTES = 24 * 60;
-
-/** The `tab_events` kind of the due line: the one digest kind that makes a digest due at once (ADR-0035 §3). */
-export const STANDUP_DUE_KIND = 'standup-due';
-
-/**
- * The due age in ms for a fleet value, or null when it is not minutes in [0, 1440]. `0` (off) is a valid value.
- * Decimals are allowed (0.05 = 3 s), so an acceptance run can prove the line without a 45 min wait.
- */
-export const parseStandupDueMinutes = (value: string | null | undefined): number | null => {
-  if (value === null || value === undefined || !/^\d+(\.\d+)?$/.test(value.trim())) return null;
-  const minutes = Number(value.trim());
-  if (!(minutes >= 0) || minutes > STANDUP_DUE_MAX_MINUTES) return null;
-  return Math.round(minutes * 60 * 1000);
-};
-
-/**
- * The due bucket an age falls in: `dueMs`, then each doubling of it (45, 90, 180 ... min). The line goes out once
- * per bucket. Null when the line is off (`dueMs` 0) or the age is below the first bucket.
- */
-export const standupDueBucketMs = (ageMs: number, dueMs: number): number | null => {
-  if (!(dueMs > 0) || !Number.isFinite(ageMs) || ageMs < dueMs) return null;
-  let bucket = dueMs;
-  while (bucket * 2 <= ageMs) bucket *= 2;
-  return bucket;
-};
-
-/**
- * The one due line. `lastPostedAt` null: the workspace has no standup, and the age counts from the run's start;
- * the line then says that none was posted, never a "last posted" time that does not exist.
- */
-export const buildStandupDueLine = (workspaceId: string, ageMs: number, lastPostedAt: number | null): string => {
-  const minutes = Math.floor(ageMs / 60_000);
-  const age = lastPostedAt === null ? `none posted in the ${minutes} min since the run started` : `last posted ${minutes} min ago`;
-  return `standup due: ${age} (purplemux standup report -w ${workspaceId})`;
-};
-
 const STANDUP_STATES: TStandupState[] = ['on-track', 'at-risk', 'blocked', 'awaiting-human', 'done'];
 const ITEM_STATUSES: TStandupItemStatus[] = ['done', 'active', 'blocked', 'todo'];
 

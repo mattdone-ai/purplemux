@@ -65,7 +65,7 @@ describe('remote Claude hooks on /api/status/hook (ADR-0022)', () => {
     expect(transcript.order).toEqual(['bind', 'sync', 'meta', 'event']);
     expect(transcript.bindRemoteTranscript).toHaveBeenCalledWith({ session: R, host: 'ai-server', sessionId: SID, remotePath: stopBody.transcript_path });
     expect(sm.applyAgentHookMeta).toHaveBeenCalledWith('claude', R, { sessionId: SID, jsonlPath: expect.stringContaining(`${SID}.jsonl`) }, 1791660000000);
-    expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', R, { kind: 'stop' }, 1791660000000);
+    expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', R, { kind: 'stop' }, 1791660000000, { replayed: false });
   });
 
   it('maps a notification and a compaction session start like the local hook', async () => {
@@ -85,7 +85,7 @@ describe('remote Claude hooks on /api/status/hook (ADR-0022)', () => {
   it('a transcript path that is not a Claude transcript is never read; the event still applies', async () => {
     await post({ remote: 'claude', event: 'stop', session: R }, 'tok-r', { session_id: SID, transcript_path: '/home/mdone/.ssh/id_ed25519' });
     expect(transcript.bindRemoteTranscript).not.toHaveBeenCalled();
-    expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', R, { kind: 'stop' }, undefined);
+    expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', R, { kind: 'stop' }, undefined, { replayed: false });
   });
 
   it.each([
@@ -109,6 +109,6 @@ describe('remote Claude hooks on /api/status/hook (ADR-0022)', () => {
   it('the global token still drives the local hook as before', async () => {
     const state = await post({}, 'global', { event: 'stop', session: 'pt-ws-a-pane-p-tab-l' });
     expect(state.statusCode).toBe(204);
-    expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', 'pt-ws-a-pane-p-tab-l', { kind: 'stop' }, undefined);
+    expect(sm.handleProviderEvent).toHaveBeenCalledWith('claude', 'pt-ws-a-pane-p-tab-l', { kind: 'stop' }, undefined, { replayed: false });
   });
 });

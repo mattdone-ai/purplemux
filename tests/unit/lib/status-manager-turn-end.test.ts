@@ -72,6 +72,11 @@ const managerWithPaste = async () => {
   await import('@/lib/providers');
   const { StatusManager } = await import('@/lib/status-manager');
   const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), ...memoryLedgerTables());
+  // F6's coordinator window is pinned in coordinator-window.test.ts and status-manager-event-digest.test.ts; these
+  // tests pin the turn-end classifier, with the orchestrator as the nudge target only, so they turn the window off.
+  (await import('@/lib/coordinator-window')).configureCoordinatorWindow({
+    now: () => Date.now(), isCoordinator: async () => false, lastGoverned: () => null, oldestDigestAt: () => null,
+  });
   manager.registerTab('root', { cliState: 'idle', workspaceId: 'ws-1', tabName: 'root', tmuxSession: 'tmux-root', panelType: 'claude-code' });
   return { manager, paste };
 };

@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { nanoid } from 'nanoid';
+import { WINDOWED_INBOX_KINDS, WINDOW_DEFERRAL, WINDOW_EXEMPT_INBOX_KINDS } from '@/lib/coordinator-window';
 import { humanRetryRefusal } from '@/lib/human-actions';
 import { renderInboxLine, type IInboxFields } from '@/lib/inbox-templates';
 import type { IInboxItem, IInboxState, THumanRetryRefusal, TInboxErrorCode, TInboxKind } from '@/types/inbox';
@@ -114,6 +115,19 @@ export const refuseInState = (state: IInboxState, id: string, reason: string, no
     if (attempts >= INBOX_MAX_REFUSALS) return hold(refused, `${reason} (${attempts} refusals)`, now);
     if (now >= item.expiresAt) return hold(refused, `${reason} (undelivered after 24 h)`, now);
     return refused;
+  });
+
+/**
+ * F6 change 3: the coordinator window defers the item to `until` (ruling, change 2): `notBefore` moves, the reason is
+ * kept as `lastRefusal`, and `attempts` is unchanged, so a deferral never spends the 30-refusal budget and never holds
+ * a GO. The 24 h rule is unchanged.
+ */
+export const deferInState = (state: IInboxState, id: string, until: number, reason: string, now: number): IInboxState =>
+  replace(state, id, (item) => {
+    if (!awaitsDelivery(item, now)) return item;
+    const deferred = { ...item, lastAttemptAt: now, lastRefusal: reason, notBefore: until };
+    if (now >= item.expiresAt) return hold(deferred, `${reason} (undelivered after 24 h)`, now);
+    return deferred;
   });
 
 export const deliverInState = (state: IInboxState, id: string, now: number): IInboxState =>
@@ -244,12 +258,34 @@ export const dueItems = (state: IInboxState, now: number, wake: (item: IInboxIte
   const waiting = state.items.filter((i) => awaitsDelivery(i, now)).sort((a, b) => a.createdAt - b.createdAt);
   for (const item of waiting) {
     const key = `${item.targetWorkspaceId}/${item.targetTabId}`;
-    if (byTab.has(key)) continue;
-    // Per tab, strictly in order: a later notice never overtakes a waiting one.
-    byTab.set(key, item);
+    const head = byTab.get(key);
+    // Per tab, strictly in order: a later notice never overtakes a waiting one, with one exception (F6 ruling,
+    // change 6): a kind that skips a coordinator's window overtakes a head that waits only on that window.
+    if (head === undefined) byTab.set(key, item);
+    else if (waitsOnlyOnWindow(head) && WINDOW_EXEMPT_INBOX_KINDS.has(item.kind) && !WINDOW_EXEMPT_INBOX_KINDS.has(head.kind)) byTab.set(key, item);
   }
   const dueAt = (item: IInboxItem) => (item.state === 'held' ? (item.lastAttemptAt ?? item.transitionAt) + HELD_REPROBE_MS : item.notBefore);
   return [...byTab.values()].filter((item) => dueAt(item) <= now || wake(item));
+};
+
+/** Queued and last deferred by the coordinator window: nothing but the window holds it back. */
+export const waitsOnlyOnWindow = (item: IInboxItem): boolean =>
+  item.state === 'queued' && (item.lastRefusal ?? '').startsWith(WINDOW_DEFERRAL);
+
+/**
+ * Per target tab, when its oldest item of a windowed kind that waits only on the window, or not yet tried, was created
+ * (F6 ruling, change 3: the digest and this item take the next window in age order).
+ */
+export const windowHeads = (state: IInboxState, now: number): Map<string, number> => {
+  const heads = new Map<string, number>();
+  for (const item of state.items) {
+    if (!awaitsDelivery(item, now) || !(WINDOWED_INBOX_KINDS as readonly string[]).includes(item.kind)) continue;
+    if (item.lastRefusal && !waitsOnlyOnWindow(item)) continue;
+    const key = `${item.targetWorkspaceId}/${item.targetTabId}`;
+    const known = heads.get(key);
+    if (known === undefined || item.createdAt < known) heads.set(key, item.createdAt);
+  }
+  return heads;
 };
 
 // ─── I/O ─────────────────────────────────────────────────────────────────

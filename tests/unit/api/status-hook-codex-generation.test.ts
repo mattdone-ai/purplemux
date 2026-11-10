@@ -78,7 +78,7 @@ describe('Codex hook generation gate', () => {
     expect(lifecycle.withReplayedCodexHookGeneration).not.toHaveBeenCalled();
     expect(status.applyAgentHookMeta).toHaveBeenCalled();
     expect(status.handleProviderEvent).toHaveBeenCalledWith(
-      'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'session-start' }, undefined,
+      'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'session-start' }, undefined, { replayed: false },
     );
   });
 
@@ -99,7 +99,7 @@ describe('Codex hook generation gate', () => {
     );
     expect(lifecycle.withValidatedCodexHookGeneration).not.toHaveBeenCalled();
     expect(status.handleProviderEvent).toHaveBeenCalledWith(
-      'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'session-start' }, 1_790_576_100_560,
+      'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'session-start' }, 1_790_576_100_560, { replayed: true },
     );
     // The gate reads the launch the status manager tracks in memory for the tab.
     const tracked = lifecycle.withReplayedCodexHookGeneration.mock.calls[0][3] as (tabId: string) => unknown;
@@ -240,7 +240,7 @@ describe('Codex hook generation gate', () => {
       const meta = status.applyAgentHookMeta.mock.calls[0][2] as Record<string, unknown>;
       expect(meta.permissionRequest).toBeTruthy();
       expect(status.handleProviderEvent).toHaveBeenCalledWith(
-        'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'notification', notificationType: 'permission_prompt' }, undefined,
+        'codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'notification', notificationType: 'permission_prompt' }, undefined, { replayed: false },
       );
     });
 
@@ -255,7 +255,7 @@ describe('Codex hook generation gate', () => {
       await handler(req, response());
 
       expect(status.applyAgentHookMeta).toHaveBeenCalled();
-      expect(status.handleProviderEvent).toHaveBeenCalledWith('codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'stop' }, undefined);
+      expect(status.handleProviderEvent).toHaveBeenCalledWith('codex', 'pt-ws-pins-pane-one-tab-pins', { kind: 'stop' }, undefined, { replayed: false });
     });
   });
 });

@@ -70,26 +70,36 @@ describe('watchdog nudges through the wake classes (ADR-0035)', () => {
     liveness.statusForTab.mockResolvedValue({ probes: [], backgroundJobs: [] });
   });
 
-  it('types DONE at once into a busy orchestrator, and never a digest (AC 2, AC 3)', async () => {
+  it('holds DONE for a busy orchestrator in its window; BLOCKED is typed at once (F6 change 3, replaces AC 2)', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const { manager, internals, orch, marker, typed } = await setup();
     orch.cliState = 'busy';
     await marker('CHECKPOINTED: handoff a', 'seq:1');
     await marker('DONE: shipped', 'seq:2');
-    await marker('CHECKPOINTED: handoff b', 'seq:3');
+    await marker('BLOCKED: the gate is red', 'seq:3');
     await internals.tabEvents.tick();
-    expect(typed()).toEqual([expect.stringContaining('ended: DONE: shipped')]);
+    expect(typed()).toEqual([expect.stringContaining('ended: BLOCKED: the gate is red')]);
     expect(manager.getOrchestrationNudges('ws-1').map((n) => [n.wakeClass, n.delivered])).toEqual([
-      ['digest', false], ['urgent', true], ['digest', false],
+      ['digest', false], ['digest', false], ['urgent', true],
     ]);
 
+    // The BLOCKED paste skipped the window and did not shut it: the first digest goes at the next prompt.
     orch.cliState = 'idle';
     vi.setSystemTime(Date.now() + 5_000);
     await internals.tabEvents.tick();
     expect(typed()).toHaveLength(2);
     expect(typed()[1]).toMatch(/^DIGEST 2 since \S+Z\n- \d\d:\d\dZ turn-marker: worker w \(w\) ended: CHECKPOINTED: handoff a\n/);
-    expect(typed()[1]).toContain('CHECKPOINTED: handoff b');
+    expect(typed()[1]).toContain('DONE: shipped');
     expect(manager.getOrchestrationNudges('ws-1').map((n) => n.delivered)).toEqual([true, true, true]);
+
+    // That digest opened a 10 min window: the next DONE waits for it.
+    await marker('DONE: again', 'seq:4');
+    vi.setSystemTime(Date.now() + 9 * 60_000);
+    await internals.tabEvents.tick();
+    expect(typed()).toHaveLength(2);
+    vi.setSystemTime(Date.now() + 60_000);
+    await internals.tabEvents.tick();
+    expect(typed()).toHaveLength(3);
   });
 
   it('a tab waiting at its prompt on its own background work takes a digest; a halted one does not', async () => {
@@ -120,11 +130,11 @@ describe('watchdog nudges through the wake classes (ADR-0035)', () => {
 
   it('keeps the nudge history across a restart: a new manager over the same log reads it (AC 5)', async () => {
     const { marker, tabEvents } = await setup();
-    await marker('DONE: before the restart', 'seq:1');
+    await marker('BLOCKED: before the restart', 'seq:1');
     const { StatusManager } = await import('@/lib/status-manager');
     const restarted = new StatusManager(undefined, vi.fn(async () => true), vi.fn(async () => {}), tabEvents, memoryLedgerTables()[1]);
     expect(restarted.getOrchestrationNudges('ws-1')).toEqual([expect.objectContaining({
-      tabId: 'w', tabName: 'w', kind: 'turn-marker', delivered: true, wakeClass: 'urgent', message: expect.stringContaining('DONE: before the restart'),
+      tabId: 'w', tabName: 'w', kind: 'turn-marker', delivered: true, wakeClass: 'urgent', message: expect.stringContaining('BLOCKED: before the restart'),
     })]);
     expect(restarted.getOrchestrationNudges('ws-2')).toEqual([]);
   });
@@ -278,5 +288,54 @@ describe('watchdog nudges through the wake classes (ADR-0035)', () => {
       expect(alerts).toEqual([]);
       expect(tabEvents().pending('ws-1', 'o')).toEqual([]);
     });
+  });
+
+  describe('the keeper sees a turn the polls missed (F6 ruling 6)', () => {
+    it('a short turn after beat 1 ends the idle episode: no beat 3, no false stall alert', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const t0 = Date.UTC(2026, 10, 10, 0, 0, 0);
+      vi.setSystemTime(t0);
+      const { manager, internals, orch } = await setup();
+      manager.removeTab('w');
+      const alerts: string[] = [];
+      internals.dispatchAlert = async (params) => { alerts.push(params.kind); };
+      const keeperAt = async (minute: number) => {
+        vi.setSystemTime(t0 + minute * 60_000);
+        await internals.runOrchestratorKeeper();
+      };
+      await keeperAt(0);
+      await keeperAt(10);
+      expect(internals.orchKeeper.get('ws-1')).toMatchObject({ beats: 1 });
+      // The Scrum Master answers beat 1 with a 20 s `--once` turn between two polls: the polls only ever see it idle.
+      orch.lastEvent = { name: 'stop', at: t0 + 10.5 * 60_000, seq: 9 };
+      for (const minute of [11, 20, 25, 30, 31, 40]) await keeperAt(minute);
+      expect(internals.orchKeeper.get('ws-1')).toMatchObject({ idleSince: t0 + 10.5 * 60_000 });
+      expect(internals.orchKeeper.get('ws-1')!.beats).toBeLessThan(3);
+      expect(alerts).toEqual([]);
+    });
+
+    it('an orchestrator that never takes a turn still reaches the stall alert after its third beat', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const t0 = Date.UTC(2026, 10, 10, 0, 0, 0);
+      vi.setSystemTime(t0);
+      const { manager, internals } = await setup();
+      manager.removeTab('w');
+      const alerts: string[] = [];
+      internals.dispatchAlert = async (params) => { alerts.push(params.kind); };
+      for (const minute of [0, 10, 20, 30]) {
+        vi.setSystemTime(t0 + minute * 60_000);
+        await internals.runOrchestratorKeeper();
+      }
+      expect(internals.orchKeeper.get('ws-1')).toMatchObject({ beats: 3, stallAlerted: true });
+      await vi.waitFor(() => expect(alerts.length).toBeGreaterThan(0));
+    });
+  });
+
+  it('orchestratorTurnAt reads a prompt-submit or a stop, and the recorded turn end; a notification is no turn', async () => {
+    const { orchestratorTurnAt } = await import('@/lib/status-manager');
+    expect(orchestratorTurnAt({ lastEvent: { name: 'prompt-submit', at: 5, seq: 1 }, turnEnd: null })).toBe(5);
+    expect(orchestratorTurnAt({ lastEvent: { name: 'notification', at: 9, seq: 2 }, turnEnd: { kind: 'waiting', at: 7, seq: 1 } as never })).toBe(7);
+    expect(orchestratorTurnAt({ lastEvent: { name: 'stop', at: 4, seq: 2 }, turnEnd: { kind: 'waiting', at: 7, seq: 1 } as never })).toBe(7);
+    expect(orchestratorTurnAt({ lastEvent: undefined, turnEnd: undefined } as never)).toBeNull();
   });
 });

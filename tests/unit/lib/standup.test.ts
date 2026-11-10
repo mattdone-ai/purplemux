@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  STANDUP_DUE_DEFAULT_MS,
-  buildStandupDueLine,
-  parseStandupDueMinutes,
-  parseStandupReport,
-  standupDueBucketMs,
-} from '@/lib/standup';
+import { parseStandupReport } from '@/lib/standup';
 
 const WS = 'ws-test';
 const AT = 1_700_000_000_000;
@@ -92,44 +86,3 @@ describe('parseStandupReport', () => {
   });
 });
 
-const MIN = 60_000;
-
-describe('standup due (story hfl2-10)', () => {
-  it('defaults to 45 min', () => {
-    expect(STANDUP_DUE_DEFAULT_MS).toBe(45 * MIN);
-  });
-
-  it.each([
-    ['45', 45 * MIN], ['0', 0], [' 90 ', 90 * MIN], ['0.05', 3_000], ['1440', 1440 * MIN],
-  ])('reads %j as %d ms; 0 is valid and means off (AC 3)', (value, ms) => {
-    expect(parseStandupDueMinutes(value)).toBe(ms);
-  });
-
-  it.each([null, undefined, '', '-1', '1441', 'off', '45m', '1e3'])('refuses %j: the default applies', (value) => {
-    expect(parseStandupDueMinutes(value)).toBeNull();
-  });
-
-  it('puts an age in its bucket: due, then each doubling of it (AC 2)', () => {
-    const due = 45 * MIN;
-    expect(standupDueBucketMs(44 * MIN, due)).toBeNull();
-    expect(standupDueBucketMs(45 * MIN, due)).toBe(45 * MIN);
-    expect(standupDueBucketMs(89 * MIN, due)).toBe(45 * MIN);
-    expect(standupDueBucketMs(90 * MIN, due)).toBe(90 * MIN);
-    expect(standupDueBucketMs(179 * MIN, due)).toBe(90 * MIN);
-    expect(standupDueBucketMs(180 * MIN, due)).toBe(180 * MIN);
-    expect(standupDueBucketMs(400 * MIN, due)).toBe(360 * MIN);
-  });
-
-  it('has no bucket when the line is off (dueMin 0) or the age is not a number (AC 3)', () => {
-    expect(standupDueBucketMs(10_000 * MIN, 0)).toBeNull();
-    expect(standupDueBucketMs(Number.NaN, 45 * MIN)).toBeNull();
-  });
-
-  it('writes the one line the orchestrator acts on (AC 1)', () => {
-    expect(buildStandupDueLine('ws-a', 61 * MIN + 59_000, AT)).toBe('standup due: last posted 61 min ago (purplemux standup report -w ws-a)');
-  });
-
-  it('never claims a last post a workspace with no standup does not have', () => {
-    expect(buildStandupDueLine('ws-a', 47 * MIN, null)).toBe('standup due: none posted in the 47 min since the run started (purplemux standup report -w ws-a)');
-  });
-});

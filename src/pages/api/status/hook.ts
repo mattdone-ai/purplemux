@@ -26,7 +26,11 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 
   const outcome = await dispatchHook({ query: req.query, body: req.body });
   if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+  if (outcome.body) return res.status(outcome.status).json(outcome.body);
   return res.status(outcome.status).end();
 };
+
+/** The hook script spools a body over 256 KiB as metadata only; a live body is held to twice that (F6). */
+export const config = { api: { bodyParser: { sizeLimit: '512kb' } } };
 
 export default handler;

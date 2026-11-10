@@ -38,6 +38,11 @@ const setup = async (orchestration: { enabled: boolean; orchestratorTabId: strin
   const { StatusManager } = await import('@/lib/status-manager');
   const tabEvents = memoryTabEvents();
   const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}), tabEvents, memoryLedgerTables()[1]);
+  // F6's coordinator window is pinned in coordinator-window.test.ts and status-manager-event-digest.test.ts; these
+  // tests pin remote job reporting, with the orchestrator as the nudge target only, so they turn the window off.
+  (await import('@/lib/coordinator-window')).configureCoordinatorWindow({
+    now: () => Date.now(), isCoordinator: async () => false, lastGoverned: () => null, oldestDigestAt: () => null,
+  });
   const alerts = vi.fn(async (_params: { kind: string; detail?: string }) => {});
   (manager as unknown as { dispatchAlert: typeof alerts }).dispatchAlert = alerts;
   manager.registerTab('o1', entry('o1'));

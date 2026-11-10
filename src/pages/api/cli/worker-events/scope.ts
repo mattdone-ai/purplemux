@@ -20,7 +20,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     if (req.method === 'PUT') {
       const body = bodyOf(req);
       const scope = await service.declareScope(caller, {
-        tabId: body.tabId, epic: body.epic, story: body.story, dependsOn: body.dependsOn, attempt: body.attempt,
+        tabId: body.tabId, epic: body.epic, story: body.story, dependsOn: body.dependsOn, attempt: body.attempt, seat: body.seat,
       });
       return res.status(200).json({ scope });
     }

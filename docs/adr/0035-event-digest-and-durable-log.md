@@ -183,3 +183,28 @@ round 2 in the story file). Additive, as §4: `user_version` stays 1.
 What proves it wrong: a component whose followed share moves with no change to it, or a seat that acts on a paste in a
 turn the count calls mid-turn or no-turn more often than not. Then the turn boundary or the bound is wrong for that
 provider; fix the tracker or the bound, not the rows.
+
+## Amendment: the coordinator window, and no standup due line (2026-11-10, epic `delivery-flow-fix`, story F6)
+Measured on 9 Nov: about 1,150 wakes a day for one coordinator, 55 % of them with no state change. The design check of
+F6 (one Opus 5.5 xhigh consult, APPROVE-WITH-CHANGES) sets these rules.
+- **Coordinator.** The tab that is its workspace's enabled orchestrator. Workers keep every rule above.
+- **The window** (`src/lib/coordinator-window.ts`). A coordinator gets at most one window-governed wake every 10
+  minutes. The window counts from the latest of: a digest to the tab, an inbox `note`, `watch` or `deploy` line
+  delivered to it, or an in-memory claim taken inside the dispatch lock after a typed paste. An urgent `tab send`, the
+  owner's typing and the kinds that skip the window neither read nor reset it.
+- **Skipping kinds:** a `turn-marker` whose last line is `BLOCKED:` or `NEEDS-DECISION:`, `rotate`, `standing-order`,
+  `mission` and `resume`. Everything else waits up to 10 minutes, a red-main block alarm and the owner's GO note
+  included.
+- **Router.** A coordinator's urgent event of another kind is recorded as a `digest` row (before the duplicate check).
+  Its digest goes only when the window is open, and only when its oldest row waited at least as long as the tab's
+  first inbox item that waits on the window. The 20-event bypass does not apply to a coordinator.
+- **Inbox.** The window is checked after readiness and before the still-queued check and the preflight. A shut window
+  defers the item: `notBefore` is the window end, `lastRefusal` starts `coordinator-window:`, and `attempts` is
+  unchanged, so a deferral never spends the 30-refusal budget. `mission` and `resume` overtake a head that waits only
+  on the window. The 24 h rule is unchanged.
+- **Keeper.** A turn end or a prompt-submit newer than the idle episode's start and its last beat ends the episode, so
+  a short turn the polls never saw busy raises no false stall alert.
+- **Standup.** The `standup-due` line, its digest bypass and the fleet key `standup.dueMin` are deleted. A coordinator
+  posts its standup from its status file at the end of a turn it takes anyway (`standup_draft.py --post`). A
+  `standup.*` fleet write is refused.
+- F10 step 3 replaces the inbox half and F10 steps 4-5 replace the router half; this amendment keeps both to one rule.

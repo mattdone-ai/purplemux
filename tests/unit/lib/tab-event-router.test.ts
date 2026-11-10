@@ -13,8 +13,6 @@ import {
   renderDigest,
   type ITabEventRoute,
 } from '@/lib/tab-event-router';
-import { STANDUP_DUE_KIND } from '@/lib/standup';
-import { classifyWake } from '@/lib/wake-class';
 import type { ITabEvent } from '@/types/tab-events';
 
 const T0 = Date.UTC(2026, 10, 3, 6, 0, 0);
@@ -517,136 +515,19 @@ describe('appendDelivered', () => {
   });
 });
 
-describe('the standup due line (story hfl2-10, consult ruling b)', () => {
-  const dueLine = (text = `standup due: last posted 47 min ago (purplemux standup report -w ${WS})`): ITabEventRoute => ({
-    workspaceId: WS, tabId: TAB, kind: STANDUP_DUE_KIND, class: 'digest', text,
-  });
-
-  /** One digest went out at T0; the next 15-min window runs to T0 + 15 min. */
-  const afterFirstDigest = async (r: TabEventRouter) => {
+describe('no kind skips the digest interval (F6 change 2 deletes the standup due line)', () => {
+  it('a standup-due row held before F6 is a plain digest row: it waits 15 min like any other and reads as its kind', async () => {
+    const r = router();
     await r.route(checkpoint(1));
     await vi.waitFor(() => expect(typed).toHaveLength(1));
-  };
-
-  it('is a digest-class kind in the one class table', () => {
-    expect(classifyWake(STANDUP_DUE_KIND)).toBe('digest');
-  });
-
-  it('makes the digest due less than 15 min after the last one, at the next prompt after the settle window, with every held event', async () => {
-    const r = router();
-    await afterFirstDigest(r);
     now += 60_000;
-    await r.route(checkpoint(2));
-    expect(typed).toHaveLength(1);
-    now += 60_000;
-    expect((await r.route(dueLine())).delivered).toBe(true);
-    expect(typed).toHaveLength(2);
-    const lines = typed[1].message.split('\n');
-    expect(lines[0]).toBe('DIGEST 2 since 2026-11-03T06:01:00Z');
-    // The due line leads, as itself, then the held event it carried along in the same wake.
-    expect(lines[1]).toBe(`- 06:02Z standup due: last posted 47 min ago (purplemux standup report -w ${WS})`);
-    expect(lines[2]).toContain('CHECKPOINTED: handoff 2');
-    expect(store.tabEvents.pending(WS, TAB)).toEqual([]);
-    // A normal flush: the next 15-min window starts from this digest.
-    now += 60_000;
-    await r.route(checkpoint(3));
-    now = T0 + 2 * 60_000 + DIGEST_INTERVAL_MS - 1;
-    await r.tick();
-    expect(typed).toHaveLength(2);
-    now += 1;
-    await r.tick();
-    expect(typed).toHaveLength(3);
-  });
-
-  it('waits out the settle window of a delivery just made', async () => {
-    const r = router();
-    await afterFirstDigest(r);
-    now += DIGEST_SETTLE_MS - 1;
-    expect((await r.route(dueLine())).delivered).toBe(false);
-    expect(typed).toHaveLength(1);
-    now += 1;
-    await r.tick();
-    expect(typed).toHaveLength(2);
-    expect(typed[1].message).toContain('standup due: last posted 47 min ago');
-  });
-
-  it('is never typed mid-turn: a busy orchestrator gets it at its prompt', async () => {
-    const r = router();
-    await afterFirstDigest(r);
-    now += 60_000;
-    atPrompt = false;
-    await r.route(dueLine());
+    await r.route({ workspaceId: WS, tabId: TAB, kind: 'standup-due', class: 'digest', text: 'standup due: last posted 47 min ago' });
+    now += DIGEST_SETTLE_MS;
     await r.tick();
     expect(typed).toHaveLength(1);
-    atPrompt = true;
+    now = T0 + DIGEST_INTERVAL_MS;
     await r.tick();
     expect(typed).toHaveLength(2);
-  });
-
-  it('does not go around holdDigest: a held seat gets it when the hold lifts', async () => {
-    let hold = true;
-    const r = new TabEventRouter({
-      table: () => store.tabEvents, now: () => now, deliver, atPrompt: () => atPrompt, newDigestId: () => `dg-${++digestN}`,
-      holdDigest: () => hold,
-    });
-    await r.route(dueLine());
-    await r.tick();
-    expect(typed).toEqual([]);
-    hold = false;
-    await r.tick();
-    expect(typed).toHaveLength(1);
-    expect(typed[0].message).toContain('standup due:');
-  });
-
-  it('only this kind skips the interval: another digest kind still waits 15 min', async () => {
-    const r = router();
-    await afterFirstDigest(r);
-    now += 60_000;
-    await r.route({ workspaceId: WS, tabId: TAB, kind: 'note', class: 'digest', text: 'a note' });
-    await r.route(checkpoint(2, { kind: 'idle-no-end-line' }));
-    await r.tick();
-    expect(typed).toHaveLength(1);
-  });
-
-  it('a due line, once delivered, forces no second flush', async () => {
-    const r = router();
-    await afterFirstDigest(r);
-    now += 60_000;
-    await r.route(dueLine());
-    expect(typed).toHaveLength(2);
-    now += 60_000;
-    await r.route(checkpoint(2));
-    await r.tick();
-    expect(typed).toHaveLength(2);
-    expect(store.tabEvents.pending(WS, TAB).map((event) => event.kind)).toEqual(['turn-marker']);
-  });
-
-  it('retireKind turns held lines of one kind into log rows and leaves the rest held', async () => {
-    atPrompt = false;
-    const r = router();
-    await r.route(dueLine());
-    await r.route(checkpoint(1));
-    expect(r.retireKind(WS, TAB, STANDUP_DUE_KIND)).toBe(1);
-    expect(store.tabEvents.pending(WS, TAB).map((event) => event.kind)).toEqual(['turn-marker']);
-    expect(r.retireKind(WS, TAB, STANDUP_DUE_KIND)).toBe(0);
-  });
-
-  it('retireKind answers 0 when the log cannot be opened', () => {
-    const r = new TabEventRouter({ table: () => { throw new Error('ledger closed'); }, now: () => now, deliver, atPrompt: () => true });
-    expect(r.retireKind(WS, TAB, STANDUP_DUE_KIND)).toBe(0);
-  });
-
-  it('leads a digest the 2 KB cut would end before it', () => {
-    const held: ITabEvent[] = Array.from({ length: 30 }, (_, i) => ({
-      seq: i + 1, workspaceId: WS, tabId: TAB, at: T0 + i * 1000, class: 'digest', kind: 'turn-marker', text: `CHECKPOINTED: ${'x'.repeat(140)} ${i}`,
-      sourceTabId: null, sourceTabName: null, rule: null, deliveredAt: null, digestId: null,
-    }));
-    const due: ITabEvent = { ...held[0], seq: 31, at: T0 + 31_000, kind: STANDUP_DUE_KIND, text: 'standup due: last posted 90 min ago (purplemux standup report -w ws-a)' };
-    const message = renderDigest([...held, due], WS, TAB);
-    const lines = message.split('\n');
-    expect(lines[0]).toBe('DIGEST 31 since 2026-11-03T06:00:00Z');
-    expect(lines[1]).toBe('- 06:00Z standup due: last posted 90 min ago (purplemux standup report -w ws-a)');
-    expect(lines.at(-1)).toMatch(/^\d+ more: purplemux events show/);
-    expect(Buffer.byteLength(message, 'utf8')).toBeLessThanOrEqual(DIGEST_MAX_BYTES);
+    expect(typed[1].message.split('\n')[1]).toMatch(/^- \d\d:\d\dZ standup-due: standup due: last posted 47 min ago$/);
   });
 });

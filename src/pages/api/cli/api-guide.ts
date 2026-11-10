@@ -801,11 +801,9 @@ body are never typed. Every note view carries fromLabel, the same server-made wo
 before the line is delivered, the note re-routes. One reminder reaches the recipient 30 min after
 the line reached its composer, and one notice reaches the sender's tab (if live) at 60 min; no
 more. A note unacked or undeliverable for 14 days expires (one notice to a live sender); acked and
-expired notes are pruned 14 days later. An ack with a comment sends the sender's tab one fixed line,
-"[purplemux note n-…] acked by <ws>/<tab> at <time> with a comment — purplemux note show n-…": the
-comment is never typed, and the sender reads it as ackComment with note show. The line is queued
-when the sender's tab is live or its state is unknown; nothing goes to a closed tab, to a sender with
-no tab, or for an ack with no comment. At turn start, run \`note list --open --to-me\`.
+expired notes are pruned 14 days later. An ack types nothing into the sender's tab (F6): the sender
+reads the state, ackedBy and ackComment with \`note list --from-me\` or note show. At turn start, run
+\`note list --open --to-me\`.
 
 A routed note reads state "pending" while its notice waits in the inbox, "held" while the inbox
 holds it, and "delivered" only after the notice reached a composer (deliveredAt, also
@@ -995,15 +993,13 @@ Keys in use:
   watchdog.wait-backstop-hours
                Hours (0, 168], decimals allowed, a tab may wait on a live registered job or armed
                watch before its one "has been WAITING" nudge. Unset or invalid means 4.
-  standup.dueMin
-               Minutes [0, 1440], decimals allowed, the workspace's newest standup may age (a
-               workspace with none counts from the run's start) before the orchestrator hears
-               "standup due: last posted <N> min ago (purplemux standup report -w <WS>)". The
-               line goes once per due bucket (N, 2N, 4N ... min) while the orchestrator has a
-               busy, needs-input or ready-for-review worker, or with its idle heartbeat. It
-               makes the orchestrator's digest due at once, at its next prompt (ADR-0035 §3).
-               0 turns it off; unset or invalid means 45. Admin token only (exit 3 forbidden
-               for a tab).
+  turn-end.source
+               row (unset) or classifier. With row, a worker's \`purplemux done\` row decides its turn end with
+               the end line by one order: the higher rank wins (NEEDS-DECISION > BLOCKED > the rest), the row on a
+               tie (F6). No stop is held. classifier: the end-line classifier alone, as before F6. Admin token only.
+  hook.stop-payload
+               on (unset) or off. On, the Claude stop's own last_assistant_message is the turn's tail; off, the
+               transcript tail is read again (F6). Admin token only.
   fleet-status.stall-minutes  fleet-status.waiting-long-minutes  fleet-status.unanswered-minutes
   fleet-status.composer-minutes
                The fleet flag thresholds (ADR-0023), in minutes (0, 10080], decimals allowed:

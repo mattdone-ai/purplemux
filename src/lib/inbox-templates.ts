@@ -52,8 +52,9 @@ const count = (name: string, value: unknown): string => {
 };
 
 /** Which note notice this is (ADR-0013). A server enum, never caller text. */
-export type TNoteEvent = 'delivered' | 'reminder' | 'unacked' | 'expired' | 'acked';
-const NOTE_EVENTS: readonly TNoteEvent[] = ['delivered', 'reminder', 'unacked', 'expired', 'acked'];
+// No `acked` event (F6): an ack types nothing into the sender, who reads the state with `purplemux note list`.
+export type TNoteEvent = 'delivered' | 'reminder' | 'unacked' | 'expired';
+const NOTE_EVENTS: readonly TNoteEvent[] = ['delivered', 'reminder', 'unacked', 'expired'];
 
 /**
  * The words after "from" in a note line, and the note view's `fromLabel` (ADR-0013, ADR-0029): one
@@ -76,14 +77,10 @@ export const noteFromWords = (from: {
  * `fromWorkspaceId: null` is an admin-token or human sender; `fromHuman` disambiguates them.
  * `fromOwner` marks a note sent under an owner grant (ADR-0029); it needs a sender workspace.
  * `fromTabId: null` is a workspace token with no tab.
- * `event` defaults to `delivered`; `reminder` goes to the recipient, `unacked`, `expired` and `acked` to the sender.
- * An `acked` line (story hfl2-06, D17) needs `ackedByWorkspaceId`, `ackedByTabId` (null: a token with no tab)
- * and `ackedAt`. It says only that a comment exists: the comment is the acker's text, so it is pulled with
- * `note show`, never typed (ADR-0012).
+ * `event` defaults to `delivered`; `reminder` goes to the recipient, `unacked` and `expired` to the sender.
  */
 export interface INoteFields { noteId: string; fromWorkspaceId: string | null; fromTabId: string | null;
-  fromHuman?: boolean; fromOwner?: boolean; sentAt: number; event?: TNoteEvent;
-  ackedByWorkspaceId?: string; ackedByTabId?: string | null; ackedAt?: number }
+  fromHuman?: boolean; fromOwner?: boolean; sentAt: number; event?: TNoteEvent }
 /** What a watch notice reports (ADR-0015). Every value is a server enum or a grammar-checked id. */
 export type TWatchNotice = 'merged' | 'closed' | 'head-moved' | 'checks-settled' | 'moved' | 'free' | 'signed-in' | 'failing' | 'expired';
 const WATCH_NOTICES: readonly TWatchNotice[] = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'signed-in', 'failing', 'expired'];
@@ -153,15 +150,6 @@ const TEMPLATES: { [K in TInboxKind]: TRenderer<K> } = {
     if (!NOTE_EVENTS.includes(event)) throw new InboxFieldError('inbox field event is not a note event');
     const at = time('sentAt', f.sentAt);
     const read = `purplemux note show ${id}`;
-    if (event === 'acked') {
-      const by = noteFromWords({
-        workspaceId: field('ackedByWorkspaceId', f.ackedByWorkspaceId, 'workspaceId'),
-        tabId: f.ackedByTabId === null ? null : field('ackedByTabId', f.ackedByTabId, 'tabId'),
-        human: false,
-        owner: false,
-      });
-      return { recordId: id, line: `[purplemux note ${id}] acked by ${by} at ${time('ackedAt', f.ackedAt)} with a comment — ${read}` };
-    }
     const line = {
       delivered: `[purplemux note ${id}] from ${from} at ${at} — ${read}, then purplemux note ack ${id}`,
       reminder: `[purplemux note ${id}] from ${from} at ${at} is still unacked — ${read}, then purplemux note ack ${id}`,

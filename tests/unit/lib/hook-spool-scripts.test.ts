@@ -109,9 +109,10 @@ describe('hook scripts spool an event no server answered (ADR-0020)', () => {
   it('a refused connect writes one spool file: the payload, the session, and the time the hook fired', () => {
     const { before, after } = run(HOOK_SCRIPT_CONTENT, ['stop'], '{"hook_event_name":"Stop"}', REFUSED);
     const spooled = readOnly();
-    expect(spooled.body).toEqual({ event: 'stop', session: SESSION });
+    // F6: the stop posts the hook's own JSON, with its kind and the session in the query.
+    expect(spooled.body).toEqual({ hook_event_name: 'Stop' });
     expect(spooled.session).toBe(SESSION);
-    expect(spooled.query).toBe(`occurredAt=${spooled.at}`);
+    expect(spooled.query).toBe(`kind=stop&session=${SESSION}&occurredAt=${spooled.at}`);
     expect(spooled.at).toBeGreaterThanOrEqual(before - 1);
     expect(spooled.at).toBeLessThanOrEqual(after);
     // Nothing half-written is left behind.
@@ -258,5 +259,42 @@ describe('hook scripts spool an event no server answered (ADR-0020)', () => {
     );
     expect(fs.readFileSync(path.join(target, 'grok-hook.sh'), 'utf-8')).toBe(GROK_HOOK_SCRIPT_CONTENT);
     expect(fs.existsSync(path.join(home, '.purplemux', 'status-hook.sh'))).toBe(false);
+  });
+
+  describe('the Claude stop posts its payload and prints nothing (F6; party ruling SIMPLIFY)', () => {
+    const stop = (stdin: string, out: string, exit = 0) => {
+      const script = path.join(dir, 'hook.sh');
+      fs.writeFileSync(script, HOOK_SCRIPT_CONTENT);
+      const env: Record<string, string> = { HOME: home, PATH: `${bin}:/usr/bin:/bin`, FAKE_CURL_OUT: out, FAKE_CURL_EXIT: String(exit), FAKE_SESSION: SESSION };
+      const r = spawnSync('sh', [script, 'stop'], { input: stdin, env: env as NodeJS.ProcessEnv, encoding: 'utf-8' });
+      expect(r.status, r.stderr).toBe(0);
+      return r.stdout;
+    };
+    const BLOCK = '{"decision":"block","reason":"x"}';
+
+    it('A9: a server that answers a block object gets no output and exit 0: no stop can be held', () => {
+      expect(stop('{"hook_event_name":"Stop","session_id":"s-1"}', `${BLOCK}\n200 0.000100`)).toBe('');
+      expect(JSON.parse(fs.readFileSync(path.join(dir, 'curl-body'), 'utf-8'))).toEqual({ hook_event_name: 'Stop', session_id: 's-1' });
+      expect(fs.readFileSync(path.join(dir, 'curl-args'), 'utf-8')).toMatch(/\/api\/status\/hook\?kind=stop&session=pt-ws-1-pane-a-tab-w&occurredAt=\d{13}/);
+      expect(fs.readFileSync(path.join(dir, 'curl-args'), 'utf-8')).toContain('--max-time 3');
+      expect(spoolFiles()).toEqual([]);
+    });
+
+    it.each([
+      ['an empty answer {}', '{}\n200 0.000100', 0, false],
+      ['a 5xx answer (spooled)', `${BLOCK}\n503 0.000100`, 0, true],
+      ['a refused connect (spooled)', '000 0.000000', 7, true],
+      ['a timeout after the connect (not spooled)', `${BLOCK}\n000 0.000100`, 28, false],
+    ])('prints nothing for %s; the spool rule is unchanged', (_label, out, exit, spooled) => {
+      expect(stop('{"hook_event_name":"Stop"}', out as string, exit as number)).toBe('');
+      expect(spoolFiles().length > 0).toBe(spooled);
+    });
+
+    it('sends {} for a body over the spool limit, and for an empty one', () => {
+      stop(`{"m":"${'x'.repeat(300 * 1024)}"}`, '{}\n200 0.000100');
+      expect(fs.readFileSync(path.join(dir, 'curl-body'), 'utf-8')).toBe('{}');
+      stop('', '{}\n200 0.000100');
+      expect(fs.readFileSync(path.join(dir, 'curl-body'), 'utf-8')).toBe('{}');
+    });
   });
 });

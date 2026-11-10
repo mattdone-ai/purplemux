@@ -1617,7 +1617,7 @@ const cmdNote = async (args) => {
 // Typed worker events (ADR-0043): the server checks the evidence, then delivers the event as a note.
 const EVENT_TYPES = ['review-ready', 'landed', 'blocked-on'];
 const EVENT_USAGE = 'usage: event send --type review-ready|landed|blocked-on --to-epic SLUG (--json PAYLOAD | -f FILE | -f -)'
-  + ' | event scope set --tab TAB --epic SLUG [--story KEY] [--depends-on A,B] [--attempt N]'
+  + ' | event scope set --tab TAB --epic SLUG [--story KEY] [--depends-on A,B] [--attempt N] [--seat builder|reviewer|consult]'
   + ' | event scope list | event scope clear --tab TAB';
 
 const cmdEventScope = async (args) => {
@@ -1638,6 +1638,11 @@ const cmdEventScope = async (args) => {
         if (!/^[1-9][0-9]{0,6}$/.test(attempt)) die(`--attempt must be a whole number of at least 1 — ${EVENT_USAGE}`);
         data.attempt = Number(attempt);
       }
+      const seat = flagValue(rest, '--seat');
+      if (seat !== null) {
+        if (!['builder', 'reviewer', 'consult'].includes(seat)) die(`--seat must be builder, reviewer or consult — ${EVENT_USAGE}`);
+        data.seat = seat;
+      }
       requireEnv();
       const { body } = await api('PUT', '/api/cli/worker-events/scope', data);
       return out(body);
@@ -1657,6 +1662,25 @@ const cmdEventScope = async (args) => {
     default:
       die(EVENT_USAGE);
   }
+};
+
+// `purplemux done` (F6, F10 step 2): the typed end of this turn. The server checks the evidence and keeps the row; the
+// stop that ends the turn reads it, and the higher rank of the row and the end line wins (the row on a tie).
+const DONE_VERDICTS = ['DONE', 'BLOCKED', 'NEEDS-DECISION', 'READY-TO-MERGE', 'CHECKPOINTED'];
+const DONE_USAGE = 'usage: done --verdict DONE|BLOCKED|NEEDS-DECISION|READY-TO-MERGE|CHECKPOINTED [--reason TEXT] [--story KEY] [--head SHA] [--gate-log ABS]';
+
+const cmdDone = async (args) => {
+  const verdict = flagValue(args, '--verdict');
+  if (!DONE_VERDICTS.includes(verdict)) die(`--verdict must be one of ${DONE_VERDICTS.join(', ')} — ${DONE_USAGE}`);
+  const data = { verdict, cwd: process.cwd() };
+  for (const [flag, field] of [['--reason', 'reason'], ['--story', 'story'], ['--head', 'head'], ['--gate-log', 'gateLog']]) {
+    const value = flagValue(args, flag);
+    if (args.includes(flag) && value === null) die(`${flag} needs a value — ${DONE_USAGE}`);
+    if (value !== null) data[field] = field === 'gateLog' ? require('path').resolve(value) : value;
+  }
+  requireEnv();
+  const { body } = await api('POST', '/api/cli/turn-ends', data);
+  return out(body);
 };
 
 const cmdEvent = async (args) => {
@@ -3819,11 +3843,15 @@ Commands:
                                            event-refused (the failed checks), event-out-of-scope, event-stale,
                                            event-check-unavailable (a remote tab, or no PMUX_EVENT_PATCH_ID_CMD on the
                                            server); 5 event-no-recipient
-  event scope set --tab TAB --epic SLUG [--story KEY] [--depends-on A,B] [--attempt N]
+  event scope set --tab TAB --epic SLUG [--story KEY] [--depends-on A,B] [--attempt N] [--seat builder|reviewer|consult]
                                            The workspace's verified coordinator declares what TAB may announce: its
                                            served epic (held in this workspace) and the story's dependency epics
   event scope list | event scope clear --tab TAB
                                            The scopes of your workspace; clear is the coordinator's
+  done --verdict DONE|BLOCKED|NEEDS-DECISION|READY-TO-MERGE|CHECKPOINTED [--reason TEXT] [--story KEY]
+       [--head SHA] [--gate-log ABS]       The typed end of this turn (F6), before its last line. A builder's DONE and
+                                           READY-TO-MERGE need --gate-log (checked: VALID, its tree is head's). No stop
+                                           is held; an end line of higher rank wins over the row. Exit 2 names each defect
   config get KEY                           Print a fleet config value bare (e.g. gate.slots); exit 7 when unset
   config list [--json]                     Every fleet config value with its version, time and setter
   config set KEY VALUE [--expect-version N]
@@ -3967,6 +3995,8 @@ const main = async () => {
       return cmdNote(args.slice(1));
     case 'event':
       return cmdEvent(args.slice(1));
+    case 'done':
+      return cmdDone(args.slice(1));
     case 'grant':
       return cmdGrant(args.slice(1));
     case 'config':

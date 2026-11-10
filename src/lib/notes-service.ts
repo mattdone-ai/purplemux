@@ -231,17 +231,13 @@ export class NotesService {
   }
 
   private notice(note: INote, to: { workspaceId: string; tabId: string }, event: TNoteEvent): IEnqueueRequest<'note'> {
-    const acker = event === 'acked' && note.ackedBy && note.ackedAt !== null
-      ? { ackedByWorkspaceId: note.ackedBy.workspaceId, ackedByTabId: note.ackedBy.tabId, ackedAt: note.ackedAt }
-      : {};
     return {
       kind: 'note',
       targetWorkspaceId: to.workspaceId,
       targetTabId: to.tabId,
       dedupeKey: `note:${note.id}:${event}:${to.tabId}`,
       fields: { noteId: note.id, fromWorkspaceId: note.from.workspaceId, fromTabId: note.from.tabId,
-        fromHuman: note.admission?.mode === 'human', fromOwner: note.admission?.mode === 'owner', sentAt: note.createdAt, event,
-        ...acker },
+        fromHuman: note.admission?.mode === 'human', fromOwner: note.admission?.mode === 'owner', sentAt: note.createdAt, event },
     };
   }
 
@@ -326,15 +322,11 @@ export class NotesService {
       const match = /^note:(n-[A-Za-z0-9_-]{4,32}):(delivered|reminder|unacked|expired|acked):/.exec(item.dedupeKey);
       if (!match) return reject('note-notice-key-invalid');
       const [, id, event] = match;
+      // F6: an ack types nothing. An `acked` notice queued before this release is rejected here (withdrawn, never
+      // refused), so it neither reaches the sender nor blocks the head of the sender's queue.
+      if (event === 'acked') return reject('note-ack-notice-retired');
       const note = (await this.deps.read()).notes.find((candidate) => candidate.id === id);
       if (!note) return reject('note-not-found');
-      if (event === 'acked') {
-        if (note.state !== 'acked') return reject(`note-not-acked:${note.state}`);
-        if (item.targetWorkspaceId !== note.from.workspaceId || item.targetTabId !== note.from.tabId) {
-          return reject('note-sender-changed');
-        }
-        return { ok: true, settle: release };
-      }
       if (event === 'unacked' || event === 'expired') {
         const valid = event === 'expired'
           ? note.state === 'expired' || (OPEN_STATES.has(note.state) && this.deps.now() - note.createdAt >= NOTE_EXPIRE_MS)
@@ -392,25 +384,6 @@ export class NotesService {
     const state = await r.tabState(workspaceId, tabId);
     if (state === 'live') await this.deps.enqueue(this.notice(note, { workspaceId, tabId }, event));
     return state !== 'unknown';
-  }
-
-  /**
-   * D17 (story hfl2-06): an ack that carries a comment reaches the sender's own tab as a fixed line;
-   * the comment is pulled with `note show`, never typed (ADR-0012). The line is queued when the tab
-   * is live or its state is unknown: the inbox refuses an unresolved target and drops the item only
-   * when it sees the tab gone. Nothing goes to a sender with no tab, to a closed tab, or to the tab
-   * that acked its own note. A failure here never fails the ack, which is already stored.
-   */
-  private async noticeAck(note: INote): Promise<void> {
-    const { workspaceId, tabId } = note.from;
-    if (note.ackComment === null || !workspaceId || !tabId) return;
-    if (note.ackedBy?.workspaceId === workspaceId && note.ackedBy.tabId === tabId) return;
-    try {
-      if ((await this.reads().tabState(workspaceId, tabId)) === 'closed') return;
-      await this.deps.enqueue(this.notice(note, { workspaceId, tabId }, 'acked'));
-    } catch (err) {
-      log.warn(`note ${note.id} ack notice not sent: ${err instanceof Error ? err.message : err}`);
-    }
   }
 
   /**
@@ -828,7 +801,7 @@ export class NotesService {
           throw new NoteError('forbidden', `only the currently routed coordinator acks cross-workspace note ${note.id}`);
         }
       }
-      if (note.state === 'acked') return { state, value: { note, fresh: false } };
+      if (note.state === 'acked') return { state, value: note };
       if (note.state !== 'delivered') throw new NoteError('forbidden', `note ${note.id} is ${note.state}, not delivered`);
       if (note.inboxItemId) await this.deps.withdraw(note.inboxItemId, 'note-terminal:acked');
       if (note.reminderItemId) await this.deps.withdraw(note.reminderItemId, 'note-terminal:acked');
@@ -836,11 +809,10 @@ export class NotesService {
         ? reachedComposer(note, item.deliveredAt ?? this.deps.now())
         : note;
       const acknowledged = acked(received, { workspaceId: caller.workspaceId!, tabId: caller.tabId }, clean, this.deps.now());
-      return { state: replaceNote(state, acknowledged), value: { note: acknowledged, fresh: true } };
+      return { state: replaceNote(state, acknowledged), value: acknowledged };
     })));
-    // Only the ack that made the transition notifies: a repeated ack sends nothing new.
-    if (done.fresh) await this.noticeAck(done.note);
-    return (await this.views([done.note]))[0];
+    // F6: the ack is the store transition alone; nothing is typed to the sender, who reads it with `note list`.
+    return (await this.views([done]))[0];
   }
 
   async list(caller: ICaller, filter: IListFilter): Promise<INoteView[]> {

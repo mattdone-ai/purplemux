@@ -57,6 +57,11 @@ const setup = async () => {
   await import('@/lib/providers');
   const { StatusManager } = await import('@/lib/status-manager');
   const manager = new StatusManager(dispatcher, vi.fn(async () => true), vi.fn(async () => {}));
+  // F6's coordinator window is pinned in coordinator-window.test.ts and status-manager-event-digest.test.ts; these
+  // tests pin worker turn-error episodes, with the orchestrator as the nudge target only, so they turn the window off.
+  (await import('@/lib/coordinator-window')).configureCoordinatorWindow({
+    now: () => Date.now(), isCoordinator: async () => false, lastGoverned: () => null, oldestDigestAt: () => null,
+  });
   manager.registerTab('tab-o', { cliState: 'idle', workspaceId: 'ws-1', tabName: 'o', tmuxSession: 'tmux-tab-o', panelType: 'claude-code' });
   const store = await import('@/lib/inbox-store');
   const nudges = () => paste.mock.calls.map(([, message]) => message);

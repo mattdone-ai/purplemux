@@ -213,12 +213,9 @@ describe('purplemux note — the installed CLI against the real note and lease r
     const ack = await cli(['note', 'ack', note.id, '--comment', 'adopted in story 03'], tabA);
     expect(ack.code, ack.stderr).toBe(0);
     expect(JSON.parse(ack.stdout).note).toMatchObject({ state: 'acked', ackComment: 'adopted in story 03' });
-    // D17 (story hfl2-06): the sender's tab gets one fixed line; the comment is pulled, never typed.
+    // F6 AC1: the ack types nothing into the sender's tab; the sender reads it from the store.
     const afterAck = await inboxLines();
-    expect(afterAck).toHaveLength(2);
-    expect(afterAck[1]).toMatchObject({ targetWorkspaceId: 'ws-b', targetTabId: 'tab-b' });
-    expect(afterAck[1].line).toMatch(new RegExp(`^\\[purplemux note ${note.id}\\] acked by ws-a/tab-a at \\S+ with a comment — purplemux note show ${note.id}$`));
-    expect(afterAck[1].line).not.toContain('adopted');
+    expect(afterAck).toHaveLength(1);
     expect(JSON.parse((await cli(['note', 'show', note.id], tabB)).stdout).note.ackComment).toBe('adopted in story 03');
     const open = await cli(['note', 'list', '--open'], tabB);
     expect(JSON.parse(open.stdout).notes).toEqual([]);

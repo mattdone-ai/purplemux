@@ -11,7 +11,7 @@ import { TAB_CAP_KEY } from '@/lib/tab-cap';
 import { IDLE_NUDGE_CONFIG_KEY, WAIT_BACKSTOP_CONFIG_KEY } from '@/lib/turn-end';
 import { ROTATE_AT_CONFIG_KEY } from '@/lib/context-lifecycle';
 import { CURATOR_KEYS } from '@/lib/curator-service';
-import { STANDUP_DUE_CONFIG_KEY } from '@/lib/standup';
+import { STOP_PAYLOAD_CONFIG_KEY, TURN_END_SOURCE_CONFIG_KEY } from '@/lib/turn-end-row';
 import { POOL_BUDGET_FIELDS, POOL_BUDGET_KEY_PREFIX, POOL_ENVELOPE_KEY_PREFIX, POOL_HARNESS_SHARE_KEY, POOL_MODE_KEY } from '@/lib/pool';
 
 vi.mock('@/lib/workspace-token', () => ({ resolveCliScope: () => ({ type: 'admin' }) }));
@@ -41,7 +41,8 @@ const SERVER_KEYS = [
   ...Object.values(FLAG_ALERT_CONFIG_KEYS),
   ROTATE_AT_CONFIG_KEY,
   ...Object.values(CURATOR_KEYS),
-  STANDUP_DUE_CONFIG_KEY,
+  TURN_END_SOURCE_CONFIG_KEY,
+  STOP_PAYLOAD_CONFIG_KEY,
 ];
 
 const keysInUse = async (): Promise<string> => {

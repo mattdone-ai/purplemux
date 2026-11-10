@@ -179,8 +179,15 @@ describe('declaring a scope (ADR-0043 §1)', () => {
     ['more than 16 dependencies', { dependsOn: Array.from({ length: 17 }, (_, i) => `e${i}`) }, 'at most 16'],
     ['a bad story key', { story: 'a b' }, 'story must match'],
     ['attempt 0', { attempt: 0 }, 'attempt must be a whole number'],
+    ['an unknown seat (F6)', { seat: 'architect' }, 'seat must be one of builder, reviewer, consult, got "architect"'],
   ])('refuses %s', async (_name, input, message) => {
     expect((await refused(declare(input), 'event-scope-invalid')).message).toContain(message);
+  });
+
+  it('keeps a declared seat on the scope; no seat stays absent, so a story reads as a builder (F6, ruling (8))', async () => {
+    await expect(declare({ seat: 'reviewer' })).resolves.toMatchObject({ seat: 'reviewer' });
+    const plain = await declare();
+    expect(plain).not.toHaveProperty('seat');
   });
 
   it('keeps the attempt on a re-declare, raises it on a re-dispatch, and never lowers it', async () => {

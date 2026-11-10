@@ -32,6 +32,8 @@ export interface IHookDelivery {
 export interface IHookOutcome {
   status: number;
   error?: string;
+  /** A JSON answer: the Claude stop route answers `{}` (F6; the script prints nothing, no stop is held). */
+  body?: Record<string, unknown>;
 }
 
 const NO_CONTENT: IHookOutcome = { status: 204 };
@@ -56,6 +58,26 @@ const handleClaudeToolHook = ({ query, body, replayedAt }: IHookDelivery): IHook
   return NO_CONTENT;
 };
 
+/**
+ * The Claude stop (F6, F10 steps 1-2): the script posts the hook's own JSON with `session=` in the query. The route
+ * decides (within 1 s), applies the stop and answers `{}`: no stop is held (party ruling SIMPLIFY). A replay is judged
+ * against its own turn, and one whose body was dropped applies as a plain stop.
+ */
+const handleClaudeStopHook = async ({ query, body, replayedAt, occurredAt }: IHookDelivery): Promise<IHookOutcome> => {
+  const session = queryString(query, 'session');
+  if (!session) return { status: 200, body: {} };
+  const payload = bodyRecord(body);
+  const statusManager = getStatusManager();
+  await statusManager.decideClaudeStop(session, {
+    hookEvent: typeof payload.hook_event_name === 'string' ? payload.hook_event_name : null,
+    sessionId: typeof payload.session_id === 'string' ? payload.session_id : null,
+    message: typeof payload.last_assistant_message === 'string' ? payload.last_assistant_message : null,
+  }, replayedAt);
+  const workEvent = translateClaudeHookEvent('stop', undefined, undefined);
+  if (workEvent) statusManager.handleProviderEvent('claude', session, workEvent, replayedAt ?? occurredAt, { replayed: replayedAt !== undefined });
+  return { status: 200, body: {} };
+};
+
 const handleClaudeHook = ({ body, replayedAt, occurredAt }: IHookDelivery): IHookOutcome => {
   const { event, session, notificationType, source } = bodyRecord(body);
   if (typeof event === 'string' && event !== 'poll' && typeof session === 'string' && session) {
@@ -63,7 +85,7 @@ const handleClaudeHook = ({ body, replayedAt, occurredAt }: IHookDelivery): IHoo
     log.debug({ event, session, notificationType: type, source, replayedAt }, `received ${event}${type ? `(${type})` : ''}${typeof source === 'string' ? `(source=${source})` : ''}`);
     const workEvent = translateClaudeHookEvent(event, type, source);
     if (workEvent) {
-      getStatusManager().handleProviderEvent('claude', session, workEvent, replayedAt ?? occurredAt);
+      getStatusManager().handleProviderEvent('claude', session, workEvent, replayedAt ?? occurredAt, { replayed: replayedAt !== undefined });
     } else {
       log.debug({ event, session, notificationType: type }, 'unknown claude hook event, ignoring');
     }
@@ -120,7 +142,7 @@ const handleCodexHook = async ({ query, body, replayedAt, occurredAt }: IHookDel
       if (translation.clearSession) codexHookEvents.emit('session-clear', tmuxSession);
     }
     if (translation.event && shouldEmitCodexHookEvent(payload, applied.cliState)) {
-      statusManager.handleProviderEvent('codex', tmuxSession, translation.event, replayedAt ?? occurredAt);
+      statusManager.handleProviderEvent('codex', tmuxSession, translation.event, replayedAt ?? occurredAt, { replayed: replayedAt !== undefined });
     }
     return { applied };
   };
@@ -200,7 +222,7 @@ const handleGrokHook = ({ query, body, replayedAt, occurredAt }: IHookDelivery):
     log.debug({ tmuxSession, event: payload.hookEventName, reason: result.reason }, 'grok hook skipped');
   }
   if (translation.event && shouldEmitGrokHookEvent(payload, applied.cliState)) {
-    statusManager.handleProviderEvent('grok', tmuxSession, translation.event, replayedAt ?? occurredAt);
+    statusManager.handleProviderEvent('grok', tmuxSession, translation.event, replayedAt ?? occurredAt, { replayed: replayedAt !== undefined });
   }
   return NO_CONTENT;
 };
@@ -220,5 +242,6 @@ export const dispatchHook = async (delivery: IHookDelivery): Promise<IHookOutcom
   if (provider === 'codex') return handleCodexHook(delivery);
   if (provider === 'grok') return handleGrokHook(delivery);
   if (queryString(delivery.query, 'kind') === 'tool') return handleClaudeToolHook(delivery);
+  if (queryString(delivery.query, 'kind') === 'stop') return handleClaudeStopHook(delivery);
   return handleClaudeHook(delivery);
 };

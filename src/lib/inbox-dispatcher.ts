@@ -1,6 +1,8 @@
 import { isAgentPanelType } from '@/lib/agent-panel-types';
 import { checkComposerReady } from '@/lib/composer-readiness';
+import { type CoordinatorWindow, WINDOW_DEFERRAL, WINDOW_EXEMPT_INBOX_KINDS, getCoordinatorWindow } from '@/lib/coordinator-window';
 import {
+  deferInState,
   deliverInState,
   dropForTabInState,
   dropGoneTargetsInState,
@@ -9,6 +11,7 @@ import {
   mutateInbox,
   refuseInState,
   sweepInState,
+  windowHeads,
   withdrawInState,
 } from '@/lib/inbox-store';
 import { createLogger } from '@/lib/logger';
@@ -73,6 +76,8 @@ export interface IInboxDispatcherDeps {
   isPending: (sessionName: string, line: string) => Promise<boolean>;
   /** Write a delivered notice to the tab's durable event log (ADR-0035); a failure never undoes the delivery. */
   recordDelivered?: (item: IInboxItem) => void;
+  /** F6 change 3: the coordinator window shared with the digest router; absent or null, nothing is deferred. */
+  window?: () => CoordinatorWindow | null;
 }
 
 type TAttempt = (
@@ -82,7 +87,11 @@ type TAttempt = (
   | { outcome: 'dropped'; reason: string }
   | { outcome: 'rejected'; reason: string }
   | { outcome: 'withdrawn' }
+  | { outcome: 'deferred'; until: number; reason: string }
 ) & { settle?: () => void | Promise<void> };
+
+/** A coordinator's window takes the next turn of the digest this long after the digest went first. */
+const DIGEST_FIRST_RETRY_MS = 10_000;
 
 const STATE_REFUSAL = 'composer-not-ready:';
 
@@ -122,6 +131,8 @@ export class InboxDispatcher {
       const now = this.deps.now();
       const due = await this.deps.mutate((state) => {
         const swept = sweepInState(state, now);
+        // The router reads which tab's inbox item has waited longer than its digest (F6 ruling, change 3).
+        this.deps.window?.()?.setInboxHeads(windowHeads(swept, now));
         return { state: swept, value: dueItems(swept, now, this.wake) };
       });
       for (const item of due) await this.attemptAndRecord(item);
@@ -170,6 +181,7 @@ export class InboxDispatcher {
           // This item only: its owner refused it at paste time.
           case 'rejected': return { state: withdrawInState(state, item.id, attempt.reason, now), value: null };
           case 'withdrawn': return { state, value: null };
+          case 'deferred': return { state: deferInState(state, item.id, attempt.until, attempt.reason, now), value: null };
         }
       });
     } finally {
@@ -185,7 +197,7 @@ export class InboxDispatcher {
         log.warn(`inbox delivery of ${item.id} not recorded: ${err instanceof Error ? err.message : err}`);
       }
     }
-    else if (attempt.outcome !== 'refused' && attempt.outcome !== 'withdrawn') log.info({ id: item.id, tabId: item.targetTabId, ...attempt }, `inbox ${attempt.outcome}`);
+    else if (attempt.outcome !== 'refused' && attempt.outcome !== 'withdrawn' && attempt.outcome !== 'deferred') log.info({ id: item.id, tabId: item.targetTabId, ...attempt }, `inbox ${attempt.outcome}`);
   }
 
   private async missing(item: IInboxItem): Promise<TAttempt> {
@@ -218,6 +230,17 @@ export class InboxDispatcher {
           capture: () => this.deps.capture(current.sessionName),
         });
         if (!readiness.ok) return { outcome: 'refused', reason: readiness.reason };
+        // F6 change 3: a coordinator's window, after readiness and before the still-queued check and the preflight, so
+        // a deferral claims nothing (a mission row, a note lock) and spends no refusal budget (design ruling, change 2).
+        const window = await this.governingWindow(item);
+        if (window) {
+          const now = this.deps.now();
+          const openAt = window.openAt(item.targetWorkspaceId, item.targetTabId);
+          if (now < openAt) return { outcome: 'deferred', until: openAt, reason: `${WINDOW_DEFERRAL}${Math.ceil((openAt - now) / 1000)}s` };
+          if (!window.inboxTurn(item.targetWorkspaceId, item.targetTabId, item.createdAt)) {
+            return { outcome: 'deferred', until: now + DIGEST_FIRST_RETRY_MS, reason: `${WINDOW_DEFERRAL}digest-first` };
+          }
+        }
         // Its owner may have withdrawn it since this tick picked it (a closed episode).
         const stillWaiting = await this.deps.mutate((state) => ({
           state,
@@ -242,6 +265,8 @@ export class InboxDispatcher {
         } catch (err) {
           return { outcome: 'held', reason: `transport-uncertain:${err instanceof Error ? err.message : String(err)}` };
         }
+        // Typed: the coordinator's next window counts from now, inside the lock the digest also takes.
+        window?.claim(item.targetWorkspaceId, item.targetTabId);
         // No caller reads `submitted` here, so a stranded paste is held, never retried blind.
         const pending = await this.deps.isPending(current.sessionName, item.line).catch(() => false);
         return pending ? { outcome: 'held', reason: 'stranded-in-composer' } : { outcome: 'delivered' };
@@ -250,6 +275,14 @@ export class InboxDispatcher {
       result = { outcome: 'refused', reason: `dispatch-error:${err instanceof Error ? err.message : String(err)}` };
     }
     return settle ? { ...result, settle } : result;
+  }
+
+  /** The window that governs this item's target: a coordinator, and a kind that does not skip it. */
+  private async governingWindow(item: IInboxItem): Promise<CoordinatorWindow | null> {
+    if (WINDOW_EXEMPT_INBOX_KINDS.has(item.kind)) return null;
+    const window = this.deps.window?.() ?? null;
+    if (!window) return null;
+    return (await window.governs(item.targetWorkspaceId, item.targetTabId)) ? window : null;
   }
 
   /** `tab-closed`: the tab's queued and held notices are dropped; their owners re-route them. */
@@ -322,6 +355,7 @@ export const defaultInboxDeps = async (): Promise<IInboxDispatcherDeps> => {
     recordDelivered: (item) => appendDelivered(getLedgerStore().tabEvents, {
       workspaceId: item.targetWorkspaceId, tabId: item.targetTabId, kind: item.kind, text: item.line, class: classifyWake(item.kind),
     }, Date.now()),
+    window: getCoordinatorWindow,
   };
 };
 

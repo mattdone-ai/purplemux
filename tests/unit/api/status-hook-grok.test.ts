@@ -112,7 +112,7 @@ describe('POST /api/status/hook?provider=grok', () => {
     await post({ hookEventName: 'stop', sessionId: SESSION_ID });
 
     expect(statusManager.handleToolActivity).not.toHaveBeenCalled();
-    expect(statusManager.handleProviderEvent).toHaveBeenCalledWith('grok', TMUX_SESSION, { kind: 'stop' }, undefined);
+    expect(statusManager.handleProviderEvent).toHaveBeenCalledWith('grok', TMUX_SESSION, { kind: 'stop' }, undefined, { replayed: false });
   });
 
   it('refuses a hook that names no tmux session', async () => {

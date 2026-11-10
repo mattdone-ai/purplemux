@@ -1,3 +1,4 @@
+import { SEAT_ROLES, type TSeatRole } from '@/lib/turn-end-row';
 import { createHash } from 'crypto';
 import type { ICaller } from '@/lib/caller';
 import { createLogger } from '@/lib/logger';
@@ -59,6 +60,7 @@ export interface IScopeInput {
   story?: unknown;
   dependsOn?: unknown;
   attempt?: unknown;
+  seat?: unknown;
 }
 
 export interface ISendEventInput {
@@ -133,6 +135,10 @@ export class WorkerEventsService {
     if (input.attempt !== undefined && (!Number.isSafeInteger(input.attempt) || (input.attempt as number) < 1)) {
       throw scopeError('attempt must be a whole number of at least 1');
     }
+    const seat = input.seat === undefined || input.seat === null || input.seat === '' ? undefined : input.seat;
+    if (seat !== undefined && !(SEAT_ROLES as readonly unknown[]).includes(seat)) {
+      throw scopeError(`seat must be one of ${SEAT_ROLES.join(', ')}, got ${JSON.stringify(seat)}`);
+    }
     const { tabs, uncertainWorkspaceIds } = await this.deps.liveTabs();
     const gone = (s: IEventScope) => !uncertainWorkspaceIds.has(s.workspaceId) && !tabs.some((t) => t.workspaceId === s.workspaceId && t.tabId === s.tabId);
     return this.deps.mutateScopes((state) => {
@@ -143,6 +149,7 @@ export class WorkerEventsService {
       }
       const scope: IEventScope = {
         workspaceId: coordinator.workspaceId, tabId, epic, story: story as string | null, dependsOn, attempt,
+        ...(seat !== undefined ? { seat: seat as TSeatRole } : {}),
         declaredBy: coordinator, declaredAt: this.deps.now(),
       };
       const kept = state.scopes.filter((s) => s !== previous && !gone(s));

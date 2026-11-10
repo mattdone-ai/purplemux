@@ -77,6 +77,6 @@ export const handleRemoteClaudeHook = async (delivery: IRemoteHookDelivery): Pro
     log.debug({ event, session }, 'unknown remote claude hook event, ignoring');
     return { status: 204 };
   }
-  statusManager.handleProviderEvent('claude', session, workEvent, at);
+  statusManager.handleProviderEvent('claude', session, workEvent, at, { replayed: delivery.replayedAt !== undefined });
   return { status: 204 };
 };

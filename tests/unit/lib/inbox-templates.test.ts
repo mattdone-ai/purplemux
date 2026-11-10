@@ -52,33 +52,13 @@ describe('inbox templates (ADR-0012)', () => {
     expect(renderInboxLine('note', { ...VALID.note, event }).line).toBe(line);
   });
 
-  it.each(HOSTILE)('refuses a note event that is not one of the five: %j', (event) => {
+  it.each(HOSTILE)('refuses a note event that is not one of the four: %j', (event) => {
     expect(() => renderInboxLine('note', { ...VALID.note, event } as never)).toThrow(InboxFieldError);
   });
 
-  // D17 (story hfl2-06): the sender hears that its note was acked with a comment; the comment is pulled.
-  const ACKED = { ...VALID.note, event: 'acked' as const, ackedByWorkspaceId: 'ws-zOfVyu', ackedByTabId: 'tab-sm0001', ackedAt: AT + 60_000 };
-
-  it('renders the fixed note acked line with the acker ids and the ack time, and a tab-less acker as its workspace', () => {
-    expect(renderInboxLine('note', ACKED)).toEqual({
-      recordId: 'n-AbC123',
-      line: '[purplemux note n-AbC123] acked by ws-zOfVyu/tab-sm0001 at 2026-09-26T06:01:00Z with a comment — purplemux note show n-AbC123',
-    });
-    expect(renderInboxLine('note', { ...ACKED, ackedByTabId: null }).line).toContain('acked by ws-zOfVyu/workspace at');
-  });
-
-  it.each(HOSTILE)('refuses an acked line whose acker workspace, acker tab or ack time is %j', (value) => {
-    expect(() => renderInboxLine('note', { ...ACKED, ackedByWorkspaceId: value })).toThrow(InboxFieldError);
-    expect(() => renderInboxLine('note', { ...ACKED, ackedByTabId: value })).toThrow(InboxFieldError);
-    expect(() => renderInboxLine('note', { ...ACKED, ackedAt: value } as never)).toThrow(InboxFieldError);
-  });
-
-  it('refuses an acked line with no acker or no ack time', () => {
-    for (const missing of ['ackedByWorkspaceId', 'ackedByTabId', 'ackedAt'] as const) {
-      const fields = { ...ACKED };
-      delete fields[missing];
-      expect(() => renderInboxLine('note', fields)).toThrow(InboxFieldError);
-    }
+  // F6 AC1: no note line reports an ack; the `acked` event is not a note event any more.
+  it('refuses the retired acked event', () => {
+    expect(() => renderInboxLine('note', { ...VALID.note, event: 'acked' } as never)).toThrow(InboxFieldError);
   });
 
   it.each(['NomuPay/treasury-ui@feature/x-1', 'merge:nomupay/treasury-api'])('accepts a watch target %s', (target) => {

@@ -122,12 +122,6 @@ export class TabEventsTable {
       WHERE workspace_id = ? AND tab_id = ? AND class = 'digest' AND delivered_at IS NULL AND digest_id IS NULL)`)
       .run(workspaceId, tabId).changes;
 
-  /** The tab's held events of one kind become `log` rows: a newer event of that kind replaces them (story hfl2-10). */
-  retirePendingKind = (workspaceId: string, tabId: string, kind: string): number =>
-    this.database.prepare(`UPDATE tab_events SET class = 'log' WHERE seq IN (SELECT seq FROM tab_events INDEXED BY tab_events_pending_idx
-      WHERE workspace_id = ? AND tab_id = ? AND class = 'digest' AND delivered_at IS NULL AND digest_id IS NULL AND kind = ?)`)
-      .run(workspaceId, tabId, kind).changes;
-
   pendingTabs = (): IPendingDigest[] =>
     (this.database.prepare(`SELECT workspace_id, tab_id, COUNT(*) AS count, MIN(at) AS oldest_at
       FROM tab_events INDEXED BY tab_events_pending_idx WHERE class = 'digest' AND delivered_at IS NULL AND digest_id IS NULL
@@ -138,6 +132,17 @@ export class TabEventsTable {
   lastDigestAt = (workspaceId: string, tabId: string): number | null =>
     (this.database.prepare(`SELECT MAX(delivered_at) AS at FROM tab_events INDEXED BY tab_events_digest_idx
       WHERE workspace_id = ? AND tab_id = ? AND digest_id IS NOT NULL`).get(workspaceId, tabId) as { at: number | null }).at;
+
+  /**
+   * F6 change 3: the latest window-governed delivery to a coordinator — a digest, or an inbox row of a windowed kind —
+   * among rows recorded in the last 25 h (bounded so the read stays on the tab index; an older one cannot shut a 10-min
+   * window). Urgent pastes, sends and skipping kinds are not counted (design ruling, change 1).
+   */
+  lastGovernedDelivery = (workspaceId: string, tabId: string, windowedKinds: readonly string[], now: number): number | null =>
+    (this.database.prepare(`SELECT MAX(delivered_at) AS at FROM tab_events INDEXED BY tab_events_tab_idx
+      WHERE workspace_id = ? AND tab_id = ? AND at >= ? AND delivered_at IS NOT NULL
+        AND (digest_id IS NOT NULL OR kind IN (${windowedKinds.map(() => '?').join(',') || "''"}))`)
+      .get(workspaceId, tabId, now - 25 * 60 * 60_000, ...windowedKinds) as { at: number | null }).at;
 
   /** The latest delivery to the tab of an event recorded at or after `since` (an urgent paste, a notice, a send). */
   lastDeliveredSince = (workspaceId: string, tabId: string, since: number): number | null =>

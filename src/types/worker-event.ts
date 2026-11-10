@@ -58,6 +58,11 @@ export interface IEventScope {
   dependsOn: string[];
   /** Bumped by the coordinator on a re-dispatch; an event from another attempt is stale. */
   attempt: number;
+  /**
+   * The seat the tab holds for its story (F6, design check (2) ruling, change 8): a builder's DONE and READY-TO-MERGE
+   * need a gate log. Absent: `builder` when `story` is set. Additive: an older file has none.
+   */
+  seat?: 'builder' | 'reviewer' | 'consult';
   declaredBy: { workspaceId: string; tabId: string };
   declaredAt: number;
 }

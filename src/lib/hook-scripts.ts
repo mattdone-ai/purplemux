@@ -31,6 +31,12 @@ export const HOOK_MAX_TIME_SECONDS = 2;
 /** The `timeout` hook-settings.ts gives Claude's hooks (post-tool: 2). */
 export const CLAUDE_HOOK_TIMEOUT_SECONDS = 3;
 /**
+ * F6 (F10 steps 1-2): the Stop hook waits for the server's decision, which it takes within 1 s. tmux (1 s) plus the
+ * POST (STOP_HOOK_MAX_TIME_SECONDS) fit inside this, so a slow server ends in curl's timeout, never Claude's kill.
+ */
+export const CLAUDE_STOP_HOOK_TIMEOUT_SECONDS = 5;
+export const STOP_HOOK_MAX_TIME_SECONDS = 3;
+/**
  * Bound on a `tmux display-message` in a hook: a wedged tmux server must not stall the agent
  * either. When it fires, SESSION is empty and the event is lost (the route needs a session), so
  * it sits far above a slow answer: measured 2026-09-29 at load 137, median 8 ms, p90 29 ms, max
@@ -124,6 +130,33 @@ HOOK_HEADERS
     28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
   esac
   return 0
+}
+
+# post_stop TARGET BODY: post_hook for the Claude stop (F6) with the stop's own bound, under the same spool rule. It
+# prints nothing: no stop is held, so no answer is ever handed to Claude (party ruling SIMPLIFY).
+post_stop() {
+  case "$1" in *\\?*) HOOK_TARGET="$1&occurredAt=$AT" ;; *) HOOK_TARGET="$1?occurredAt=$AT" ;; esac
+  HOOK_BODY="$2"
+  case "$HOOK_TARGET" in *\\?*) HOOK_QUERY="\${HOOK_TARGET#*\\?}" ;; *) HOOK_QUERY="" ;; esac
+  if [ -z "\${HOOK_BASE_URL:-$PORT}" ] || [ -z "$TOKEN" ]; then
+    spool_hook "$HOOK_QUERY" "$HOOK_BODY"
+    return 0
+  fi
+  HOOK_OUT=$(printf '%s' "$HOOK_BODY" | curl -s -X POST -w '\\n%{http_code} %{time_connect}' \\
+    --connect-timeout 1 --max-time ${STOP_HOOK_MAX_TIME_SECONDS} -H 'Content-Type: application/json' -H @/dev/fd/3 \\
+    --data-binary @- "\${HOOK_BASE_URL:-http://localhost:\${PORT}}\${HOOK_TARGET}" 2>/dev/null 3<<HOOK_HEADERS
+x-pmux-token: \${TOKEN}
+HOOK_HEADERS
+)
+  HOOK_RC=$?
+  HOOK_NL=$(printf '\\n_'); HOOK_NL="\${HOOK_NL%_}"
+  HOOK_RESULT="\${HOOK_OUT##*$HOOK_NL}"
+  HOOK_HTTP="\${HOOK_RESULT%% *}"
+  case "$HOOK_RC:$HOOK_HTTP" in
+    5:*|6:*|7:*|35:*|60:*|*:5[0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
+    28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
+  esac
+  return 0
 }`;
 
 /**
@@ -166,6 +199,16 @@ if [ "$EVENT" = "post-tool" ]; then
   # The background job drops the caller's stdin/stdout/stderr for good: a job that still held
   # them kept Claude waiting for its whole POST (measured 2 s against a stalled server).
   ( exec </dev/null >/dev/null 2>&1; post_hook "/api/status/hook?kind=tool&session=\${SESSION}" "$BODY" ) &
+  exit 0
+fi
+
+# The Claude stop (F6, F10 steps 1-2): the hook's own JSON (session_id, last_assistant_message, hook_event_name) goes
+# to the server. Nothing is printed, whatever the answer: the stop always goes through. A body over the spool limit is
+# sent as {}.
+if [ "$EVENT" = "stop" ]; then
+  BODY=$(cat)
+  [ -n "$BODY" ] && [ \${#BODY} -le ${HOOK_SPOOL_MAX_BODY} ] || BODY="{}"
+  post_stop "/api/status/hook?kind=stop&session=\${SESSION}" "$BODY" >/dev/null
   exit 0
 fi
 

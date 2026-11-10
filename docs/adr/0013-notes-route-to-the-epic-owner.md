@@ -41,3 +41,16 @@ At 05:42Z on 2026-11-04 a GO sat about 20 min in the ack comment of n-vaIIdwqlw9
 - A note's stored `state: "delivered"` means its notice was routed. Since 2026-10-08 a response reports the stored value only after the notice reached a composer. Before that it reports `pending`, or `held` while the inbox holds the notice (`n-xVHNr3aVfm` read `delivered` while its notice was held). `ack`, `--open` and the paste preflight still read the stored value. `receipt.routingStatus` makes that explicit; only `deliveredAt` / `receipt.composerDeliveredAt` means the notice reached a composer. The receipt projects only this note's inbox item state, refusal, held reason, and delivery time, never the recipient's general inbox.
 - The drive guard is untouched: a note never uses the drive path, and nothing a sender writes is typed into another workspace's tab.
 - Agents are told at turn start to run `note list --open --to-me` (both agent prompts and the API guide); story 18 carries the command-body side.
+
+## Amendment: an ack wakes nobody (2026-11-10, epic `delivery-flow-fix`, story F6)
+The 2026-11-05 amendment above is withdrawn. On 9 Nov one coordinator session took 188 turns that only read an ack
+notice, and 646 of 1,286 note lines to the three coordinators in 24 h were ack notices.
+- An ack is the store transition alone. It types nothing into the sender's tab. The sender reads the state, `ackedBy`
+  and `ackComment` with `note list --from-me` or `note show`.
+- The `acked` note event is deleted from the inbox templates. An `acked` notice queued before this release is rejected
+  by its paste preflight (`note-ack-notice-retired`): it is withdrawn, never refused, so it neither reaches the sender
+  nor blocks the head of the sender's queue.
+- D17's case (a GO that sat in an ack comment) is closed by the rule, not by a wake: a reply that the sender must act
+  on is sent as a note, or as a Mission Control answer, never as an ack comment.
+- F10 step 3 maps `note ack` onto a message's `delivered → processed` write; this amendment adds no ack path for it to
+  replace.

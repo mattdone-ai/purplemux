@@ -1,7 +1,7 @@
 import { nanoid } from 'nanoid';
+import { type CoordinatorWindow, isWindowExempt } from '@/lib/coordinator-window';
 import { createLogger } from '@/lib/logger';
 import { NUDGE_PREFIX } from '@/lib/orchestration';
-import { STANDUP_DUE_KIND } from '@/lib/standup';
 import type { TabEventsTable } from '@/lib/tab-events-store';
 import type { IPendingDigest, ITabEvent, TWakeClass } from '@/types/tab-events';
 
@@ -46,6 +46,8 @@ export interface ITabEventRoute {
    * paste, together with the settle window, so it never follows another delivery into the turn it started.
    */
   whenReady?: () => boolean;
+  /** A `turn-marker`'s end lines: a coordinator's window lets a BLOCKED or NEEDS-DECISION verdict through (F6). */
+  markerLines?: readonly string[];
 }
 
 export interface ITabEventRouteResult {
@@ -81,6 +83,12 @@ export interface ITabEventRouterDeps {
    * recorded undelivered and typed by `releaseHeldUrgent`.
    */
   holdUrgent?: (tabId: string) => boolean;
+  /**
+   * F6 change 3: the coordinator window. For the workspace's enabled orchestrator, an urgent event that does not skip
+   * the window is held as a digest row, and a digest goes out only when the window is open and the digest has waited
+   * longer than the tab's oldest inbox item. Absent: every tab keeps the rules above (tests, a server without it).
+   */
+  window?: () => CoordinatorWindow | null;
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -92,8 +100,6 @@ const READ_WITH = / — read with: purplemux tab result -w \S+ \S+$/;
 
 const digestLine = (event: ITabEvent): string => {
   const flat = event.text.replace(/\s+/g, ' ').trim();
-  // The due line is the server's own text and names no worker: it reads as itself (story hfl2-10).
-  if (event.kind === STANDUP_DUE_KIND) return `- ${hhmm(event.at)}Z ${flat}`;
   const body = (flat.startsWith(NUDGE_PREFIX) ? flat.slice(NUDGE_PREFIX.length).trim() : flat).replace(READ_WITH, '');
   const clipped = body.length > DIGEST_LINE_CHARS ? `${body.slice(0, DIGEST_LINE_CHARS - 1)}…` : body;
   return `- ${hhmm(event.at)}Z ${event.kind}: ${clipped}`;
@@ -105,8 +111,7 @@ export const appendDelivered = (table: TabEventsTable, event: ITabEventRoute, at
 
 /**
  * One message for every waiting event (ADR-HFL-05 decision 2): `DIGEST <n> since <time>`, a line per
- * event while they fit, then the pointer to the full list. At most DIGEST_MAX_BYTES in all. A standup due
- * line leads, so the 2 KB cut never drops the line that made the digest due (story hfl2-10).
+ * event while they fit, then the pointer to the full list. At most DIGEST_MAX_BYTES in all.
  */
 export const renderDigest = (events: readonly ITabEvent[], workspaceId: string, tabId: string): string => {
   const since = iso(Math.min(...events.map((event) => event.at)));
@@ -114,12 +119,8 @@ export const renderDigest = (events: readonly ITabEvent[], workspaceId: string, 
   const pointer = (shown: number) => (shown === events.length
     ? `Full text: purplemux events show -w ${workspaceId} ${tabId} --since ${since}`
     : `${events.length - shown} more: purplemux events show -w ${workspaceId} ${tabId} --since ${since}`);
-  const ordered = [
-    ...events.filter((event) => event.kind === STANDUP_DUE_KIND),
-    ...events.filter((event) => event.kind !== STANDUP_DUE_KIND),
-  ];
   const lines: string[] = [];
-  for (const event of ordered) {
+  for (const event of events) {
     const next = [header, ...lines, digestLine(event), pointer(lines.length + 1)].join('\n');
     if (bytes(next) > DIGEST_MAX_BYTES) break;
     lines.push(digestLine(event));
@@ -213,12 +214,17 @@ export class TabEventRouter {
     let seq: number;
     let cls: TWakeClass;
     let duplicate: boolean;
+    // F6: a coordinator's urgent event waits for its window unless its kind skips it; reclassified before the
+    // duplicate check, so a repeat inside the window is logged like any held copy (design ruling, change 4).
+    const windowed = event.class === 'urgent' && !isWindowExempt(event.kind, event.markerLines)
+      && await this.governedBy(event.workspaceId, event.tabId) !== null;
+    const routed = windowed ? 'digest' : event.class;
     try {
       // Urgent kinds keep only the episode filter: an identical end line after a fix round is a new decision
       // (consult ruling 2). A copy is a duplicate only while the earlier one still waits (review r2, F3).
-      duplicate = event.class !== 'urgent'
+      duplicate = routed !== 'urgent'
         && table.hasSame(event.workspaceId, event.tabId, event.kind, event.text, now - DUPLICATE_WINDOW_MS);
-      cls = duplicate ? 'log' : event.class;
+      cls = duplicate ? 'log' : routed;
       seq = table.append({ ...event, class: cls, at: now });
     } catch (err) {
       log.warn(`tab event for ${event.tabId} not written; delivering at once: ${err instanceof Error ? err.message : err}`);
@@ -278,6 +284,18 @@ export class TabEventRouter {
     return this.deps.table().list(workspaceId, { since: 0, limit, sourced: true }).filter((row) => !this.inFlight.has(row.seq));
   }
 
+  /** The coordinator window that governs the tab, or null: a worker, or no window wired. */
+  private async governedBy(workspaceId: string, tabId: string): Promise<CoordinatorWindow | null> {
+    const window = this.deps.window?.() ?? null;
+    if (!window) return null;
+    try {
+      return (await window.governs(workspaceId, tabId)) ? window : null;
+    } catch (err) {
+      log.warn(`coordinator check for ${tabId} failed; its events keep their class: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
   /** Send the tab its digest when one is due and the tab is at its prompt; true when one went out. */
   async flush(workspaceId: string, tabId: string): Promise<boolean> {
     const key = `${workspaceId}/${tabId}`;
@@ -289,16 +307,21 @@ export class TabEventRouter {
       const pending = table.pending(workspaceId, tabId).filter((event) => !this.unrecorded.has(event.seq));
       if (!pending.length) return false;
       const now = this.deps.now();
+      const window = await this.governedBy(workspaceId, tabId);
+      // A coordinator: its window, and the oldest of the digest and its first inbox item goes first (F6 ruling 3).
+      // Its 20-event bypass is gone: the window is the one bound. Any other tab keeps the 15-min interval.
       const last = table.lastDigestAt(workspaceId, tabId);
-      // A held standup due line makes the digest due at once (story hfl2-10, consult ruling b; ADR-0035 §3). Only that
-      // kind skips the interval: the hold, the prompt and the settle window below still decide.
-      const due = pending.length >= DIGEST_MAX_WAITING || last === null || now - last >= DIGEST_INTERVAL_MS
-        || pending.some((event) => event.kind === STANDUP_DUE_KIND);
+      const due = window
+        ? window.isOpen(workspaceId, tabId) && window.digestTurn(workspaceId, tabId)
+        : pending.length >= DIGEST_MAX_WAITING || last === null || now - last >= DIGEST_INTERVAL_MS;
       if (!due || this.deps.holdDigest?.(tabId) || !this.deps.atPrompt(tabId) || !this.settled(table, workspaceId, tabId)) return false;
       const message = renderDigest(pending, workspaceId, tabId);
+      // Re-read in the dispatch lock: an inbox item may have taken the window since the check above.
       const delivered = await this.paste(workspaceId, tabId, message,
-        () => !this.deps.holdDigest?.(tabId) && this.deps.atPrompt(tabId) && this.settled(table, workspaceId, tabId));
+        () => !this.deps.holdDigest?.(tabId) && this.deps.atPrompt(tabId) && this.settled(table, workspaceId, tabId)
+          && (!window || window.isOpen(workspaceId, tabId)));
       if (!delivered) return false;
+      window?.claim(workspaceId, tabId);
       const digestId = this.deps.newDigestId?.() ?? `dg-${nanoid(10)}`;
       this.markDelivered(table, pending.map((event) => event.seq), digestId);
       log.info({ workspaceId, tabId, digestId, events: pending.length, bytes: bytes(message) }, 'digest delivered');
@@ -329,23 +352,6 @@ export class TabEventRouter {
         this.deps.onStale?.({ workspaceId, tabId, count, oldestAt });
       }
       if (this.deps.atPrompt(tabId)) await this.flush(workspaceId, tabId);
-    }
-  }
-
-  /**
-   * The tab's held events of one kind become `log` rows: a newer event replaces them, or a standup posted since makes a
-   * held due line false (story hfl2-10). Returns how many; 0 when the log cannot be written.
-   */
-  retireKind(workspaceId: string, tabId: string, kind: string): number {
-    const table = this.tableOrNull();
-    if (!table) return 0;
-    try {
-      const retired = table.retirePendingKind(workspaceId, tabId, kind);
-      if (retired) log.info({ workspaceId, tabId, kind, retired }, 'held tab events retired: replaced');
-      return retired;
-    } catch (err) {
-      log.warn(`held ${kind} events of ${tabId} not retired: ${err instanceof Error ? err.message : err}`);
-      return 0;
     }
   }
 

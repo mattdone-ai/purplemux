@@ -4,8 +4,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ICaller } from '@/lib/caller';
 
-// Story hfl2-10: `standup.dueMin` is checked at write time and written by the admin token only, so the orchestrator
-// that the due line nags cannot turn it off for every workspace (ADR-0027 ruling R2).
+// F6 change 2 deletes the standup due line, so no `standup.*` key is read: a write is refused, never silently kept.
 
 let directory = '';
 let home: ReturnType<typeof vi.spyOn>;
@@ -26,26 +25,15 @@ afterEach(() => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-describe('the standup fleet key', () => {
-  it.each(['45', '0', '0.05', '1440'])('the admin token sets standup.dueMin = %j', async (value) => {
+describe('the retired standup fleet key', () => {
+  it.each(['standup.dueMin', 'standup.due-min'])('the admin token cannot set %s: it reads nothing', async (key) => {
     const { putValue } = await import('@/lib/fleet-config-http');
-    expect(await putValue(admin, 'standup.dueMin', { value }, authority)).toMatchObject({ key: 'standup.dueMin', changed: true });
+    await expect(putValue(admin, key, { value: '45' }, authority))
+      .rejects.toMatchObject({ code: 'config-invalid', message: expect.stringContaining('the standup due line (standup.dueMin) was deleted by F6') });
   });
 
-  it.each([
-    ['standup.dueMin', '-1', 'must be minutes 0..1440 (0 turns the due line off), got "-1"'],
-    ['standup.dueMin', '1441', 'must be minutes 0..1440'],
-    ['standup.dueMin', 'off', 'must be minutes 0..1440'],
-    ['standup.due-min', '45', 'is not a standup key: standup.dueMin'],
-  ])('%s = %j is refused: %s', async (key, value, message) => {
+  it('a workspace orchestrator cannot set it either', async () => {
     const { putValue } = await import('@/lib/fleet-config-http');
-    await expect(putValue(admin, key, { value }, authority)).rejects.toMatchObject({ code: 'config-invalid', message: expect.stringContaining(message) });
-  });
-
-  it('a workspace orchestrator can neither set nor unset it', async () => {
-    const { putValue, deleteValue } = await import('@/lib/fleet-config-http');
-    await expect(putValue(orchestrator, 'standup.dueMin', { value: '0' }, authority)).rejects.toMatchObject({ code: 'forbidden' });
-    await putValue(admin, 'standup.dueMin', { value: '45' }, authority);
-    await expect(deleteValue(orchestrator, 'standup.dueMin', {}, authority)).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(putValue(orchestrator, 'standup.dueMin', { value: '0' }, authority)).rejects.toMatchObject({ code: expect.stringMatching(/forbidden|config-invalid/) });
   });
 });

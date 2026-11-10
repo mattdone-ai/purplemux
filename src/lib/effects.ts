@@ -47,8 +47,6 @@ const NUDGE_KINDS: Readonly<Record<TOrchestrationNudgeKind, TEffectFamily>> = {
 const NOTICE_KINDS: Readonly<Record<TInboxKind | Exclude<TWakeOtherKind, 'flag' | 'alarm' | 'red-main'>, TEffectFamily>> = {
   note: 'notice', watch: 'notice', deploy: 'notice', mission: 'notice', resume: 'notice', 'tab-send': 'notice', rotate: 'notice',
   'standing-order': 'notice', 'curator-candidate': 'notice',
-  // The keeper's standup due line (story hfl2-10): a watchdog wake, though no worker sent it.
-  'standup-due': 'nudge',
 };
 const FLOW_RULES: Readonly<Record<TFlowRule, true>> = {
   'lock-busy': true, 'queue-long': true, 'queue-old': true, 'queue-full': true, 'meter-over': true, stale: true,

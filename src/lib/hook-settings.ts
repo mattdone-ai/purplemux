@@ -5,6 +5,7 @@ import { createLogger } from '@/lib/logger';
 import { STATUSLINE_SCRIPT_PATH, STATUSLINE_SCRIPT_CONTENT } from '@/lib/statusline-script';
 import {
   CLAUDE_HOOK_TIMEOUT_SECONDS,
+  CLAUDE_STOP_HOOK_TIMEOUT_SECONDS,
   CODEX_HOOK_SCRIPT_CONTENT,
   GROK_HOOK_SCRIPT_CONTENT,
   HOOK_SCRIPT_CONTENT,
@@ -51,8 +52,10 @@ export const claudeHookEvents = (script: string) => ({
   SessionStart: hookEntry(script, 'session-start'),
   UserPromptSubmit: hookEntry(script, 'prompt-submit'),
   Notification: hookEntry(script, 'notification'),
-  Stop: hookEntry(script, 'stop'),
-  StopFailure: hookEntry(script, 'stop'),
+  // F6: the stop waits for the server's decision (1 s) after tmux (1 s) and the POST: 5 s, not 3 (ruling (3)).
+  Stop: hookEntry(script, 'stop', CLAUDE_STOP_HOOK_TIMEOUT_SECONDS),
+  // StopFailure posts through the same stop route (review nit 2): the same bound as Stop, above tmux + the POST.
+  StopFailure: hookEntry(script, 'stop', CLAUDE_STOP_HOOK_TIMEOUT_SECONDS),
   PreCompact: hookEntry(script, 'pre-compact'),
   PostCompact: hookEntry(script, 'post-compact'),
   PostToolUse: hookEntry(script, 'post-tool', 2, SIGNAL_TOOLS),
