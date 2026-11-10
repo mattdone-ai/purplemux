@@ -169,9 +169,11 @@ describe.skipIf(!supported)('remote reap script, run for real (ADR-0022 §9)', {
     let captured: Map<string, string | null> | null = null;
     await vi.waitFor(async () => {
       captured = parseRemoteCaptures(await runScript([sock, nonce, session, 'pt-ws-none-pane-x-tab-none', other], REMOTE_CAPTURE_SCRIPT), nonce);
+      // Both panes print asynchronously after new-session returns; wait for BOTH, or a capture taken between the
+      // second pane's print and the first pane's reads the first pane as an empty line (flaked about 1 run in 4).
       expect(captured?.get(other)).toContain('second pane');
+      expect(captured?.get(session)).toContain('first pane');
     }, { timeout: 10_000, interval: 100 });
-    expect(captured!.get(session)).toContain('first pane');
     expect(captured!.get('pt-ws-none-pane-x-tab-none')).toBeNull();
     expect([...captured!.keys()]).toEqual([session, 'pt-ws-none-pane-x-tab-none', other]);
   });
