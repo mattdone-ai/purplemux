@@ -125,27 +125,32 @@ export interface IInboxFields {
   resume: IResumeFields;
 }
 
+/** The checked id and the sender words every note line starts with (ADR-0013). */
+const noteHead = (f: INoteFields): { id: string; from: string; owner: boolean } => {
+  const id = field('noteId', f.noteId, 'noteId');
+  if (f.fromHuman !== undefined && typeof f.fromHuman !== 'boolean') {
+    throw new InboxFieldError('inbox field fromHuman must be boolean');
+  }
+  if (f.fromOwner !== undefined && typeof f.fromOwner !== 'boolean') {
+    throw new InboxFieldError('inbox field fromOwner must be boolean');
+  }
+  const human = f.fromHuman === true;
+  const owner = !human && f.fromOwner === true;
+  if (owner && f.fromWorkspaceId === null) throw new InboxFieldError('inbox field fromOwner needs fromWorkspaceId');
+  const checked = human || f.fromWorkspaceId === null
+    ? { workspaceId: f.fromWorkspaceId, tabId: f.fromTabId }
+    : {
+      workspaceId: field('fromWorkspaceId', f.fromWorkspaceId, 'workspaceId'),
+      tabId: f.fromTabId === null ? null : field('fromTabId', f.fromTabId, 'tabId'),
+    };
+  return { id, from: noteFromWords({ ...checked, human, owner }), owner };
+};
+
 type TRenderer<K extends TInboxKind> = (fields: IInboxFields[K]) => { recordId: string; line: string };
 
 const TEMPLATES: { [K in TInboxKind]: TRenderer<K> } = {
   note: (f) => {
-    const id = field('noteId', f.noteId, 'noteId');
-    if (f.fromHuman !== undefined && typeof f.fromHuman !== 'boolean') {
-      throw new InboxFieldError('inbox field fromHuman must be boolean');
-    }
-    if (f.fromOwner !== undefined && typeof f.fromOwner !== 'boolean') {
-      throw new InboxFieldError('inbox field fromOwner must be boolean');
-    }
-    const human = f.fromHuman === true;
-    const owner = !human && f.fromOwner === true;
-    if (owner && f.fromWorkspaceId === null) throw new InboxFieldError('inbox field fromOwner needs fromWorkspaceId');
-    const checked = human || f.fromWorkspaceId === null
-      ? { workspaceId: f.fromWorkspaceId, tabId: f.fromTabId }
-      : {
-        workspaceId: field('fromWorkspaceId', f.fromWorkspaceId, 'workspaceId'),
-        tabId: f.fromTabId === null ? null : field('fromTabId', f.fromTabId, 'tabId'),
-      };
-    const from = noteFromWords({ ...checked, human, owner });
+    const { id, from } = noteHead(f);
     const event = f.event ?? 'delivered';
     if (!NOTE_EVENTS.includes(event)) throw new InboxFieldError('inbox field event is not a note event');
     const at = time('sentAt', f.sentAt);
@@ -209,6 +214,17 @@ export const renderInboxLine = <K extends TInboxKind>(kind: K, fields: IInboxFie
   if (!render || !Object.hasOwn(TEMPLATES, kind)) throw new InboxFieldError(`unknown inbox kind ${String(kind)}`);
   if (typeof fields !== 'object' || fields === null) throw new InboxFieldError('inbox fields must be an object');
   return render(fields);
+};
+
+/**
+ * The one line `note point` types (G7): the note grammar, server fields only, and "owner decision" only for a note
+ * sent under an owner grant, since a coordinator's admission says nothing about who decided (design ruling F2).
+ */
+export const renderNotePointerLine = (f: INoteFields): string => {
+  const { id, from, owner } = noteHead(f);
+  const at = time('sentAt', f.sentAt);
+  const what = owner ? 'carries an owner decision' : 'needs action now';
+  return `[purplemux note ${id}] from ${from} at ${at} ${what}: run purplemux note show ${id} now, then purplemux note ack ${id}`;
 };
 
 export const INBOX_KINDS = Object.keys(TEMPLATES) as TInboxKind[];

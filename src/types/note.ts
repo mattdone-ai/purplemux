@@ -115,4 +115,6 @@ export type INoteView = Omit<INote, 'body' | 'state'> & {
   receipt?: INoteReceipt;
 };
 
-export type TNoteErrorCode = 'note-not-found' | 'note-too-large' | 'note-target-missing' | 'forbidden' | 'note-invalid' | 'note-cap';
+export type TNoteErrorCode = 'note-not-found' | 'note-too-large' | 'note-target-missing' | 'forbidden' | 'note-invalid' | 'note-cap'
+  // `note point` (G7): the target tab is gone, its session is dead, it cannot take a line now, or a bound holds.
+  | 'tab-not-found' | 'session-not-running' | 'note-point-not-ready' | 'note-point-too-soon';

@@ -143,6 +143,11 @@ to an exit code through one table:
                                                  event-out-of-scope,                        or attempt changes
                                                  event-stale, event-check-unavailable
      5  not ready (typed events, ADR-0043)       event-no-recipient                         yes, bounded
+     3  refused by state (note point, G7)        note-point-too-soon (one pointer per note  after 10 min
+                                                 and per target tab in 10 min)
+     5  not ready (note point, G7)               note-point-not-ready (a prompt, a halt,    yes, bounded
+                                                 a policy refusal or text in the
+                                                 composer; nothing typed)
 
 The CLI writes the code and its class to stderr, e.g.
   error: tab-not-found (permanent — the tab is closed; do not retry) — Tab not found
@@ -836,6 +841,21 @@ POST /api/cli/notes/<id>/ack
   comment itself is pulled with note show.
   Response: { "note" } in state "acked". 404 note-not-found (exit 7); 403 forbidden (exit 3),
   also for a note that is not delivered.
+
+POST /api/cli/notes/<id>/point   (CLI: note point ID; G7)
+  The verified current orchestrator of the sender workspace, for its own note that is routed to another
+  workspace's enabled orchestrator and has not reached that composer yet. No body (absent, null or {}; any
+  field is 400 note-invalid). The server types ONE fixed line into that orchestrator, busy included:
+    [purplemux note <id>] from <ws>/<tab> at <time> needs action now: run purplemux note show <id> now,
+    then purplemux note ack <id>
+  ("carries an owner decision" in place of "needs action now" only for a note sent under an owner grant).
+  The target takes it only with an empty composer: no permission prompt, no option list, no usage-limit
+  halt, no needs-input or startup-prompt state, and the dispatch policy passes. A submitted line is the
+  note's composer receipt (deliveredAt), and its queued notice is withdrawn. One pointer per note and one
+  per target tab per 10 min. Response: { "status": "sent", "submitted", "noteId", "target", "cliState",
+  "line", "notSubmitted"? }. 403 forbidden (exit 3); 404 note-not-found (exit 7); 404 tab-not-found /
+  409 session-not-running (exit 4); 409 note-point-not-ready (exit 5); 409 note-point-too-soon (exit 3);
+  200 with notSubmitted "typed-not-submitted" (exit 1: never point again, inspect the tab).
 
 ## Typed worker events (ADR-0043)
 

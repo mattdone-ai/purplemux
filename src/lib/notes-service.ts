@@ -1,7 +1,9 @@
 import type { ICaller } from '@/lib/caller';
 import { createHash } from 'crypto';
+import type { CoordinatorWindow } from '@/lib/coordinator-window';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
-import type { TNoteEvent } from '@/lib/inbox-templates';
+import { renderNotePointerLine, type TNoteEvent } from '@/lib/inbox-templates';
+import { NotePointBounds, type INotePointPort } from '@/lib/note-pointer';
 import { createLogger } from '@/lib/logger';
 import {
   NOTE_EXPIRE_MS,
@@ -72,8 +74,21 @@ export interface INotesDeps {
   portfolioActionDeliverable?: (actionId: string, noteId: string, workspaceId: string) => Promise<boolean>;
   /** The active owner grant held by this exact tab (ADR-0029), or null. */
   ownerGrantOf?: (tab: { workspaceId: string; tabId: string }) => IGrant | null;
-  /** One coordination audit line (`owner-note`). */
+  /** One coordination audit line (`owner-note`, `note-pointer`). */
   audit?: (entry: Record<string, unknown>) => Promise<unknown>;
+  /** F6 change 3: the coordinator window a typed pointer claims, as an inbox paste does; absent or null, none. */
+  window?: () => CoordinatorWindow | null;
+}
+
+/** The answer to a typed pointer (G7). `notSubmitted` is set when the line still sits in the composer. */
+export interface INotePointResult {
+  status: 'sent';
+  submitted: boolean;
+  noteId: string;
+  target: { workspaceId: string; tabId: string };
+  cliState: string | null;
+  line: string;
+  notSubmitted?: 'typed-not-submitted';
 }
 
 export interface ILiveTabs {
@@ -815,6 +830,132 @@ export class NotesService {
     return (await this.views([done]))[0];
   }
 
+  // ─── note point (G7 step 0) ─────────────────────────────────────────────
+
+  private readonly pointBounds = new NotePointBounds();
+
+  /**
+   * The caller is the verified, live orchestrator of its own workspace: the coordinator half of `admissionFor`
+   * (:244), stated on its own. `admissionFor` also returns `owner` or `local` without a throw (design ruling F3).
+   */
+  private async isCoordinator(caller: ICaller, r: IReads): Promise<boolean> {
+    if (caller.admin || !caller.verified || !caller.workspaceId || !caller.tabId) return false;
+    return (await r.orchestratorOf(caller.workspaceId)) === caller.tabId;
+  }
+
+  /**
+   * The note the caller may point at, and where the line goes: the caller's own note, routed and not yet in any
+   * composer, whose current route (`recipientOf`, as the paste preflight reads it) is its routed recipient, in
+   * another workspace. The target is derived from the note; the caller never names a tab. Throws the refusal.
+   */
+  private async pointTarget(caller: ICaller, id: string, r: IReads): Promise<{ note: INote; target: { workspaceId: string; tabId: string } }> {
+    if (!(await this.isCoordinator(caller, r))) {
+      throw new NoteError('forbidden', 'only the verified, current orchestrator of its own workspace points at a note');
+    }
+    const note = await this.find(id);
+    if (note.from.workspaceId !== caller.workspaceId || note.from.tabId !== caller.tabId) {
+      throw new NoteError('forbidden', `note ${note.id} was not sent by this tab; a pointer names only the caller's own note`);
+    }
+    if (note.state !== 'delivered' || !note.deliveredTo) {
+      throw new NoteError('forbidden', `note ${note.id} is ${note.state}; only a routed, unacked note takes a pointer`);
+    }
+    const item = note.inboxItemId ? await r.inboxItem(note.inboxItemId) : null;
+    if (note.deliveredAt !== null || item?.state === 'delivered') {
+      throw new NoteError('forbidden', `note ${note.id} already reached its recipient's composer`);
+    }
+    const decision = await this.recipientOf(note, r);
+    if (decision.status !== 'routed') {
+      throw new NoteError('forbidden', `note ${note.id} has no current route (${decision.status}: ${decision.reason})`);
+    }
+    const { recipient } = decision;
+    if (recipient.workspaceId !== note.deliveredTo.workspaceId || recipient.tabId !== note.deliveredTo.tabId) {
+      throw new NoteError('forbidden', `note ${note.id} is moving to a new recipient; point after the next routing pass`);
+    }
+    if (recipient.workspaceId === caller.workspaceId) {
+      throw new NoteError('forbidden', `note ${note.id} stays in this workspace; a pointer goes only to another workspace's orchestrator`);
+    }
+    if ((await r.orchestratorOf(recipient.workspaceId)) !== recipient.tabId) {
+      throw new NoteError('forbidden', `note ${note.id} is routed to a tab that is not its workspace's enabled orchestrator`);
+    }
+    return { note, target: recipient };
+  }
+
+  private tooSoon(noteId: string, target: { workspaceId: string; tabId: string }): NoteError | null {
+    const bound = this.pointBounds.blocking(noteId, target, this.deps.now());
+    if (!bound) return null;
+    return new NoteError('note-point-too-soon', bound === 'note'
+      ? `note ${noteId} took a pointer less than 10 min ago`
+      : `${target.workspaceId}/${target.tabId} took a pointer less than 10 min ago`);
+  }
+
+  /**
+   * Type one fixed pointer line for the caller's own undelivered note into its recipient orchestrator, busy
+   * included (G7, design ruling vel-G7-POINTER). Lock order: the target's dispatch lock, then the notes lock, as
+   * the inbox takes them before its preflight; every check runs again inside both. The caller's mapping lock is
+   * never held. A typed and submitted line is the note's composer receipt, so its queued notice is withdrawn.
+   */
+  async point(caller: ICaller, id: unknown, port: INotePointPort): Promise<INotePointResult> {
+    if (!isNoteId(id)) throw new NoteError('note-invalid', `exactly one note id (n-…) is required, not ${String(id)}`);
+    const first = await this.pointTarget(caller, id, this.reads());
+    const early = this.tooSoon(id, first.target);
+    if (early) throw early;
+    const audit = (result: string, detail?: string) => this.deps.audit?.({
+      event: 'note-pointer', noteId: id, from: { workspaceId: caller.workspaceId, tabId: caller.tabId }, to: first.target, result,
+      ...(detail ? { detail } : {}),
+    }).catch((err) => log.warn(`note-pointer audit failed: ${err instanceof Error ? err.message : err}`));
+    let outcome: INotePointResult | NoteError;
+    try {
+      const ran = await port.withTarget(first.target.workspaceId, first.target.tabId, async (target) => {
+        const release = await this.acquireOperation();
+        try {
+          const { note, target: to } = await this.pointTarget(caller, id, this.reads());
+          if (to.workspaceId !== first.target.workspaceId || to.tabId !== first.target.tabId) {
+            return new NoteError('forbidden', `note ${id} changed recipient while the pointer waited; retry`);
+          }
+          const bound = this.tooSoon(id, to);
+          if (bound) return bound;
+          const refusal = await target.refusal();
+          if (refusal) {
+            return new NoteError(refusal.code, refusal.code === 'note-point-not-ready'
+              ? `${to.workspaceId}/${to.tabId} cannot take the line now: ${refusal.reason}`
+              : `${to.workspaceId}/${to.tabId}: ${refusal.reason}`);
+          }
+          const line = renderNotePointerLine({
+            noteId: note.id, fromWorkspaceId: note.from.workspaceId, fromTabId: note.from.tabId,
+            fromHuman: false, fromOwner: note.admission?.mode === 'owner', sentAt: note.createdAt,
+          });
+          const typed = await target.type(line);
+          const now = this.deps.now();
+          this.pointBounds.stamp(id, to, now);
+          if (!typed.submitted) {
+            return { status: 'sent', submitted: false, noteId: id, target: to, cliState: typed.cliState, line,
+              notSubmitted: 'typed-not-submitted' } satisfies INotePointResult;
+          }
+          this.deps.window?.()?.claim(to.workspaceId, to.tabId);
+          await this.deps.mutate(async (state) => {
+            const current = state.notes.find((n) => n.id === id);
+            if (!current || current.deliveredAt !== null) return { state, value: undefined };
+            return { state: replaceNote(state, reachedComposer(current, now)), value: undefined };
+          });
+          if (note.inboxItemId) await this.deps.withdraw(note.inboxItemId, 'note-pointed');
+          return { status: 'sent', submitted: true, noteId: id, target: to, cliState: typed.cliState, line } satisfies INotePointResult;
+        } finally {
+          release();
+        }
+      });
+      outcome = ran ?? new NoteError('tab-not-found', `${first.target.workspaceId}/${first.target.tabId}: target-tab-gone`);
+    } catch (err) {
+      await audit('error', err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    if (outcome instanceof NoteError) {
+      await audit(outcome.code, outcome.message);
+      throw outcome;
+    }
+    await audit(outcome.submitted ? 'submitted' : 'typed-not-submitted');
+    return outcome;
+  }
+
   async list(caller: ICaller, filter: IListFilter): Promise<INoteView[]> {
     const { notes } = await this.deps.read();
     const visible = notes
@@ -839,7 +980,7 @@ export class NotesService {
 export const NOTES_TICK_MS = 15_000;
 
 const defaultDeps = async (): Promise<INotesDeps> => {
-  const [leaseStore, leaseHttp, workspaceStore, tabLifecycle, inboxStore, mappingLock, grantStore, coordinationAudit] = await Promise.all([
+  const [leaseStore, leaseHttp, workspaceStore, tabLifecycle, inboxStore, mappingLock, grantStore, coordinationAudit, coordinatorWindow] = await Promise.all([
     import('@/lib/lease-store'),
     import('@/lib/lease-http'),
     import('@/lib/workspace-store'),
@@ -848,6 +989,7 @@ const defaultDeps = async (): Promise<INotesDeps> => {
     import('@/lib/orchestration-mapping-lock'),
     import('@/lib/grant-store'),
     import('@/lib/coordination-audit'),
+    import('@/lib/coordinator-window'),
   ]);
   const epicLease = async (slug: string) => {
     const now = Date.now();
@@ -885,6 +1027,7 @@ const defaultDeps = async (): Promise<INotesDeps> => {
     },
     ownerGrantOf: (tab) => grantStore.findActiveOwnerGrant(grantStore.grantsSnapshot('owner'), tab, Date.now()),
     audit: coordinationAudit.appendCoordinationAudit,
+    window: coordinatorWindow.getCoordinatorWindow,
   };
 };
 
