@@ -1,9 +1,11 @@
 'use strict';
 // Wave-9 acceptance checks: the event digest and the durable tab event log (ADR-0035, story 09) through the
-// candidate's production build. A worker's DONE line reaches its orchestrator's composer within 5 s of the
-// stop (AC 2: measured from the stop hook to the delivery the log records, and read back from the composer);
-// a CHECKPOINTED line is held as digest and arrives inside one `DIGEST <n> since <time>` message, never on its
-// own; `events show` and `events wakes` serve both from ledger.sqlite.
+// candidate's production build, under F6 change 3 (a coordinator gets at most one digest wake each 10 minutes,
+// unless an end line is BLOCKED: or NEEDS-DECISION:). A worker's DONE line is digest: with the window open it
+// arrives inside one `DIGEST <n> since <time>` message. BLOCKED and NEEDS-DECISION lines skip the shut window and
+// reach the orchestrator's composer within 5 s of the stop (AC 2: measured from the stop hook to the delivery the
+// log records, and read back from the composer). A CHECKPOINTED line is held as digest, never typed on its own.
+// `events show` and `events wakes` serve all of them from ledger.sqlite.
 //
 // `wave9(inst, helpers)` returns results in checks.cjs's shape: { status, id, what, measured?, expected? }.
 
@@ -26,7 +28,7 @@ const wave9 = async (inst, helpers) => {
 
 const checks = async (inst, { parseJson, within, sleep, brief, readIf }, results) => {
   const check = (id, what, ok, measured, expected) => results.push(ok ? { status: 'pass', id, what } : { status: 'fail', id, what, measured, expected });
-  const ids = ['digest-urgent-5s', 'digest-held', 'events-wakes'];
+  const ids = ['digest-done-window', 'digest-urgent-5s', 'digest-held', 'events-wakes'];
   const nonce = crypto.randomBytes(3).toString('hex');
   const { a: wsA } = inst.state.workspaces;
   const tab = async (name, extra = []) => parseJson((await inst.cli(['tab', 'create', '-w', wsA, '-n', name, '-t', 'claude-code', '--no-launch', ...extra])).out);
@@ -65,28 +67,50 @@ const checks = async (inst, { parseJson, within, sleep, brief, readIf }, results
   const doneLine = `DONE: acceptance digest ${nonce}`;
   const w1 = await worker(`acc9-done-${nonce}`, `Shipped.\n\n${doneLine}`);
   const t1 = w1 ? await stopTurn(w1) : null;
-  const urgent = t1 !== null ? await within(15000, async () => (await eventsFor()).find((e) => e.text.includes(doneLine) && e.deliveredAt !== null)) : null;
-  const typedDone = urgent ? await within(5000, async () => (readIf(inputFile) ?? '').includes(doneLine)) : false;
-  const latency = urgent ? urgent.deliveredAt - t1 : null;
+  const doneEvent = t1 !== null ? await within(15000, async () => (await eventsFor()).find((e) => e.text.includes(doneLine) && e.deliveredAt !== null)) : null;
+  const typedDone = doneEvent ? await within(5000, async () => (readIf(inputFile) ?? '').includes(doneLine)) : false;
+  const doneComposer = readIf(inputFile) ?? '';
+  const doneAt = doneComposer.indexOf(doneLine);
+  const doneInDigest = doneAt > 0 && doneComposer.lastIndexOf('DIGEST ', doneAt) >= 0;
+  check(
+    'digest-done-window',
+    'a worker\'s DONE line to its coordinator is digest (F6 change 3): with the window open it arrives inside one DIGEST message, recorded delivered',
+    Boolean(doneEvent && doneEvent.class === 'digest' && doneEvent.kind === 'turn-marker' && typeof doneEvent.digestId === 'string' && typedDone && doneInDigest),
+    doneEvent ? `class ${doneEvent.class}, kind ${doneEvent.kind}, digest ${doneEvent.digestId ?? 'none'}, delivered +${doneEvent.deliveredAt - t1} ms after the stop, in the composer ${typedDone}, inside a DIGEST ${doneInDigest}` : `worker ${w1 ? 'started' : 'not started'}, stop ${t1 !== null ? 'posted' : 'not posted'}, no delivered event`,
+    'class digest, kind turn-marker, a digestId, the line inside a DIGEST message in the composer',
+  );
+
+  // The DONE digest shut the window for 10 minutes. BLOCKED and NEEDS-DECISION skip it: each is typed at once.
+  // The NEEDS-DECISION line asks nothing (no `?`), so it opens no Mission Control item and sends no push.
+  const urgentLines = [`BLOCKED: acceptance window ${nonce}`, `NEEDS-DECISION: acceptance window ${nonce}`];
+  const urgentSeen = [];
+  for (const [n, line] of urgentLines.entries()) {
+    const w = await worker(`acc9-urgent${n}-${nonce}`, `Stopped.\n\n${line}`);
+    const t = w ? await stopTurn(w) : null;
+    const event = t !== null ? await within(15000, async () => (await eventsFor()).find((e) => e.text.includes(line) && e.deliveredAt !== null)) : null;
+    const typed = event ? await within(5000, async () => (readIf(inputFile) ?? '').includes(line)) : false;
+    urgentSeen.push({ line, w, t, event, typed, latency: event ? event.deliveredAt - t : null });
+  }
+  const urgentOk = (u) => Boolean(u.event && u.event.class === 'urgent' && u.event.kind === 'turn-marker' && u.typed && u.latency !== null && u.latency <= URGENT_MAX_MS);
   check(
     'digest-urgent-5s',
-    'a worker\'s DONE line is urgent: typed into its orchestrator within 5 s of the stop, and recorded delivered (AC 2)',
-    Boolean(urgent && urgent.class === 'urgent' && urgent.kind === 'turn-marker' && typedDone && latency !== null && latency <= URGENT_MAX_MS),
-    urgent ? `class ${urgent.class}, kind ${urgent.kind}, delivered +${latency} ms after the stop, in the composer: ${typedDone}` : `worker ${w1 ? 'started' : 'not started'}, stop ${t1 !== null ? 'posted' : 'not posted'}, no delivered event`,
-    `class urgent, kind turn-marker, delivered within ${URGENT_MAX_MS} ms, the line in the composer`,
+    'a worker\'s BLOCKED and NEEDS-DECISION lines skip the shut coordinator window: each typed into its orchestrator within 5 s of the stop, and recorded delivered (AC 2, F6 change 3)',
+    urgentSeen.length === urgentLines.length && urgentSeen.every(urgentOk),
+    urgentSeen.map((u) => `${u.line.split(':')[0]}: ` + (u.event ? `class ${u.event.class}, kind ${u.event.kind}, delivered +${u.latency} ms after the stop, in the composer: ${u.typed}` : `worker ${u.w ? 'started' : 'not started'}, stop ${u.t !== null ? 'posted' : 'not posted'}, no delivered event`)).join('; '),
+    `each: class urgent, kind turn-marker, delivered within ${URGENT_MAX_MS} ms, the line in the composer`,
   );
 
   const checkpointLine = `CHECKPOINTED: acceptance handoff ${nonce}`;
   const w2 = await worker(`acc9-cp-${nonce}`, `Paused.\n\n${checkpointLine}`);
   const t2 = w2 ? await stopTurn(w2) : null;
-  // An orchestrator at its prompt with no digest in the last 15 min gets its digest at once; one that had a
-  // digest since (another worker's turn-ended, say) keeps the event pending, which is the rule too.
+  // The DONE digest above shut the coordinator window (F6 change 3), so the event stays pending: the rule. A slow
+  // run that reaches this point after the window opened sees it delivered inside a DIGEST instead.
   const recorded = t2 !== null ? await within(10000, async () => (await eventsFor()).find((e) => e.text.includes(checkpointLine))) : null;
   const held = recorded ? (await within(30000, async () => (await eventsFor()).find((e) => e.text.includes(checkpointLine) && e.deliveredAt !== null))) || recorded : null;
   const earlierDigest = (await eventsFor()).some((e) => e.digestId && held && e.digestId !== held.digestId && e.deliveredAt > Date.now() - 15 * 60_000);
   const composer = readIf(inputFile) ?? '';
   const at = composer.indexOf(checkpointLine);
-  const inDigest = at > 0 && composer.lastIndexOf('DIGEST ', at) >= 0 && composer.lastIndexOf('DIGEST ', at) > composer.lastIndexOf(doneLine);
+  const inDigest = at > 0 && composer.lastIndexOf('DIGEST ', at) >= 0 && composer.lastIndexOf('DIGEST ', at) > Math.max(...urgentLines.map((line) => composer.lastIndexOf(line)));
   const delivery = held?.deliveredAt != null ? (typeof held.digestId === 'string' && inDigest) : (earlierDigest && at < 0);
   check(
     'digest-held',
@@ -101,10 +125,10 @@ const checks = async (inst, { parseJson, within, sleep, brief, readIf }, results
   const row = wakes?.rows?.find((r) => r.tabId === orch.tabId);
   check(
     'events-wakes',
-    'events wakes counts the orchestrator\'s urgent delivery and its digest as two wakes (AC 6)',
-    Boolean(wakes?.hasEvents && row && row.urgent >= 1 && row.digests >= 1 && row.wakes === row.urgent + row.digests),
-    `body ${JSON.stringify(wakes)?.slice(0, 300)}`,
-    `a row for ${orch.tabId} with urgent >= 1, digests >= 1, wakes = urgent + digests`,
+    'events wakes counts the orchestrator\'s two urgent deliveries and its digest as wakes (AC 6)',
+    Boolean(wakes?.hasEvents && row && row.urgent >= urgentLines.length && row.digests >= 1 && row.wakes === row.urgent + row.digests),
+    row ? `row ${JSON.stringify(row)}` : `no row for ${orch.tabId}; body ${JSON.stringify(wakes)?.slice(0, 300)}`,
+    `a row for ${orch.tabId} with urgent >= ${urgentLines.length}, digests >= 1, wakes = urgent + digests`,
   );
 };
 

@@ -75,6 +75,8 @@ const IDLE_WINDOW_MS = 3000;
 const IDLE_WAIT_MS = 130000;
 const FIXTURE_PROCESS_WAIT_MS = 10000;
 const FIXTURE_BIND_WAIT_MS = 150000;
+/** The `lastRefusal` prefix of an inbox item the coordinator window defers (src/lib/coordinator-window.ts). */
+const NOTE_WINDOW_DEFERRAL = 'coordinator-window:';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1201,10 +1203,26 @@ const notes = async (inst, { nonce, wsA, wsB, check, created }) => {
     const held = reader ? await inShell(wsA, reader, inst.tabCli(['lease', 'acquire', `epic:${epic}`, '--ttl', '5m'])) : missing;
     const epicSent = sender && held.rc === 0 ? await inShell(wsB, sender, send(['--to-epic', epic])) : missing;
     const epicNote = parseJson(epicSent.out)?.note ?? null;
-    const epicDelivered = await waitDelivery(epicNote);
-    check('note-epic-coordinator', 'a foreign note addressed to a worker-held epic is delivered to its current coordinator',
-      epicSent.rc === 0 && epicDelivered?.deliveredTo?.tabId === orch?.tabId && judgeNoteDelivery(epicDelivered, readIf(inputFile) ?? '', bodyMarker).ok,
-      `epic lease ${brief(held)}; send ${brief(epicSent)}; recipient ${epicDelivered?.deliveredTo?.tabId}`, 'epic holder is the worker; delivered recipient is the coordinator');
+    // F6 change 3: the coordinator took the note above less than 10 minutes ago, so this note (a windowed kind) is
+    // routed to it and deferred until its window opens: queued, a `coordinator-window:` refusal, nothing typed. A
+    // delivered note passes too, if a slow run reaches this point after the window opened.
+    const epicRouted = epicNote ? await within(60000, async () => {
+      const now = (await allNotes()).find((n) => n.id === epicNote.id);
+      if (!now || now.deliveredTo?.tabId !== orch?.tabId) return null;
+      if (typeof now.deliveredAt === 'number') return { note: now, item: null };
+      const items = parseJson((await inst.cli(['inbox', 'list', '-w', wsA, '--all'])).out)?.items ?? [];
+      const item = items.find((i) => i.id === now.inboxItemId) ?? null;
+      return item?.state === 'queued' && String(item.lastRefusal ?? '').startsWith(NOTE_WINDOW_DEFERRAL) ? { note: now, item } : null;
+    }) : null;
+    const epicInput = readIf(inputFile) ?? '';
+    const epicOk = epicRouted?.item
+      ? epicRouted.item.targetTabId === orch?.tabId && !epicInput.includes(`[purplemux note ${epicNote.id}]`) && !epicInput.includes(bodyMarker)
+      : Boolean(epicRouted && judgeNoteDelivery(epicRouted.note, epicInput, bodyMarker).ok);
+    check('note-epic-coordinator', 'a foreign note addressed to a worker-held epic goes to its current coordinator, through the coordinator window (F6 change 3)',
+      epicSent.rc === 0 && epicOk,
+      `epic lease ${brief(held)}; send ${brief(epicSent)}; recipient ${epicRouted?.note?.deliveredTo?.tabId}; `
+        + (epicRouted?.item ? `notice ${epicRouted.item.state}, ${epicRouted.item.lastRefusal}, typed ${epicInput.includes(`[purplemux note ${epicNote?.id}]`)}` : `delivered ${typeof epicRouted?.note?.deliveredAt === 'number'}`),
+      'epic holder is the worker; the note routed to the coordinator, and either deferred by its window with nothing typed, or delivered without its body');
 
     const shown = note && sender ? await inShell(wsB, sender, inst.tabCli(['note', 'show', note.id])) : missing;
     const bySender = note && sender ? await inShell(wsB, sender, inst.tabCli(['note', 'ack', note.id])) : missing;
