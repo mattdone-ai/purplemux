@@ -238,6 +238,16 @@ describe('note point (G7 step 0)', () => {
     await expectCode(svc.point(B, note.id, port), 'note-point-too-soon');
   });
 
+  it('a submitted pointer is the composer receipt: the 15-min undelivered notice never goes to the sender (G7 i+ii)', async () => {
+    const pointed = await send();
+    const waiting = await send();
+    await svc.point(B, pointed.id, port);
+    f.now += 15 * 60_000;
+    await svc.tick();
+    const undelivered = [...f.inbox.values()].filter((i) => i.dedupeKey.includes(':undelivered:')).map((i) => i.dedupeKey);
+    expect(undelivered).toEqual([`note:${waiting.id}:undelivered:tab-b`]);
+  });
+
   it('five concurrent pointers at one target type exactly one line', async () => {
     const notes = [];
     for (let i = 0; i < 5; i += 1) notes.push(await send());
