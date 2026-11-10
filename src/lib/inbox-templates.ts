@@ -220,7 +220,7 @@ export const renderInboxLine = <K extends TInboxKind>(kind: K, fields: IInboxFie
 
 /**
  * The one line `note point` types (G7): the note grammar, server fields only, and "owner decision" only for a note
- * sent under an owner grant, since a coordinator's admission says nothing about who decided (design ruling F2).
+ * sent under an owner grant, since a coordinator's admission says nothing about who decided.
  */
 export const renderNotePointerLine = (f: INoteFields): string => {
   const { id, from, owner } = noteHead(f);

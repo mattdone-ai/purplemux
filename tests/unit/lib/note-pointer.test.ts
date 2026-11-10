@@ -9,7 +9,7 @@ import type { IInboxItem } from '@/types/inbox';
 import type { INotesState } from '@/types/note';
 import type { ITab } from '@/types/terminal';
 
-// G7 step 0 (design ruling vel-G7-POINTER): a verified coordinator types one fixed pointer line for its own
+// G7 step 0 (vel-G7-POINTER): a verified coordinator types one fixed pointer line for its own
 // undelivered cross-workspace note into the recipient orchestrator, busy included. Fakes as in notes-service.test.
 
 const T0 = Date.parse('2026-11-10T03:00:00.000Z');
@@ -122,7 +122,7 @@ describe('note point (G7 step 0)', () => {
 
   const send = async (from: ICaller = B, toWorkspace = 'ws-1') => svc.send(from, { toWorkspace, subject: 'GO on F12', body: 'owner says go' });
 
-  it('types the fixed line into a busy recipient orchestrator once, then records the composer receipt (AC5)', async () => {
+  it('types the fixed line into a busy recipient orchestrator once, then records the composer receipt', async () => {
     const note = await send();
     expect(note.deliveredTo).toEqual({ workspaceId: 'ws-1', tabId: 'tab-a' });
     const result = await svc.point(B, note.id, port);
@@ -139,7 +139,7 @@ describe('note point (G7 step 0)', () => {
     expect(port.typed).toHaveLength(1);
   });
 
-  it('never types the subject or the body, and says "owner decision" only for an owner-admitted note (AC9)', async () => {
+  it('never types the subject or the body, and says "owner decision" only for an owner-admitted note', async () => {
     const coord = await send();
     await svc.point(B, coord.id, port);
     expect(port.typed[0].line).not.toMatch(/GO on F12|owner says go|owner/);
@@ -149,7 +149,7 @@ describe('note point (G7 step 0)', () => {
     expect(() => renderNotePointerLine({ noteId: 'n-x; rm -rf', fromWorkspaceId: 'ws-4', fromTabId: 'tab-o', sentAt: T0 })).toThrow();
   });
 
-  it('refuses a note the caller did not send, an acked note, and a note already in the composer (AC2)', async () => {
+  it('refuses a note the caller did not send, an acked note, and a note already in the composer', async () => {
     const fromB = await send();
     await expectCode(svc.point(C, fromB.id, port), 'forbidden');
     await svc.ack(A, fromB.id, undefined);
@@ -162,7 +162,7 @@ describe('note point (G7 step 0)', () => {
     expect(port.typed).toEqual([]);
   });
 
-  it('refuses a target that is not the enabled orchestrator of another workspace (AC3)', async () => {
+  it('refuses a target that is not the enabled orchestrator of another workspace', async () => {
     const note = await send();
     // The mapping moved: the note's routed tab is no longer that workspace's orchestrator.
     f.orchestrators.set('ws-1', 'tab-a2');
@@ -179,7 +179,7 @@ describe('note point (G7 step 0)', () => {
     expect(port.typed).toEqual([]);
   });
 
-  it('refuses a caller that is not the verified current orchestrator of its own workspace (AC4)', async () => {
+  it('refuses a caller that is not the verified current orchestrator of its own workspace', async () => {
     const note = await send();
     await expectCode(svc.point(W, note.id, port), 'forbidden');
     await expectCode(svc.point(caller('ws-2', 'tab-b', false), note.id, port), 'forbidden');
@@ -201,7 +201,7 @@ describe('note point (G7 step 0)', () => {
     expect(port.typed).toEqual([]);
   });
 
-  it('a target that cannot take a line types nothing and spends no bound (AC7)', async () => {
+  it('a target that cannot take a line types nothing and spends no bound', async () => {
     const note = await send();
     port.refusal = { code: 'note-point-not-ready', reason: 'native-prompt-active' };
     await expectCode(svc.point(B, note.id, port), 'note-point-not-ready');
@@ -216,7 +216,7 @@ describe('note point (G7 step 0)', () => {
     expect(f.audits.map((a) => a.result)).toEqual(['note-point-not-ready', 'session-not-running', 'tab-not-found', 'submitted']);
   });
 
-  it('one pointer per target tab per 10 min from any sender, and one per note (AC8)', async () => {
+  it('one pointer per target tab per 10 min from any sender, and one per note', async () => {
     const fromB = await send(B);
     const fromC = await send(C);
     await svc.point(B, fromB.id, port);
@@ -257,7 +257,7 @@ describe('note point (G7 step 0)', () => {
   });
 });
 
-describe('pointerRefusal — the inbox checks with busy admitted (design ruling F1)', () => {
+describe('pointerRefusal — the inbox checks with busy admitted', () => {
   const EMPTY = 'done\n────────\n❯ \n────────\n';
   const TAB = { id: 'tab-a', name: 'orch', sessionName: 'pt-ws-1-p-tab-a', panelType: 'claude-code' } as unknown as ITab;
 

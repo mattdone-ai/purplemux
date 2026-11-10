@@ -11,7 +11,7 @@ import { TabEventRouter, type ITabEventRoute } from '@/lib/tab-event-router';
 import type { IInboxItem } from '@/types/inbox';
 import type { INote, INotesState } from '@/types/note';
 
-// G7 step 1 (b), with the audit seat's two changes: readers only, no new store, one test per reader.
+// G7 step 1 (vel-G7-PENDING): readers only, no new store, one test per reader.
 // (i) the coordinator's digest and each watchdog nudge typed to it carry `N notes pending, oldest <age>: run
 // purplemux note list --open --to-me`; (ii) at 15 min an undelivered note alerts its sender and the SM digest.
 
