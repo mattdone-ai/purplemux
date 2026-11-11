@@ -799,7 +799,9 @@ epic sends require the verified current source orchestrator, or the verified tab
 owner grant (admission "owner", with its grantId; it routes like an orchestrator's note, and each
 send is audited as owner-note). Admission is persisted across source orchestrator handover and
 survives a later revoke of the owner grant. With no target orchestrator the note is "undeliverable" with a reason and
-never falls back to a worker. The recipient's tab
+never falls back to a worker. When a note bounces (target-epic-unowned or target-coordinator-unavailable, at the send
+or later), the sender's live tab gets one line at once, "[purplemux note n-…] you sent it at <time>; it bounced
+(<reason>): …", and one line in its digest; the note waits for a recipient until it expires. The recipient's tab
 receives only the inbox's fixed line "[purplemux note n-…] from <ws>/<tab> at <time> — purplemux note
 show n-…, then purplemux note ack n-…" (from "owner (<ws>/<tab>)" for an owner note); the subject and
 body are never typed. Every note view carries fromLabel, the same server-made words after "from". If that tab closes

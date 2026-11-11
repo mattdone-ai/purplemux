@@ -98,3 +98,25 @@ the inbox's ready-only rule.
   `note n-… from <ws>/<tab> to <ws>/<tab> has not reached its recipient's composer after <n> min; its sender was told`:
   ids and times only. The seat gets no copy of a note it sent or that waits for it. The alert is not awaited inside
   the notes lock: a digest takes a dispatch lock, and the inbox takes those two locks in the other order.
+
+## Amendment: a bounced note alerts its sender at once (2026-11-11, stories vel-NOTE-BOUNCE-ALERT, vel-G7-ALERT-WORDING)
+An undeliverable note was visible only in the send's JSON answer and in `note list`. A coordinator's notes to an
+epic that nobody held stayed `target-epic-unowned` for about 2.5 h, and nobody saw them.
+- A note bounces when it becomes `undeliverable` with the reason `target-epic-unowned` or
+  `target-coordinator-unavailable`: at the send, or at a later pass when its recipient is gone and none replaces it.
+  A policy block is not a bounce. A typed worker event with no recipient is refused and stores nothing, so it does
+  not bounce either.
+- At the bounce, the sender's live tab gets one inbox notice, the new `bounced` event:
+  `[purplemux note n-…] you sent it at <time>; it bounced (<reason>): <words> — it waits for a recipient until it
+  expires; purplemux note show n-…`. The same tab's digest gets one line:
+  `note n-… bounced at <time> (<reason>): no live recipient; it waits for one until it expires — purplemux note show n-…`.
+  Neither line types the epic slug. The paste preflight rejects a `bounced` notice once the note has a recipient again.
+- One alert per bounce. A note that routes again and bounces again alerts again. The bounce is always recorded; the
+  note's `bounceNotifiedAt` is set once the sender is told, or has nobody to tell (no tab, or its tab closed). An
+  unknown sender tab, or a failed notice, at the send or at a pass, leaves it null, and each pass tells the sender of
+  any bounced note whose `bounceNotifiedAt` is null. A route or a re-queue resets it. A failed notice never fails the
+  send. A note stored before this change has no `bounceNotifiedAt` and owes no notice.
+- The Scrum Master seat's `undelivered` line now says `its sender was told` only when a notice went out, else
+  `its sender has no live tab and was not told`. Both digest lines carry a fixed time, not an age:
+  `… has not reached its recipient's composer since it was routed at <time>; …`. The text is fixed per note, so the
+  router's duplicate filter (same tab, kind and text inside 15 min) logs a repeat alert as a duplicate.

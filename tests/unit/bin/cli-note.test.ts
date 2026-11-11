@@ -230,6 +230,10 @@ describe('purplemux note — the installed CLI against the real note and lease r
     const id = JSON.parse(sent.stdout).note.id;
     const open = JSON.parse((await cli(['note', 'list', '--open', '--from-me'], tabB)).stdout).notes;
     expect(open).toMatchObject([{ id, state: 'undeliverable' }]);
+    // The sender hears the bounce at once (vel-NOTE-BOUNCE-ALERT).
+    const [bounce] = await inboxLines();
+    expect(bounce).toMatchObject({ targetTabId: 'tab-b' });
+    expect(bounce.line).toMatch(new RegExp(`^\\[purplemux note ${id}\\] you sent it at \\S+; it bounced \\(target-epic-unowned\\): `));
 
     expect((await cli(['lease', 'acquire', 'epic:b4', '--ttl', 'none'], tabC)).code).toBe(0);
     let routed: { state: string; deliveredTo: unknown } | undefined;
@@ -238,7 +242,7 @@ describe('purplemux note — the installed CLI against the real note and lease r
       routed = JSON.parse((await cli(['note', 'list', '--from-me'], tabB)).stdout).notes[0];
     }
     expect(routed).toMatchObject({ state: 'pending', deliveredTo: { workspaceId: 'ws-c', tabId: 'tab-c' } });
-    expect((await inboxLines()).map((l) => l.targetTabId)).toEqual(['tab-c']);
+    expect((await inboxLines()).map((l) => l.targetTabId)).toEqual(['tab-b', 'tab-c']);
   });
 
   it('refuses a 20 KiB body with exit 2 naming the 16 KiB limit, before anything is sent', async () => {

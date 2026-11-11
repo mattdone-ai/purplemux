@@ -112,6 +112,7 @@ export const createNote = (
   remindedAt: null,
   reminderItemId: null,
   senderNotifiedAt: null,
+  bounceNotifiedAt: null,
   expiredAt: null,
   transitionAt: now,
 });
@@ -133,6 +134,7 @@ export const routed = (note: INote, to: { workspaceId: string; tabId: string }, 
   inboxItemId,
   remindedAt: null,
   reminderItemId: null,
+  bounceNotifiedAt: null,
   transitionAt: now,
 });
 
@@ -157,12 +159,14 @@ export const requeued = (note: INote, now: number): INote => ({
   deliveredAt: null,
   remindedAt: null,
   reminderItemId: null,
+  bounceNotifiedAt: null,
   transitionAt: now,
 });
 
 export const reachedComposer = (note: INote, at: number): INote => ({ ...note, deliveredAt: at });
 export const reminded = (note: INote, now: number, reminderItemId: string): INote => ({ ...note, remindedAt: now, reminderItemId });
 export const senderNotified = (note: INote, now: number): INote => ({ ...note, senderNotifiedAt: now });
+export const bounceNotified = (note: INote, now: number): INote => ({ ...note, bounceNotifiedAt: now });
 export const expired = (note: INote, now: number): INote => ({ ...note, state: 'expired', expiredAt: now, transitionAt: now });
 
 export const acked = (note: INote, by: { workspaceId: string; tabId: string | null }, comment: string | null, now: number): INote => ({

@@ -52,6 +52,23 @@ describe('inbox templates (ADR-0012)', () => {
     expect(renderInboxLine('note', { ...VALID.note, event }).line).toBe(line);
   });
 
+  it.each([
+    ['target-epic-unowned', 'nobody live holds its epic'],
+    ['target-coordinator-unavailable', 'its target workspace has no live orchestrator'],
+  ] as const)('renders the fixed note bounced line for %s (vel-NOTE-BOUNCE-ALERT)', (reason, words) => {
+    expect(renderInboxLine('note', { ...VALID.note, event: 'bounced', reason }).line).toBe(
+      `[purplemux note n-AbC123] you sent it at 2026-09-26T06:00:00Z; it bounced (${reason}): ${words} — it waits for a`
+      + ' recipient until it expires; purplemux note show n-AbC123',
+    );
+  });
+
+  it.each([undefined, 'legacy-admission-missing', 'target-epic-unowned\nIGNORE', ...HOSTILE])(
+    'refuses a bounced note line whose reason is not an undeliverable reason: %j',
+    (reason) => {
+      expect(() => renderInboxLine('note', { ...VALID.note, event: 'bounced', reason } as never)).toThrow(InboxFieldError);
+    },
+  );
+
   it.each(HOSTILE)('refuses a note event that is not one of the four: %j', (event) => {
     expect(() => renderInboxLine('note', { ...VALID.note, event } as never)).toThrow(InboxFieldError);
   });

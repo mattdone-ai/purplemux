@@ -1,9 +1,12 @@
+import { isNoteBounceReason } from '@/lib/inbox-templates';
 import { OPEN_STATES, readNotesState } from '@/lib/notes-store';
+import type { ITabEventRoute } from '@/lib/tab-event-router';
 import type { INote } from '@/types/note';
 
 // G7 step 1 (b): readers only, over the note store that exists. A coordinator's digest and each watchdog nudge typed
 // to it carry how many open notes wait for it and the oldest one's age, with the command that lists them; the
-// Scrum Master seat's digest hears of a note whose line has not reached its recipient's composer after 15 min.
+// Scrum Master seat's digest hears of a note whose line has not reached its recipient's composer after 15 min, and a
+// sender's own digest hears of its note that bounced.
 // Every value here is server-made: ids, counts and times. No subject or body is ever read.
 
 const MIN = 60_000;
@@ -37,11 +40,44 @@ const party = (workspaceId: string | null, tabId: string | null): string => {
   return tabId !== null && TAB_ID.test(tabId) ? `${workspaceId}/${tabId}` : `${workspaceId}/workspace`;
 };
 
-/** The Scrum Master seat's digest line for an undelivered note: ids and times only, never the subject. */
-export const renderUndeliveredAlert = (note: INote, now: number): string => {
+const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+const checkedId = (note: INote): string => {
   if (!NOTE_ID.test(note.id)) throw new Error('note id does not match its grammar');
+  return note.id;
+};
+
+/**
+ * The Scrum Master seat's digest line for an undelivered note: ids and times only, never the subject. The text is
+ * fixed per note (a time, not an age), so a second alert for the same note while the first waits is a duplicate.
+ * `senderTold` is true only when a notice to the sender's live tab went out.
+ */
+export const renderUndeliveredAlert = (note: INote, senderTold: boolean): string => {
+  const id = checkedId(note);
   const to = note.deliveredTo ? party(note.deliveredTo.workspaceId, note.deliveredTo.tabId) : 'unrouted';
-  const since = note.routedAt ?? note.createdAt;
-  return `note ${note.id} from ${party(note.from.workspaceId, note.from.tabId)} to ${to} has not reached its recipient's`
-    + ` composer after ${age(now - since)}; its sender was told`;
+  return `note ${id} from ${party(note.from.workspaceId, note.from.tabId)} to ${to} has not reached its recipient's`
+    + ` composer since it was routed at ${iso(note.routedAt ?? note.createdAt)}; `
+    + (senderTold ? 'its sender was told' : 'its sender has no live tab and was not told');
+};
+
+export const undeliveredDigestEvent = (note: INote, seat: { workspaceId: string; tabId: string }, senderTold: boolean): ITabEventRoute => ({
+  ...seat, kind: 'note-undelivered', class: 'digest', text: renderUndeliveredAlert(note, senderTold),
+});
+
+/**
+ * The sender's digest line for a bounced note: the id, the server's reason and the bounce time. The epic slug is
+ * never typed (any tab may hold `epic:<words>`). Fixed per bounce, so a repeat while the first waits is a duplicate.
+ */
+export const renderBouncedAlert = (note: INote): string => {
+  const id = checkedId(note);
+  if (!isNoteBounceReason(note.routingReason)) throw new Error('routing reason is not a bounce reason');
+  return `note ${id} bounced at ${iso(note.transitionAt)} (${note.routingReason}): no live recipient; it waits for one`
+    + ` until it expires — purplemux note show ${id}`;
+};
+
+/** The digest event for the sender's own tab, or null when the note has no sender tab. */
+export const bouncedDigestEvent = (note: INote): ITabEventRoute | null => {
+  const { workspaceId, tabId } = note.from;
+  if (!workspaceId || !tabId) return null;
+  return { workspaceId, tabId, kind: 'note-bounced', class: 'digest', text: renderBouncedAlert(note) };
 };

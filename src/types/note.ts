@@ -75,6 +75,11 @@ export interface INote {
   /** The inbox item of the reminder to the current recipient, so a re-route can withdraw it. Absent in notes stored before it existed. */
   reminderItemId?: string | null;
   senderNotifiedAt: number | null;
+  /**
+   * When the sender of the current bounce was told, or was found to have no tab to tell. Null while that is owed; a
+   * route or a re-queue resets it. Absent on notes stored before bounce alerts: those owe none.
+   */
+  bounceNotifiedAt?: number | null;
   expiredAt: number | null;
   transitionAt: number;
 }
