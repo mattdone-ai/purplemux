@@ -1,4 +1,6 @@
 import { alertFor, isOrchestratorTab } from '@/lib/alert-policy';
+import { CHAIN_HOLDS_MAX_BYTES, CHAIN_HOLDS_PREFIX, chainDownQuiet, chainHoldsPathError, parseChainHolds } from '@/lib/chain-down-quiet';
+import type { IChainDownContext } from '@/lib/chain-down-quiet';
 import { FINDER_STALE_MS, cachedFinderResults } from '@/lib/constraint-tick';
 import type { TAlertDraft } from '@/lib/alert-policy';
 import { DEFAULT_FLOW_THRESHOLDS, deriveFlowFlags } from '@/lib/flow-flags';
@@ -273,6 +275,7 @@ export const flowFlagScan = (reads: TFlowRead[], thresholds: IFlowThresholds, no
 export const ledgerFlagScan = (
   results: ReadonlyMap<string, IFinderResult>, workspaces: Array<Pick<IWorkspace, 'id'>>, now: number,
   thresholds: TAlarmThresholds | null = resolveThresholds(new Map()).thresholds,
+  chainDown: (workspaceId: string) => IChainDownContext = () => NO_CHAIN_DOWN_CONTEXT,
 ): IFlagScan => {
   const read = new Set<string>();
   const failed = new Set<string>();
@@ -297,7 +300,10 @@ export const ledgerFlagScan = (
         sources: [source, subject], raiseSources: [source],
       }));
     }
+    const context = chainDown(id);
     for (const item of result.stuck) {
+      // A dead or replaced chain is no alarm, and its standing flag clears (vel-WATCHDOG-F6-NOISE).
+      if (chainDownQuiet(item, context, now) !== null) continue;
       const alarm = alarmFor(item, thresholds, now);
       if (!alarm) continue;
       flags.push(raised({
@@ -307,6 +313,26 @@ export const ledgerFlagScan = (
     }
   }
   return { flags, read, failed };
+};
+
+/** No hold list and no layout: every chain-down item alarms unless the finder names a later range of its lane. */
+export const NO_CHAIN_DOWN_CONTEXT: IChainDownContext = { holds: null, tabs: null };
+
+/**
+ * The tab ids and names of a workspace's layout, or null when the fleet view or that layout could not be read this
+ * tick: a holder is judged gone only on a good read.
+ */
+export const layoutTabs = (view: IFleetView | null, workspaceId: string): ReadonlySet<string> | null => {
+  if (!view) return null;
+  const failed = fleetFailures(view);
+  if (failed.has(FLAG_SOURCES.fleetView) || failed.has(FLAG_SOURCES.layout(workspaceId))) return null;
+  const tabs = new Set<string>();
+  for (const row of view.rows) {
+    if (row.workspaceId !== workspaceId) continue;
+    tabs.add(row.tabId);
+    tabs.add(row.tabName);
+  }
+  return tabs;
 };
 
 export const mergeFlagScans = (...scans: IFlagScan[]): IFlagScan => ({
@@ -498,6 +524,11 @@ export interface IFlagAlertDeps {
   dispatch: (draft: TAlertDraft, ctx: IAlertContext) => Promise<unknown>;
   /** `ledger.route.<ws>` and `ledger.threshold.<reason>`; throws when the fleet config cannot be read. */
   ledgerRouting: () => Promise<ILedgerRouting>;
+  /**
+   * The text of a chain hold list (`ledger.chain-holds.<ws>`); null when the file does not exist; throws when it
+   * cannot be read. Absent: no hold list is read, and no chain-down is held.
+   */
+  readChainHolds?: (path: string) => Promise<string | null>;
   /** Hand an event to the tab event router (ADR-0035): urgent is typed at once, digest waits for the tab's digest. */
   routeTabEvent: (event: ITabEventRoute) => Promise<ITabEventRouteResult>;
   /** The portfolio Scrum Master seat a pool flag goes to (SO-10); null with no selection; throws when unreadable. */
@@ -509,6 +540,8 @@ export interface IFlagAlertDeps {
 export interface ILedgerRouting {
   routes: ReadonlyMap<string, IRouteTable>;
   thresholds: TAlarmThresholds;
+  /** Per workspace, the path of its chain hold list (`ledger.chain-holds.<ws>`); absent when none is set. */
+  chainHolds?: ReadonlyMap<string, string>;
 }
 
 /** How far back the repeat guard looks for a held or delivered copy: the tab event log keeps 30 days. */
@@ -570,9 +603,12 @@ export const runFlagAlertTick = async (deps: IFlagAlertDeps, state: IFlagAlertSt
       return null;
     }),
   ]);
+  const holds = await readHoldLists(deps, routing, now);
+  const chainDown = (workspaceId: string): IChainDownContext => ({ holds: holds.get(workspaceId) ?? null, tabs: layoutTabs(view, workspaceId) });
   const baseline = state.readSources.size === 0;
   const scan = mergeFlagScans(
-    fleetFlagScan(view, workspaces), flowFlagScan(reads, thresholds, now), ledgerFlagScan(deps.finderResults(), workspaces, now, routing?.thresholds ?? null),
+    fleetFlagScan(view, workspaces), flowFlagScan(reads, thresholds, now),
+    ledgerFlagScan(deps.finderResults(), workspaces, now, routing?.thresholds ?? null, chainDown),
     poolFlagScan(view),
   );
   const raises = stepFlagAlerts(state, scan, now, config.repeatMinutes * 60_000);
@@ -613,6 +649,63 @@ export const runFlagAlertTick = async (deps: IFlagAlertDeps, state: IFlagAlertSt
     }
   }
   return result;
+};
+
+/**
+ * Each workspace's holds in force, from the hold list its `ledger.chain-holds.<ws>` names. A list that is absent or
+ * unreadable holds nothing, so its chain-down items still alarm (fail open to the alarm); the reason is logged once
+ * per change.
+ */
+const readHoldLists = async (
+  deps: IFlagAlertDeps, routing: ILedgerRouting | null, now: number,
+): Promise<Map<string, ReadonlyMap<string, number>>> => {
+  const holds = new Map<string, ReadonlyMap<string, number>>();
+  const read = deps.readChainHolds;
+  if (!read || !routing?.chainHolds) return holds;
+  for (const [workspaceId, path] of routing.chainHolds) {
+    let problem: string | null = null;
+    try {
+      const text = await read(path);
+      if (text === null) problem = `no hold file at ${path}`;
+      else holds.set(workspaceId, parseChainHolds(text, now));
+    } catch (err) {
+      problem = `hold file ${path} unreadable: ${errorText(err)}`;
+    }
+    const logged = g.__ptChainHoldsLogged ?? (g.__ptChainHoldsLogged = new Map());
+    if ((logged.get(workspaceId) ?? null) !== problem) {
+      logged.set(workspaceId, problem);
+      if (problem) log.warn(`${CHAIN_HOLDS_PREFIX}${workspaceId}: ${problem}; no chain-down of the workspace is held`);
+    }
+  }
+  return holds;
+};
+
+/**
+ * A hold list: a regular file of at most CHAIN_HOLDS_MAX_BYTES of strict UTF-8 with no NUL; null when the file does not
+ * exist. The open is non-blocking and anything but a regular file (a FIFO, a device, a directory) is refused, so a path
+ * that an agent can replace never stalls the alert tick.
+ */
+export const readChainHoldsFile = async (path: string): Promise<string | null> => {
+  const fs = await import('fs/promises');
+  const { constants } = await import('fs');
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error('not a regular file');
+    const buffer = Buffer.alloc(CHAIN_HOLDS_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > CHAIN_HOLDS_MAX_BYTES) throw new Error(`larger than ${CHAIN_HOLDS_MAX_BYTES} bytes`);
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytesRead));
+    if (text.includes('\u0000')) throw new Error('holds a NUL');
+    return text;
+  } finally {
+    await handle.close();
+  }
 };
 
 const dispatchFlag = async (
@@ -833,6 +926,7 @@ const realDeps = (): IFlagAlertDeps => ({
     }
     return routing;
   },
+  readChainHolds: readChainHoldsFile,
   routeTabEvent: async (event) => (await import('@/lib/status-manager')).getStatusManager().routeTabEvent(event),
   scrumMaster: async () => (await import('@/lib/portfolio-store')).getPortfolioStore().currentSelection()?.selection ?? null,
   alarmCopies: async (workspaceId, tabId, opening, since) => (await import('@/lib/ledger-store')).getLedgerStore()
@@ -846,9 +940,14 @@ const realDeps = (): IFlagAlertDeps => ({
 export const parseLedgerRouting = (values: Readonly<Record<string, { value: string }>>): { routing: ILedgerRouting; errors: string[] } => {
   const routes = new Map<string, IRouteTable>();
   const thresholdValues = new Map<string, string>();
+  const chainHolds = new Map<string, string>();
   const errors: string[] = [];
   for (const [key, { value }] of Object.entries(values)) {
-    if (key.startsWith(LEDGER_ALARM_KEYS.routePrefix)) {
+    if (key.startsWith(CHAIN_HOLDS_PREFIX)) {
+      const error = chainHoldsPathError(value);
+      if (error) errors.push(`${key}: ${error}; no chain-down of the workspace is held`);
+      else chainHolds.set(key.slice(CHAIN_HOLDS_PREFIX.length), value);
+    } else if (key.startsWith(LEDGER_ALARM_KEYS.routePrefix)) {
       const { table, error } = parseRouteTable(value);
       if (error) errors.push(`${key}: ${error}; the orchestrator gets every alarm of the workspace`);
       else routes.set(key.slice(LEDGER_ALARM_KEYS.routePrefix.length), table);
@@ -857,7 +956,7 @@ export const parseLedgerRouting = (values: Readonly<Record<string, { value: stri
     }
   }
   const { thresholds, errors: thresholdErrors } = resolveThresholds(thresholdValues);
-  return { routing: { routes, thresholds }, errors: [...errors, ...thresholdErrors] };
+  return { routing: { routes, thresholds, chainHolds }, errors: [...errors, ...thresholdErrors] };
 };
 
 interface IFlagAlertTimer {
@@ -870,6 +969,8 @@ const g = globalThis as unknown as {
   __ptFlagAlertTick?: IFlagAlertTimer;
   __ptFlagAlertConfigLogged?: string | null;
   __ptLedgerRoutingLogged?: string | null;
+  /** Per workspace, the hold list problem last logged (null: none). */
+  __ptChainHoldsLogged?: Map<string, string | null>;
 };
 if (!g.__ptFlagAlertState) g.__ptFlagAlertState = createFlagAlertState();
 if (!g.__ptFlagAlertTick) g.__ptFlagAlertTick = { timer: null, running: null };

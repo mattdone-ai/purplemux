@@ -13,7 +13,7 @@ vi.mock('@/lib/logger', () => {
   return { createLogger: () => logger };
 });
 
-const { createFlagAlertState, ledgerFlagTargets, parseLedgerRouting, runFlagAlertTick } = await import('@/lib/flag-alerts');
+const { createFlagAlertState, layoutTabs, ledgerFlagScan, ledgerFlagTargets, parseLedgerRouting, runFlagAlertTick } = await import('@/lib/flag-alerts');
 const { TabEventRouter } = await import('@/lib/tab-event-router');
 const { DEFAULT_FLOW_THRESHOLDS } = await import('@/lib/flow-flags');
 const { V2_DEFAULT_ROUTE, parseRouteTable } = await import('@/lib/ledger-alarms');
@@ -49,7 +49,7 @@ const finderAt = (at: number, stuck: IBoardStuckItem[]): IFinderResult => ({
 });
 
 /** The flag tick and the real router over one in-memory `tab_events`, on one clock. */
-const fleet = (options: { route?: string | null; thresholds?: Record<string, string> } = {}) => {
+const fleet = (options: { route?: string | null; thresholds?: Record<string, string>; chainHolds?: string } = {}) => {
   let clock = T0;
   const table = memoryTabEvents();
   const atPrompt = new Set(ROWS.map((r) => r.tabId));
@@ -68,6 +68,7 @@ const fleet = (options: { route?: string | null; thresholds?: Record<string, str
   const route = options.route === undefined ? V2_DEFAULT_ROUTE : options.route;
   if (route !== null) values[`ledger.route.${WS}`] = { value: route };
   for (const [reason, value] of Object.entries(options.thresholds ?? {})) values[`ledger.threshold.${reason}`] = { value };
+  if (options.chainHolds !== undefined) values[`ledger.chain-holds.${WS}`] = { value: options.chainHolds };
   const script = {
     stuck: [stuckItem()], rows: ROWS, anomalies: [] as IFinderResult['anomalies'],
     /** A finder answer frozen at this time: older than two ticks, it is an unread source. */
@@ -77,13 +78,16 @@ const fleet = (options: { route?: string | null; thresholds?: Record<string, str
     copiesDown: false,
     routeDown: false,
     dispatchDown: false,
+    /** The hold list's text; null: no file; 'EACCES': the read throws. */
+    holdsText: null as string | null,
+    viewErrors: [] as IFleetView['errors'],
   };
   const deps: IFlagAlertDeps = {
     config: async () => ({ enabled: script.enabled, repeatMinutes: 60 }),
     workspaces: async () => [WORKSPACE],
     fleetView: async (): Promise<IFleetView> => ({
       at: clock, thresholds: { stallMinutes: 30, waitingLongMinutes: 120, unansweredMinutes: 30, composerMinutes: 2 },
-      rows: script.rows, unattributed: [], errors: [],
+      rows: script.rows, unattributed: [], errors: script.viewErrors,
     }),
     flowThresholds: async () => DEFAULT_FLOW_THRESHOLDS,
     readFlow: async () => null,
@@ -95,6 +99,10 @@ const fleet = (options: { route?: string | null; thresholds?: Record<string, str
     ledgerRouting: async () => {
       if (script.routingDown) throw new Error('EIO');
       return parseLedgerRouting(values).routing;
+    },
+    readChainHolds: async () => {
+      if (script.holdsText === 'EACCES') throw new Error('EACCES');
+      return script.holdsText;
     },
     routeTabEvent: async (event) => {
       if (script.routeDown) throw new Error('router down');
@@ -547,5 +555,89 @@ describe('parseLedgerRouting', () => {
     expect([...routing.routes.keys()]).toEqual([WS]);
     expect(routing.thresholds.get('not-armed')).toBe(30);
     expect(errors).toEqual([expect.stringContaining('ledger.route.ws-bad: unknown target $lander')]);
+  });
+});
+
+describe('chain-down quiet (vel-WATCHDOG-F6-NOISE): no alarm for a dead or replaced chain', () => {
+  const HOLDS = '/srv/v2/.v2/chain-holds.txt';
+  const chainDown = (extra: Partial<IBoardStuckItem> = {}) =>
+    stuckItem({ key: 'range:visa:abcdef012345', reason: 'chain-down', holder: 'v2-w-visa', clearInput: 'restart the chain', ...extra });
+  const until = (minutes: number) => new Date(T0 + minutes * MIN).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const kitKeys = (f: ReturnType<typeof fleet>) => f.alarms('tab-kit').map((e) => [(e.at - T0) / MIN, e.text.split(' ')[0]]);
+
+  it('control: a live, unheld range whose holder tab is open still alarms at v2-kit, and repeats hourly', async () => {
+    const f = fleet({ chainHolds: HOLDS });
+    f.script.holdsText = `visa:99999999 held ${until(2 * 24 * 60)} another range\n`;
+    f.script.stuck = [chainDown()];
+    await f.run(0, 70);
+    expect(kitKeys(f)).toEqual([[10, 'range:visa:abcdef012345'], [70, 'range:visa:abcdef012345']]);
+  });
+
+  it('superseded: a range a later range of its lane follows raises nothing, and a standing alarm stops repeating', async () => {
+    const f = fleet();
+    f.script.stuck = [chainDown({ supersededBy: 'range:visa:fedcba987654' }), chainDown({ key: 'range:mc:111111111111', holder: 'v2-w-mc' })];
+    await f.run(0, 30);
+    expect(kitKeys(f)).toEqual([[10, 'range:mc:111111111111']]);
+    f.script.stuck = [chainDown({ key: 'range:mc:111111111111', holder: 'v2-w-mc', supersededBy: 'range:mc:222222222222' })];
+    await f.run(31, 200);
+    expect(kitKeys(f)).toEqual([[10, 'range:mc:111111111111']]);
+  });
+
+  it('held: a range the hold list holds raises nothing until its until passes', async () => {
+    const f = fleet({ chainHolds: HOLDS });
+    f.script.holdsText = `# ORCH\nvisa:abcdef01 held ${until(40)} waits for a fix\n`;
+    f.script.stuck = [chainDown()];
+    await f.run(0, 39);
+    expect(kitKeys(f)).toEqual([]);
+    await f.run(40, 40);
+    expect(kitKeys(f)).toEqual([[40, 'range:visa:abcdef012345']]);
+  });
+
+  it('held: an absent, unreadable or refused hold list holds nothing (fail open to the alarm)', async () => {
+    for (const text of [null, 'EACCES', `visa:abcdef01 held ${until(15 * 24 * 60)} too far\n`]) {
+      const f = fleet({ chainHolds: HOLDS });
+      f.script.holdsText = text;
+      f.script.stuck = [chainDown()];
+      await f.run(0, 10);
+      expect(kitKeys(f)).toEqual([[10, 'range:visa:abcdef012345']]);
+    }
+  });
+
+  it('held: a hold list path that is not absolute is not read', async () => {
+    const f = fleet({ chainHolds: 'chain-holds.txt' });
+    f.script.holdsText = `visa:abcdef01 held ${until(60)} x\n`;
+    f.script.stuck = [chainDown()];
+    await f.run(0, 10);
+    expect(kitKeys(f)).toEqual([[10, 'range:visa:abcdef012345']]);
+  });
+
+  it('holder gone: a range whose holder names no tab of the layout raises nothing; one with an open holder still does', async () => {
+    const f = fleet();
+    f.script.stuck = [chainDown({ holder: 'v2-w-gone' }), chainDown({ key: 'range:mc:111111111111', holder: 'tab-mc' })];
+    await f.run(0, 30);
+    expect(kitKeys(f)).toEqual([[10, 'range:mc:111111111111']]);
+    expect(f.alarms('tab-orch')).toEqual([]);
+  });
+
+  it('holder gone: an unreadable view or layout judges no holder gone (no tab set), so the range still alarms', () => {
+    const view = (errors: IFleetView['errors']): IFleetView => ({
+      at: T0, thresholds: { stallMinutes: 30, waitingLongMinutes: 120, unansweredMinutes: 30, composerMinutes: 2 },
+      rows: ROWS, unattributed: [], errors,
+    });
+    expect(layoutTabs(null, WS)).toBeNull();
+    expect(layoutTabs(view([{ scope: 'Acme-ledger v2', error: 'EIO', workspaceId: WS }]), WS)).toBeNull();
+    expect(layoutTabs(view([{ scope: 'tmux', error: 'down' }]), WS)).toBeNull();
+    const tabs = layoutTabs(view([{ scope: 'other', error: 'EIO', workspaceId: 'ws-other' }]), WS);
+    expect(tabs?.has('tab-visa') && tabs.has('v2-w-visa') && !tabs.has('v2-w-gone')).toBe(true);
+    const scan = ledgerFlagScan(new Map([[WS, finderAt(T0 + 30 * MIN, [chainDown({ holder: 'v2-w-gone' })])]]), [WORKSPACE], T0 + 30 * MIN,
+      undefined, () => ({ holds: null, tabs: null }));
+    expect(scan.flags.map((flag) => flag.subject)).toEqual(['range:visa:abcdef012345']);
+  });
+
+  it('quiets only chain-down: a not-armed wait whose holder is gone still reaches the orchestrator', async () => {
+    const f = fleet();
+    f.script.stuck = [stuckItem({ holder: 'v2-w-gone', supersededBy: 'range:visa:fedcba987654' })];
+    await f.run(0, 20);
+    expect(f.alarms('tab-orch').map((e) => e.rule)).toEqual(['not-armed']);
   });
 });

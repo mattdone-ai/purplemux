@@ -290,6 +290,29 @@ describe('the constraint (AC 2, consult 03 A1)', () => {
     });
   });
 
+  it('names a later range of the same lane as supersededBy (vel-WATCHDOG-F6-NOISE); a closed later range counts', () => {
+    const down = { waitReason: 'chain-down' as const, waitSince: NOW - 5 * HOUR };
+    const result = deriveConstraint(ledger({
+      items: [
+        item('range:visa:aaaaaaaaaaaa', { ...down, openedAt: NOW - 30 * HOUR }),
+        item('range:visa:bbbbbbbbbbbb', { ...down, openedAt: NOW - 20 * HOUR }),
+        item('range:visa:cccccccccccc', { openedAt: NOW - 10 * HOUR, closedAt: NOW - 2 * HOUR, state: 'landed' }),
+        item('range:mc:dddddddddddd', { ...down, openedAt: NOW - 30 * HOUR }),
+        item('range:kit:eeeeeeeeeeee', { ...down, openedAt: NOW - 30 * HOUR }),
+        item('range:kit:ffffffffffff', { openedAt: NOW - 30 * HOUR }),
+        item('gate:visa:1', { ...down, openedAt: NOW - 30 * HOUR }),
+      ],
+    }), null, null, null, NOW);
+    expect(Object.fromEntries(result.stuck.map((s) => [s.key, s.supersededBy ?? null]))).toEqual({
+      'range:visa:aaaaaaaaaaaa': 'range:visa:cccccccccccc',
+      'range:visa:bbbbbbbbbbbb': 'range:visa:cccccccccccc',
+      // The only range of its lane, and a range opened at the same time as another: neither is superseded.
+      'range:mc:dddddddddddd': null,
+      'range:kit:eeeeeeeeeeee': null,
+      'gate:visa:1': null,
+    });
+  });
+
   it('is null when nothing waited in 24 h', () => {
     const result = deriveConstraint(ledger({ intervals: [interval('range:a:1', 'not-armed', NOW - 50 * HOUR, NOW - 40 * HOUR)] }), null, null, null, NOW);
     expect(result.constraint).toBeNull();

@@ -39,6 +39,7 @@ describe('ledger alarm fleet keys', () => {
     [admin, 'ledger.threshold.not-armed', '45'],
     [orchestrator('ws-a'), 'ledger.threshold.chain-down', 'off'],
     [orchestrator('ws-a'), 'ledger.threshold.red-main', '0'],
+    [admin, 'ledger.chain-holds.ws-ldhziO', '/srv/v2/.v2/chain-holds.txt'],
   ])('%#: sets %s=%s', async (caller, key, value) => {
     const { putValue } = await import('@/lib/fleet-config-http');
     expect(await putValue(caller, key, { value }, authority)).toMatchObject({ key, changed: true });
@@ -53,8 +54,17 @@ describe('ledger alarm fleet keys', () => {
     ['ledger.threshold.unknown', '5', 'names no wait reason'],
     ['ledger.route.', '$holder=not-armed', 'names no workspace'],
     ['ledger.route.ws.a', '$holder=not-armed', 'names no workspace'],
+    ['ledger.chain-holds.ws-ldhziO', 'chain-holds.txt', 'must be an absolute file path'],
+    ['ledger.chain-holds.ws-ldhziO', '/srv/../etc/passwd', 'must be an absolute file path'],
+    ['ledger.chain-holds.', '/srv/v2/.v2/chain-holds.txt', 'names no workspace'],
   ])('%s=%j is refused (%s)', async (key, value, message) => {
     const { putValue } = await import('@/lib/fleet-config-http');
     await expect(putValue(admin, key, { value }, authority)).rejects.toMatchObject({ code: 'config-invalid', message: expect.stringContaining(message) });
+  });
+
+  it('ledger.chain-holds.<ws> makes the server read a file: the admin token sets it, an orchestrator cannot', async () => {
+    const { putValue } = await import('@/lib/fleet-config-http');
+    await expect(putValue(orchestrator('ws-ldhziO'), 'ledger.chain-holds.ws-ldhziO', { value: '/srv/v2/.v2/chain-holds.txt' }, authority))
+      .rejects.toMatchObject({ code: 'forbidden' });
   });
 });

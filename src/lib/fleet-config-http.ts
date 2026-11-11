@@ -15,6 +15,7 @@ import {
   valueOf,
 } from '@/lib/fleet-config-store';
 import { LEDGER_ALARM_KEYS, parseRouteTable, parseThresholdValue } from '@/lib/ledger-alarms';
+import { CHAIN_HOLDS_PREFIX, chainHoldsPathError } from '@/lib/chain-down-quiet';
 import { LEDGER_WAIT_REASONS } from '@/lib/ledger';
 import { leaseAuthority } from '@/lib/lease-http';
 import { createLogger } from '@/lib/logger';
@@ -52,7 +53,7 @@ const setterOf = (caller: ICaller): IFleetConfigSetter => ({
  * not set for every other workspace (ADR-0027 ruling R2). `standup.` stays here: since F6 no such key is read,
  * and every write of one is refused.
  */
-export const ADMIN_ONLY_KEYS = /^(remote|tabs|attention|alerts|mission|pool|curator|standup|hook|turn-end)\./;
+export const ADMIN_ONLY_KEYS = /^(remote|tabs|attention|alerts|mission|pool|curator|standup|hook|turn-end|ledger\.chain-holds)\./;
 
 const POOL_SLOTS_KEY = /^pool\.slots\.[a-z0-9._-]+\.(gate|build|mutation|browser|test-service|tab)$/;
 const POOL_ALIAS_KEY = /^pool\.(fallback|gate-host)\.[A-Za-z0-9._-]+$/;
@@ -179,6 +180,14 @@ const checkTurnEndValue = (key: string, value: string): void => {
 
 /** The alarm keys (ADR-HFL-03 decision 1): a route table parses whole; a threshold names a producer reason and holds minutes or `off`. */
 const checkLedgerValue = (key: string, value: string): void => {
+  if (key.startsWith(CHAIN_HOLDS_PREFIX)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(key.slice(CHAIN_HOLDS_PREFIX.length))) {
+      throw new FleetConfigError('config-invalid', `${key} names no workspace: ${CHAIN_HOLDS_PREFIX}<workspaceId>`);
+    }
+    const error = chainHoldsPathError(value);
+    if (error) throw new FleetConfigError('config-invalid', `${key} ${error}`);
+    return;
+  }
   if (key.startsWith(LEDGER_ALARM_KEYS.routePrefix)) {
     if (!/^[A-Za-z0-9_-]+$/.test(key.slice(LEDGER_ALARM_KEYS.routePrefix.length))) {
       throw new FleetConfigError('config-invalid', `${key} names no workspace: ledger.route.<workspaceId>`);

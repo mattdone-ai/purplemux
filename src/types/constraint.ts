@@ -187,6 +187,8 @@ export interface IBoardStuckItem {
   clearInput: string | null;
   critical: boolean;
   reasonLabel: string;
+  /** A `range:<lane>:<key>` item only: the key of the latest range of the same lane opened after it, if any. */
+  supersededBy?: string;
 }
 
 export interface IBoardOnTrack {

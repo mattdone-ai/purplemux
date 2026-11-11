@@ -1,6 +1,7 @@
 // The constraint finder (ADR-0034, ADR-HFL-02 decision 1). One pure function: no Node import, no
 // I/O, no clock. The tick (`constraint-tick.ts`) reads the inputs and caches the answer.
 import { onTrackFor } from '@/lib/board-forecast';
+import { rangeParts } from '@/lib/chain-down-quiet';
 import { reasonLabel, stageLabel, trendLabel } from '@/lib/constraint-labels';
 import { isFlowStale } from '@/lib/flow';
 import { LEDGER_UNKNOWN_ITEM_TYPES, UNKNOWN_REASON, clippedMs, percentile, stageOfReason } from '@/lib/ledger';
@@ -253,14 +254,36 @@ export const pickConstraint = (
 };
 
 /** Items waiting now, oldest wait first; the board caps the list after any holder filter. */
-export const stuckItems = (ledger: IFinderLedgerInput, critical: ReadonlySet<string>): IBoardStuckItem[] =>
-  ledger.items
+/**
+ * Per lane, the latest-opened `range:<lane>:<key>` item the ledger holds (open, or closed in the last 14 days). A
+ * range that a later range of its lane follows is superseded: the lane's chain moved on (vel-WATCHDOG-F6-NOISE).
+ */
+const latestRangeByLane = (items: readonly ILedgerItem[]): Map<string, ILedgerItem> => {
+  const latest = new Map<string, ILedgerItem>();
+  for (const item of items) {
+    const parts = item.itemType === 'range' ? rangeParts(item.itemKey) : null;
+    if (!parts) continue;
+    const seen = latest.get(parts.lane);
+    if (!seen || item.openedAt > seen.openedAt || (item.openedAt === seen.openedAt && item.itemKey > seen.itemKey)) latest.set(parts.lane, item);
+  }
+  return latest;
+};
+
+export const stuckItems = (ledger: IFinderLedgerInput, critical: ReadonlySet<string>): IBoardStuckItem[] => {
+  const latest = latestRangeByLane(ledger.items);
+  return ledger.items
     .filter((item) => item.closedAt === null && item.waitReason !== null && item.waitSince !== null)
-    .map((item) => ({
-      key: item.itemKey, itemType: item.itemType, holder: item.holder, reason: item.waitReason!, since: item.waitSince!,
-      clearInput: item.clearInput, critical: critical.has(item.itemKey), reasonLabel: reasonLabel(item.waitReason!),
-    }))
+    .map((item) => {
+      const parts = item.itemType === 'range' ? rangeParts(item.itemKey) : null;
+      const later = parts ? latest.get(parts.lane) : undefined;
+      return {
+        key: item.itemKey, itemType: item.itemType, holder: item.holder, reason: item.waitReason!, since: item.waitSince!,
+        clearInput: item.clearInput, critical: critical.has(item.itemKey), reasonLabel: reasonLabel(item.waitReason!),
+        ...(later && later.itemKey !== item.itemKey && later.openedAt > item.openedAt ? { supersededBy: later.itemKey } : {}),
+      };
+    })
     .sort((a, b) => a.since - b.since || a.key.localeCompare(b.key));
+};
 
 const MC_ITEM_PREFIX = 'mc-item:';
 
