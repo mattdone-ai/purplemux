@@ -255,12 +255,16 @@ export const pickConstraint = (
 
 /** Items waiting now, oldest wait first; the board caps the list after any holder filter. */
 /**
- * Per lane, the latest-opened `range:<lane>:<key>` item the ledger holds (open, or closed in the last 14 days). A
- * range that a later range of its lane follows is superseded: the lane's chain moved on (vel-WATCHDOG-F6-NOISE).
+ * Per lane, the latest-opened `range:<lane>:<key>` item that closed `landed` (the ledger holds closed items for 14 days).
+ * A range that a later-opened LANDED range of its lane follows is superseded: ranges land in lane order, so the lane's
+ * chain really moved past it (vel-WATCHDOG-F6-NOISE). A later range that is still open (it queues behind the item,
+ * own-lane-order or an --after-landed guard) or that closed in any other state (dropped, withdrawn) supersedes nothing:
+ * the item can be the lane's real blocker (CONFIRM CONCERN on #75).
  */
-const latestRangeByLane = (items: readonly ILedgerItem[]): Map<string, ILedgerItem> => {
+const latestLandedRangeByLane = (items: readonly ILedgerItem[]): Map<string, ILedgerItem> => {
   const latest = new Map<string, ILedgerItem>();
   for (const item of items) {
+    if (item.closedAt === null || item.state !== 'landed') continue;
     const parts = item.itemType === 'range' ? rangeParts(item.itemKey) : null;
     if (!parts) continue;
     const seen = latest.get(parts.lane);
@@ -270,7 +274,7 @@ const latestRangeByLane = (items: readonly ILedgerItem[]): Map<string, ILedgerIt
 };
 
 export const stuckItems = (ledger: IFinderLedgerInput, critical: ReadonlySet<string>): IBoardStuckItem[] => {
-  const latest = latestRangeByLane(ledger.items);
+  const latest = latestLandedRangeByLane(ledger.items);
   return ledger.items
     .filter((item) => item.closedAt === null && item.waitReason !== null && item.waitSince !== null)
     .map((item) => {

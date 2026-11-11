@@ -1,7 +1,8 @@
 // Browser-safe: when a `chain-down` wait raises no alarm (vel-WATCHDOG-F6-NOISE). A v2 range keeps its `chain-down`
 // wait open after its chain dies or a later range of its lane replaces it, so the ledger alone alarmed on dead work.
 // Three rules quiet it; every other chain-down still alarms:
-//   superseded   a later range of the same lane is in the ledger (the finder names it, `IBoardStuckItem.supersededBy`);
+//   superseded   a later-opened range of the same lane LANDED (the finder names it, `IBoardStuckItem.supersededBy`);
+//                a later range that is open or closed in another state supersedes nothing;
 //   held         the workspace's chain hold list (`ledger.chain-holds.<ws>`) holds the range with an until in force;
 //   holder-gone  the item names a holder that no tab of the workspace's readable layout names.
 // The hold list is the file the Scrum Master watcher reads for CHAIN-OLD. This parser holds exactly the lines that

@@ -290,7 +290,7 @@ describe('the constraint (AC 2, consult 03 A1)', () => {
     });
   });
 
-  it('names a later range of the same lane as supersededBy (vel-WATCHDOG-F6-NOISE); a closed later range counts', () => {
+  it('names a later-opened LANDED range of the same lane as supersededBy (vel-WATCHDOG-F6-NOISE)', () => {
     const down = { waitReason: 'chain-down' as const, waitSince: NOW - 5 * HOUR };
     const result = deriveConstraint(ledger({
       items: [
@@ -310,6 +310,34 @@ describe('the constraint (AC 2, consult 03 A1)', () => {
       'range:mc:dddddddddddd': null,
       'range:kit:eeeeeeeeeeee': null,
       'gate:visa:1': null,
+    });
+  });
+
+  it('a later range that is open or closed in another state than landed supersedes nothing (CONFIRM CONCERN on #75)', () => {
+    const down = { waitReason: 'chain-down' as const, waitSince: NOW - 5 * HOUR };
+    const result = deriveConstraint(ledger({
+      items: [
+        // The head of its lane: its chain died, and the later ranges queue behind it (own-lane-order, --after-landed).
+        item('range:visa:aaaaaaaaaaaa', { ...down, openedAt: NOW - 30 * HOUR }),
+        item('range:visa:bbbbbbbbbbbb', { waitReason: 'own-lane-order' as const, waitSince: NOW - 4 * HOUR, openedAt: NOW - 20 * HOUR }),
+        item('range:visa:cccccccccccc', { waitReason: 'guard-hold' as const, waitSince: NOW - 4 * HOUR, openedAt: NOW - 10 * HOUR }),
+        // A later range that was dropped, and an older landed range: neither moves the lane past the item.
+        item('range:mc:dddddddddddd', { ...down, openedAt: NOW - 30 * HOUR }),
+        item('range:mc:eeeeeeeeeeee', { openedAt: NOW - 20 * HOUR, closedAt: NOW - 2 * HOUR, state: 'dropped' }),
+        item('range:mc:ffffffffffff', { openedAt: NOW - 40 * HOUR, closedAt: NOW - 35 * HOUR, state: 'landed' }),
+        // A reopened later range keeps state 'landed' but is open again: it supersedes nothing (review r1 nit 1).
+        item('range:visa:dddddddddddd', { openedAt: NOW - 5 * HOUR, state: 'landed' }),
+        // A landed range opened at the same moment as the down head: not strictly later, so nothing (review r1 nit 2).
+        item('range:kit:111111111111', { ...down, openedAt: NOW - 30 * HOUR }),
+        item('range:kit:222222222222', { openedAt: NOW - 30 * HOUR, closedAt: NOW - 1 * HOUR, state: 'landed' }),
+      ],
+    }), null, null, null, NOW);
+    expect(Object.fromEntries(result.stuck.map((s) => [s.key, s.supersededBy ?? null]))).toEqual({
+      'range:visa:aaaaaaaaaaaa': null,
+      'range:visa:bbbbbbbbbbbb': null,
+      'range:visa:cccccccccccc': null,
+      'range:mc:dddddddddddd': null,
+      'range:kit:111111111111': null,
     });
   });
 
