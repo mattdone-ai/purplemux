@@ -251,6 +251,18 @@ describe('note point (G7 step 0)', () => {
     expect(f.audits.at(-1)).toMatchObject({ event: 'note-pointer', result: 'not-verified' });
   });
 
+  it('a composer that was not clean: no Enter, not-ready answer, the stamp removed so the note may be pointed again', async () => {
+    const note = await send();
+    port.outcome = 'not-clean';
+    const refused = svc.point(B, note.id, port);
+    await expectCode(refused, 'note-point-not-ready');
+    await expect(refused).rejects.toThrow(/composer-not-clean/);
+    expect(f.note(note.id)).toMatchObject({ deliveredAt: null, pointer: null });
+    port.outcome = 'submitted';
+    f.now += NOTE_POINT_BOUND_MS;
+    await expect(svc.point(B, note.id, port)).resolves.toMatchObject({ submitted: true });
+  });
+
   it('the stamp is written before the typing: a crash mid-typing never types the note again', async () => {
     const note = await send();
     let seenDuringTyping: unknown = null;

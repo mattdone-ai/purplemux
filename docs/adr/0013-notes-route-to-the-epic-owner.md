@@ -142,8 +142,10 @@ APPROVE-WITH-CHANGES; the changes are in this amendment.
   - its line has not reached that composer;
   - its notice is queued or held by a recoverable hold;
   - it has no pointer stamp on that route.
-- One attempt per target per pass, oldest first. Every check runs again inside the target's dispatch lock and the
-  notes lock.
+- Per target per pass, oldest first, and every check runs again inside the target's dispatch lock and the notes lock.
+  The note's own checks run before the target's. A note refused for itself (disarmed, or its line refused) keeps its
+  reason and does not block the next owner item for that tab (review round 2). A refusal of the target, a typing, or
+  the spacing ends the target's turn: the next note would meet the same tab.
 - The line says that the sender flagged it, not that the owner decided:
   `[purplemux note <id>] from <ws>/<tab> at <time>, flagged owner item, needs action now: run purplemux note show <id>
   now, then purplemux note ack <id>`.
@@ -153,8 +155,10 @@ APPROVE-WITH-CHANGES; the changes are in this amendment.
 - Bounds:
   - At least 60 s (`OWNER_POINTER_SPACING_MS`) between any two pointer lines at one tab, manual or owner item, from
     any sender.
-  - At most 5 armed owner items per sender (`note-cap`, `owner-item-cap`). The cap counts armed items, not open ones,
-    so a note that was read but never acked does not block the sender for 14 days.
+  - At most 5 armed owner items per sender (`note-cap`, `owner-item-cap`). The cap counts armed items (routed, not yet
+    in a composer, pointer not spent), not open ones, so a note that was read but never acked does not block the sender
+    for 14 days, and a bounced one does not count either (review round 2). When bounced notes route at once, the 60 s
+    spacing bounds what reaches one tab.
 - The sender's `undelivered` notice comes at 5 min for an owner item. Ordinary notes keep 15 min, because the window
   holds them back up to 10 min by design. Each notice states its own minutes.
 
@@ -167,12 +171,17 @@ APPROVE-WITH-CHANGES; the changes are in this amendment.
 - The old submit pressed Enter, waited 600 ms and pressed Enter again without looking. A mid-turn agent can raise a
   permission dialog in that gap, and the second Enter would answer it. The pointer now works in these steps:
   1. Type the line without Enter.
-  2. Capture the screen. Press Enter only when the capture shows the whole line in the box and there is no option
-     list and no permission request.
-  3. Capture again. If the whole line is still in the box, press Enter once more after that capture.
+  2. Capture the screen. Press Enter only when the box holds exactly the line and nothing else (whitespace aside), and
+     there is no option list and no permission request.
+  3. Capture again. If the box still holds exactly the line, press Enter once more after that capture.
   4. If the line is still in the box after the second Enter, the outcome is `stranded`.
-  5. If the line was never seen whole in the box, a dialog appeared, or a capture failed, the outcome is
-     `unverified`. This is never a receipt.
+  5. If the line was never seen in the box, a dialog appeared, or a capture failed, the outcome is `unverified`. This
+     is never a receipt.
+  6. Review round 2: if the box holds any other text (a person typed before, after or inside the line), the outcome
+     is `not-clean`: no Enter, nothing cleared, the stamp removed. The note stays armed with the reason
+     `composer-not-clean`, and the next attempt waits for an empty composer (`note point` answers
+     `note-point-not-ready`, exit 5). A person who then submits their draft with the line delivers it without a
+     receipt, and the note may take one more line later: one extra id-only line, never a submitted draft.
 - An owner line that is `stranded` or `unverified` sends its sender an urgent `note-pointer-spent` line, and the Scrum
   Master seat gets a digest line. The note leaves the armed set, so it does not block the next one.
 - `note point` answers `not-verified` (exit 1) where the screen could not confirm the line.

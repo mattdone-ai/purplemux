@@ -7,7 +7,10 @@ export type TInboxStateCounts = Record<TInboxState, number>;
 export interface IInboxCounts {
   /** Every retained item of the workspace, by state. */
   total: TInboxStateCounts;
-  /** Held items by the first word of their reason (`stranded-in-composer`, `composer-not-empty`, …). */
+  /**
+   * Held items by the first word of their reason (`stranded-in-composer`, `composer-not-empty`, …). A null-prototype
+   * object: a reason head is never read as an inherited key (`constructor`, `__proto__`).
+   */
   heldBy: Record<string, number>;
   /** The same counts per target tab. */
   tabs: Record<string, TInboxStateCounts>;
@@ -22,7 +25,7 @@ export const heldReasonHead = (reason: string | null): string => {
 };
 
 export const countInbox = (items: readonly IInboxItem[], workspaceId: string): IInboxCounts => {
-  const counts: IInboxCounts = { total: zero(), heldBy: {}, tabs: {} };
+  const counts: IInboxCounts = { total: zero(), heldBy: Object.create(null) as Record<string, number>, tabs: Object.create(null) as Record<string, TInboxStateCounts> };
   for (const item of items) {
     if (item.targetWorkspaceId !== workspaceId) continue;
     counts.total[item.state] += 1;

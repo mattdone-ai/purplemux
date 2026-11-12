@@ -29,6 +29,16 @@ describe('countInbox', () => {
     });
   });
 
+  it('a reason head is never read as an inherited key', () => {
+    const counts = countInbox([item('i-1', 'tab-a', 'held', 'constructor'), item('i-2', 'tab-a', 'held', '__proto__ x'),
+      item('i-3', 'toString', 'queued')], 'ws-1');
+    expect(Object.getPrototypeOf(counts.heldBy)).toBeNull();
+    expect(Object.getPrototypeOf(counts.tabs)).toBeNull();
+    expect(counts.heldBy.constructor).toBe(1);
+    expect(Object.keys(counts.heldBy).sort()).toEqual(['__proto__', 'constructor']);
+    expect(JSON.parse(JSON.stringify(counts)).tabs.toString).toEqual({ queued: 1, held: 0, delivered: 0, dropped: 0 });
+  });
+
   it('an empty inbox counts zero', () => {
     expect(countInbox([], 'ws-1')).toEqual({ total: { queued: 0, held: 0, delivered: 0, dropped: 0 }, heldBy: {}, tabs: {} });
   });

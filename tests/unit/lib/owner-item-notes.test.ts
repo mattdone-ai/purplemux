@@ -168,6 +168,15 @@ describe('owner item: who may set it', () => {
     expect(plain).not.toHaveProperty('ownerPointer');
   });
 
+  it('bounced owner items arm nothing and do not count toward the cap', async () => {
+    f.orchestrators.delete('ws-3');
+    for (let i = 0; i < 5; i += 1) {
+      expect((await svc.send(B, { toWorkspace: 'ws-3', subject: `b${i}`, body: 'b', ownerItem: true })).ownerPointer)
+        .toBe('inactive:target-coordinator-unavailable');
+    }
+    await expect(svc.send(B, { toWorkspace: 'ws-1', subject: 'routed', body: 'b', ownerItem: true })).resolves.toMatchObject({ ownerPointer: 'armed' });
+  });
+
   it('caps a sender at 5 armed owner items; one that reached a composer frees its slot', async () => {
     const sent = [];
     for (let i = 0; i < 5; i += 1) sent.push(await svc.send(B, { toWorkspace: 'ws-1', subject: `s${i}`, body: 'b', ownerItem: true }));
@@ -290,6 +299,58 @@ describe('owner item: the pointer', () => {
     f.now += OWNER_POINTER_SPACING_MS;
     await svc.tick();
     expect(port.typed.map((t) => (t.line.includes(first.id) ? 'first' : t.line.includes(second.id) ? 'second' : '?'))).toEqual(['first', 'second']);
+  });
+
+  it('a composer that was not clean: no Enter, the note stays armed with its reason, and is pointed again later', async () => {
+    port.outcome = 'not-clean';
+    const note = await owner();
+    expect(f.note(note.id)).toMatchObject({ deliveredAt: null, pointer: null });
+    expect(f.withdrawn).toEqual([]);
+    expect(f.spent).toEqual([]);
+    expect(svc.ownerItemReason(note.id)).toBe('composer-not-clean');
+    expect(f.audits.filter((a) => a.event === 'note-pointer')).toEqual([
+      expect.objectContaining({ result: 'not-clean', detail: 'composer-not-clean' })]);
+    // Text was typed, so the 60 s spacing holds; then the composer is clean again and the line goes once.
+    port.outcome = 'submitted';
+    await svc.tick();
+    expect(port.typed).toHaveLength(1);
+    f.now += OWNER_POINTER_SPACING_MS;
+    await svc.tick();
+    expect(port.typed).toHaveLength(2);
+    expect(f.note(note.id).pointer).toMatchObject({ outcome: 'submitted' });
+    expect(svc.ownerItemReason(note.id)).toBeNull();
+  });
+
+  it('one refused note at the head of a target does not block the later owner items for that tab', async () => {
+    port.refusal = { code: 'note-point-not-ready', reason: 'composer-not-empty' };
+    const head = await owner(B);
+    f.now += 1000;
+    const next = await owner(C);
+    port.refusal = null;
+    // The head note's line is refused for itself: its stored sender tab fails the line grammar.
+    f.state = { notes: f.state.notes.map((n) => (n.id === head.id ? { ...n, from: { ...n.from, tabId: 'tab bad;id' } } : n)) };
+    await svc.tick();
+    expect(port.typed.map((t) => t.line.includes(next.id))).toEqual([true]);
+    expect(svc.ownerItemReason(head.id)).toMatch(/^line-refused:/);
+    expect(f.note(head.id)).toMatchObject({ state: 'delivered', deliveredAt: null });
+    expect(f.note(head.id).pointer ?? null).toBeNull();
+    // A refusal of the target itself ends the target's turn: the next note would meet the same tab.
+    const third = await owner(B);
+    port.refusal = { code: 'note-point-not-ready', reason: 'native-prompt-active' };
+    f.now += OWNER_POINTER_SPACING_MS;
+    const attempts: string[] = [];
+    class CountingPort extends FakePort {
+      override async withTarget<T>(ws: string, tab: string, work: (target: INotePointTarget) => Promise<T>): Promise<T | null> {
+        attempts.push(`${ws}/${tab}`);
+        return super.withTarget(ws, tab, work);
+      }
+    }
+    const counting = new CountingPort();
+    counting.refusal = port.refusal;
+    f.port = counting;
+    await new NotesService(f.deps()).tick();
+    expect(attempts).toHaveLength(2); // the head is disarmed for itself, then `third` meets the refusing tab: stop
+    expect(f.note(third.id).deliveredAt).toBeNull();
   });
 
   it('a restart does not retype: the stamp is persisted before the typing', async () => {

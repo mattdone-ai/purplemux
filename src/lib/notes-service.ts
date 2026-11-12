@@ -128,7 +128,8 @@ type TOwnerAttempt =
   | { result: 'disarmed'; reason: string }
   | { result: 'spacing' }
   | { result: 'refused'; reason: string }
-  | { result: TPointerTyped; detail?: string; note: INote; at: number };
+  | { result: Exclude<TPointerTyped, 'not-clean'>; detail?: string; note: INote; at: number }
+  | { result: 'not-clean'; reason: string };
 
 export interface ILiveTabs {
   tabs: ReadonlyArray<{ workspaceId: string; tabId: string }>;
@@ -776,8 +777,9 @@ export class NotesService {
         throw new NoteError('note-cap', `this sender already has ${mine} open notes (the limit is ${NOTE_OPEN_PER_SENDER}); wait for acks or expiry`);
       }
       if (ownerItem) {
-        // Armed, not open: a note the recipient read but never acked must not block the sender for 14 days.
-        const armed = state.notes.filter((n) => n.ownerItem && OPEN_STATES.has(n.state) && n.deliveredAt === null && !pointerSpent(n)
+        // Armed, not open: a note the recipient read but never acked must not block the sender for 14 days, and a
+        // bounced one (no recipient yet) arms nothing. The 60 s spacing bounds what reaches one tab when they route.
+        const armed = state.notes.filter((n) => n.ownerItem && n.state === 'delivered' && n.deliveredAt === null && !pointerSpent(n)
           && n.from.workspaceId === note.from.workspaceId && n.from.tabId === note.from.tabId).length;
         if (armed >= OWNER_ITEMS_ARMED_PER_SENDER) {
           throw new NoteError('note-cap', `owner-item-cap: this sender already has ${armed} owner items not yet in a composer`
@@ -1078,6 +1080,10 @@ export class NotesService {
           const now = this.deps.now();
           this.pointBounds.stamp(id, to, now);
           await this.recordPointer(id, stamp, typed.outcome, now);
+          if (typed.outcome === 'not-clean') {
+            return new NoteError('note-point-not-ready', `${to.workspaceId}/${to.tabId}: composer-not-clean: the box held other`
+              + ' text beside the line, so no Enter was pressed and nothing was cleared; the note stays armed');
+          }
           if (typed.outcome !== 'submitted') {
             return { status: 'sent', submitted: false, noteId: id, target: to, cliState: typed.cliState, line,
               notSubmitted: typed.outcome === 'stranded' ? 'typed-not-submitted' : 'not-verified' } satisfies INotePointResult;
@@ -1119,11 +1125,19 @@ export class NotesService {
     });
   }
 
-  /** The typing's outcome on the stamp; a submitted line is the note's composer receipt. Returns the note as stored. */
+  /**
+   * The typing's outcome on the stamp; a submitted line is the note's composer receipt. A `not-clean` typing (other text
+   * in the box, no Enter) removes the stamp, so the note stays armed: the next attempt waits for an empty composer.
+   * Returns the note as stored.
+   */
   private async recordPointer(id: string, stamp: INotePointerStamp, outcome: TPointerTyped, at: number): Promise<INote | null> {
     return this.deps.mutate(async (state) => {
       const current = state.notes.find((n) => n.id === id);
       if (!current) return { state, value: null };
+      if (outcome === 'not-clean') {
+        const ours = current.pointer?.route === stamp.route && current.pointer.at === stamp.at && current.pointer.by === stamp.by;
+        return ours ? { state: replaceNote(state, { ...current, pointer: null }), value: { ...current, pointer: null } } : { state, value: current };
+      }
       let next = pointerStamped(current, { ...stamp, outcome });
       if (outcome === 'submitted' && next.deliveredAt === null) next = reachedComposer(next, at);
       return { state: replaceNote(state, next), value: next };
@@ -1166,7 +1180,7 @@ export class NotesService {
     const now = this.deps.now();
     const { notes } = await this.deps.read();
     const items = new Map((await this.deps.inboxItems()).map((item) => [item.id, item]));
-    const heads = new Map<string, INote>();
+    const byTarget = new Map<string, INote[]>();
     const armedIds = new Set<string>();
     for (const note of [...notes].sort((a, b) => a.createdAt - b.createdAt)) {
       if (!note.ownerItem || note.state !== 'delivered' || !note.deliveredTo || note.deliveredAt !== null || pointerSpent(note)) continue;
@@ -1175,19 +1189,26 @@ export class NotesService {
       if (!item || !(item.state === 'queued' || isRecoverableHold(item, now))) continue;
       armedIds.add(note.id);
       const key = routeKey(note.deliveredTo);
-      if (!heads.has(key)) heads.set(key, note);
+      byTarget.set(key, [...(byTarget.get(key) ?? []), note]);
     }
     // The refusal memory holds armed notes only, so it stays as small as the armed set.
     for (const id of this.ownerRefusals.keys()) if (!armedIds.has(id)) this.ownerRefusals.delete(id);
-    if (heads.size === 0) return;
+    if (byTarget.size === 0) return;
     const port = await this.deps.pointPort!();
-    for (const note of heads.values()) {
-      const target = note.deliveredTo!;
-      if (this.pointBounds.targetBusy(target, this.deps.now())) continue;
-      try {
-        await this.pointOwnerItem(note.id, target, port);
-      } catch (err) {
-        log.warn(`owner-item pointer for note ${note.id} failed: ${err instanceof Error ? err.message : err}`);
+    for (const queue of byTarget.values()) {
+      // Oldest first. A note refused for itself (disarmed, or its line refused) does not block the next one; a
+      // refusal of the target, a typing or the spacing ends this target's turn: the next note would meet the same tab.
+      for (const note of queue) {
+        const target = note.deliveredTo!;
+        if (this.pointBounds.targetBusy(target, this.deps.now())) break;
+        let result: TOwnerAttempt['result'] | 'error';
+        try {
+          result = await this.pointOwnerItem(note.id, target, port);
+        } catch (err) {
+          log.warn(`owner-item pointer for note ${note.id} failed: ${err instanceof Error ? err.message : err}`);
+          result = 'error';
+        }
+        if (result !== 'disarmed' && result !== 'error') break;
       }
     }
   }
@@ -1212,7 +1233,7 @@ export class NotesService {
     return recipient;
   }
 
-  private async pointOwnerItem(id: string, first: { workspaceId: string; tabId: string }, port: INotePointPort): Promise<void> {
+  private async pointOwnerItem(id: string, first: { workspaceId: string; tabId: string }, port: INotePointPort): Promise<TOwnerAttempt['result']> {
     const attempt = await port.withTarget(first.workspaceId, first.tabId, async (target): Promise<TOwnerAttempt> => {
       const release = await this.acquireOperation();
       try {
@@ -1221,18 +1242,25 @@ export class NotesService {
         if (typeof armed === 'string') return { result: 'disarmed', reason: armed };
         if (routeKey(armed) !== routeKey(first)) return { result: 'disarmed', reason: 'route-moving' };
         if (this.pointBounds.targetBusy(armed, this.deps.now())) return { result: 'spacing' };
+        // The note's own checks first (no I/O), then the target's: a refusal of the note does not wait on the tab.
+        let line: string;
+        try {
+          line = renderNotePointerLine({
+            noteId: note!.id, fromWorkspaceId: note!.from.workspaceId, fromTabId: note!.from.tabId,
+            fromHuman: false, fromOwner: note!.admission?.mode === 'owner', sentAt: note!.createdAt, ownerItem: true,
+          });
+        } catch (err) {
+          return { result: 'disarmed', reason: `line-refused:${err instanceof Error ? err.message : String(err)}` };
+        }
         const refusal = await target.refusal();
         if (refusal) return { result: 'refused', reason: refusal.reason };
-        const line = renderNotePointerLine({
-          noteId: note!.id, fromWorkspaceId: note!.from.workspaceId, fromTabId: note!.from.tabId,
-          fromHuman: false, fromOwner: note!.admission?.mode === 'owner', sentAt: note!.createdAt, ownerItem: true,
-        });
         const stamp = await this.stampPointer(id, armed, 'owner-item');
         if (!stamp) return { result: 'disarmed', reason: 'pointer-spent' };
         const typed = await target.type(line);
         const at = this.deps.now();
         this.pointBounds.stamp(id, armed, at);
         const stored = await this.recordPointer(id, stamp, typed.outcome, at);
+        if (typed.outcome === 'not-clean') return { result: 'not-clean', reason: 'composer-not-clean' };
         // No window claim: an owner line neither waits for the coordinator window nor delays the digest behind it.
         if (typed.outcome === 'submitted' && note!.inboxItemId) await this.deps.withdraw(note!.inboxItemId, 'note-pointed');
         return { result: typed.outcome, detail: typed.detail, note: stored ?? note!, at };
@@ -1241,17 +1269,18 @@ export class NotesService {
       }
     });
     const outcome: TOwnerAttempt = attempt ?? { result: 'refused', reason: 'target-tab-gone' };
-    if (outcome.result === 'spacing') return;
-    const reason = outcome.result === 'refused' || outcome.result === 'disarmed' ? outcome.reason : outcome.result;
-    if (outcome.result === 'refused' || outcome.result === 'disarmed') {
-      if (this.ownerRefusals.get(id) === reason) return;
-      this.ownerRefusals.set(id, reason);
+    if (outcome.result === 'spacing') return outcome.result;
+    const kept = 'reason' in outcome;
+    if (kept) {
+      // A refusal, a disarm or a composer that was not clean: the note keeps its reason, audited when it changes.
+      if (this.ownerRefusals.get(id) === outcome.reason) return outcome.result;
+      this.ownerRefusals.set(id, outcome.reason);
     } else {
       this.ownerRefusals.delete(id);
     }
     await this.deps.audit?.({
       event: 'note-pointer', by: 'owner-item', noteId: id, to: first, result: outcome.result,
-      ...(outcome.result === 'refused' || outcome.result === 'disarmed' ? { detail: outcome.reason } : {}),
+      ...(kept ? { detail: outcome.reason } : {}),
       ...('detail' in outcome && outcome.detail ? { detail: outcome.detail } : {}),
     }).catch((err) => log.warn(`note-pointer audit failed: ${err instanceof Error ? err.message : err}`));
     if ((outcome.result === 'stranded' || outcome.result === 'unverified') && this.deps.alertPointerSpent) {
@@ -1260,6 +1289,12 @@ export class NotesService {
         log.warn(`note ${id} pointer alert not sent: ${err instanceof Error ? err.message : err}`);
       });
     }
+    return outcome.result;
+  }
+
+  /** The last reason each armed owner item was kept (refused, disarmed or composer-not-clean); for status readers. */
+  ownerItemReason(id: string): string | null {
+    return this.ownerRefusals.get(id) ?? null;
   }
 
   // ─── retired ack notices (PMUX-NOTE-DELIVERY change 2) ──────────────────

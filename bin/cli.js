@@ -3926,8 +3926,9 @@ Commands:
                                            and "run note show". No text, no target choice. Exit 3 forbidden, too soon
                                            (one per note and per target in 10 min) or spent (one line per note per
                                            route, ever), 4 target gone, 5 not ready (a prompt, a halt or text in its
-                                           composer), 7 unknown note. Enter is pressed only when the screen shows the
-                                           line whole in the box; else exit 1 not-verified (no receipt)
+                                           composer, or other text beside the typed line: composer-not-clean, nothing
+                                           submitted or cleared), 7 unknown note. Enter is pressed only when the box
+                                           holds exactly the line; else exit 1 not-verified (no receipt)
   event send --type review-ready|landed|blocked-on --to-epic SLUG (--json PAYLOAD | -f FILE | -f -)
                                            A verified worker tab announces a result inside its scope (ADR-0043). The
                                            server checks the evidence, then delivers it as a note to the epic's

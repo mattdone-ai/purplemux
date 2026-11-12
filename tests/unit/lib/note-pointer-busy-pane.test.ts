@@ -3,7 +3,7 @@ import path from 'path';
 import { describe, expect, it } from 'vitest';
 import { paneAsSeen, paneShowsEmptyComposer, plainPaneShowsOptionList } from '@/lib/composer-readiness';
 import { pointerRefusal, typeGuarded, type INotePointTargetDeps } from '@/lib/note-pointer';
-import { isPaneShowingPendingLine } from '@/lib/tmux';
+import { composerHolds, isPaneShowingPendingLine } from '@/lib/tmux';
 import type { ITab } from '@/types/terminal';
 
 // PMUX-NOTE-DELIVERY: real captures (`capture-pane -p -e`) of Claude Code 2.1.322 at 120x50, mid-turn (writing a long
@@ -98,11 +98,41 @@ describe('typeGuarded: Enter only when the screen shows the whole line in the bo
     expect(keys.filter((k) => k === 'Enter')).toHaveLength(1);
   });
 
-  it('a person typing over the line (not whole in the box): no Enter', async () => {
-    const mixed = typed.replace('n-AbCdEf1234] from', 'n-AbCdEf1234]xx from');
-    const { deps, keys } = target([mixed]);
-    expect(await typeGuarded(deps, TAB, LINE)).toMatchObject({ outcome: 'unverified', detail: 'line-not-in-composer' });
-    expect(keys).not.toContain('Enter');
+  // Round 2 (review concern): a person may type in the box between the readiness check and the typing. Only a box
+  // that holds exactly the typed line is submitted; anything else is never submitted and never cleared.
+  const BEFORE = typed.replace('\x1b[39m[purplemux note n-AbCdEf1234]', '\x1b[39mcommit this [purplemux note n-AbCdEf1234]');
+  const AFTER = typed.replace('note ack n-AbCdEf1234', 'note ack n-AbCdEf1234 and push to main');
+  const INSIDE = typed.replace('n-AbCdEf1234] from', 'n-AbCdEf1234]xx from');
+
+  it.each([
+    ['before the line', BEFORE],
+    ['after the line', AFTER],
+    ['inside the line', INSIDE],
+  ])('text typed %s: no Enter, nothing cleared, composer-not-clean', async (_name, screen) => {
+    expect(screen).not.toBe(typed);
+    const { deps, keys } = target([screen]);
+    expect(await typeGuarded(deps, TAB, LINE)).toEqual({ outcome: 'not-clean', cliState: 'busy', detail: 'composer-not-clean' });
+    expect(keys).toEqual([`type:${LINE.slice(0, 26)}`]);
+  });
+
+  it('text a person adds after the first Enter, with the line still in the box: no second Enter', async () => {
+    const { deps, keys } = target([typed, AFTER]);
+    expect(await typeGuarded(deps, TAB, LINE)).toMatchObject({ outcome: 'not-clean' });
+    expect(keys.filter((k) => k === 'Enter')).toHaveLength(1);
+  });
+
+  it('the box reads exactly the line, whatever its wrapping; anything more or less does not', () => {
+    const plain = (screen: string) => paneAsSeen('claude-code', screen);
+    expect(composerHolds(plain(typed), LINE)).toBe('exact');
+    expect(composerHolds(plain(BEFORE), LINE)).toBe('with-other-text');
+    expect(composerHolds(plain(AFTER), LINE)).toBe('with-other-text');
+    expect(composerHolds(plain(INSIDE), LINE)).toBe('other-text');
+    expect(composerHolds(plain(pane('claude-busy-empty-composer.ansi')), LINE)).toBe('empty');
+    expect(composerHolds(plain(queued), LINE)).toBe('empty');
+    // No drawn box: only a marker line that holds the line can be read.
+    expect(composerHolds(`out\n❯ ${LINE}\n`, LINE)).toBe('exact');
+    expect(composerHolds(`out\n❯ draft ${LINE}\n`, LINE)).toBe('with-other-text');
+    expect(composerHolds('out\n❯ \n', LINE)).toBe('unknown');
   });
 
   it('an unreadable capture is never a receipt, before or after the Enter', async () => {

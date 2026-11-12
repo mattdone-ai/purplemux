@@ -854,10 +854,13 @@ the server points at it at once and on every notes pass (15 s), busy included, w
 "flagged" names the sender's claim; the server verified the sender, not who decided. The target checks
 are note point's; busy is admitted for Claude Code tabs only. One line per note per route, ever (the
 pointer stamp is stored before the line is typed, and is shared with note point), at least 60 s between
-any two pointer lines at one tab, the oldest owner item first. The line neither waits for nor claims the
+any two pointer lines at one tab, the oldest owner item first; a note refused for itself does not block
+the next one for that tab. The line neither waits for nor claims the
 coordinator window. A line that stays in the composer or cannot be confirmed is not typed again: its
 sender gets an urgent line and the Scrum Master seat a digest line, and the inbox notice still waits. A
-sender holds at most 5 owner items not yet in a composer (409 note-cap, owner-item-cap, exit 3).
+box that holds other text beside the line is never submitted or cleared: the note stays armed with the
+reason composer-not-clean. A sender holds at most 5 routed owner items not yet in a composer (409
+note-cap, owner-item-cap, exit 3); bounced ones do not count.
 
 A routed note reads state "pending" while its notice waits in the inbox, "held" while the inbox
 holds it, and "delivered" only after the notice reached a composer (deliveredAt, also
@@ -901,8 +904,9 @@ POST /api/cli/notes/<id>/point   (CLI: note point ID; G7)
   ("carries an owner decision" in place of "needs action now" only for a note sent under an owner grant).
   The target takes it only with an empty composer: no permission prompt, no option list, no usage-limit
   halt, no needs-input or startup-prompt state, and the dispatch policy passes; busy only for a Claude
-  Code tab. Enter is pressed only when a capture shows the line whole in the box with no dialog, and once
-  more at most. A submitted line is the note's composer receipt (deliveredAt), and its queued notice is
+  Code tab. Enter is pressed only when a capture shows the box holding exactly the line (no other text)
+  with no dialog, and once more at most. Other text beside the line: no Enter, nothing cleared, 409
+  note-point-not-ready "composer-not-clean" (exit 5), and the note may be pointed again. A submitted line is the note's composer receipt (deliveredAt), and its queued notice is
   withdrawn. One pointer per note and one per target tab per 10 min, and one line per note per route
   ever (shared with the owner-item pointer). A note whose notice is held stranded or transport-uncertain
   takes none (403). Response: { "status": "sent", "submitted", "noteId", "target", "cliState",

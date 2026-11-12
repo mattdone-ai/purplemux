@@ -3,7 +3,7 @@ import type { TAgentDispatchPolicyCheck } from '@/lib/agent-dispatch-policy';
 import { checkComposerReady, paneAsSeen, plainPaneShowsOptionList } from '@/lib/composer-readiness';
 import { COORDINATOR_WINDOW_MS } from '@/lib/coordinator-window';
 import type { IClientTabStatusEntry } from '@/types/status';
-import { isPaneShowingPendingLine } from '@/lib/tmux';
+import { composerHolds } from '@/lib/tmux';
 import type { ITab } from '@/types/terminal';
 
 // `note point` (G7 step 0): a verified coordinator types ONE fixed line that names its own undelivered note into the
@@ -79,14 +79,16 @@ export interface INotePointTargetDeps {
 /**
  * What became of a typed line. `submitted`: an Enter took the line out of the box. `stranded`: it is still in the box
  * after the one extra Enter. `unverified`: no Enter was pressed, or the screen after it could not be read or showed a
- * dialog, so the line may sit in the composer. Only `submitted` is a composer receipt.
+ * dialog, so the line may sit in the composer. `not-clean`: the box held other text beside the line (a person typed
+ * before, after or inside it), so no Enter was pressed and nothing was cleared; the note stays armed. Only
+ * `submitted` is a composer receipt.
  */
-export type TPointerTyped = 'submitted' | 'stranded' | 'unverified';
+export type TPointerTyped = 'submitted' | 'stranded' | 'unverified' | 'not-clean';
 
 export interface IPointerTypeResult {
   outcome: TPointerTyped;
   cliState: string | null;
-  /** Why the outcome is not `submitted`: `line-not-in-composer`, `dialog`, `capture-failed`. */
+  /** Why the outcome is not `submitted`: `line-not-in-composer`, `dialog`, `capture-failed`, `composer-not-clean`. */
   detail?: string;
 }
 
@@ -136,24 +138,29 @@ export const pointerRefusal = async (
   return readiness.ok ? null : { code: 'note-point-not-ready', reason: readiness.reason };
 };
 
-type TLook = 'line' | 'gone' | 'dialog' | 'unreadable';
+type TLook = 'line' | 'dirty' | 'other' | 'gone' | 'dialog' | 'unreadable';
 
 /**
- * One read of the target after typing: the line whole in the box (`line`), not there (`gone`), in the box under a
- * dialog (`dialog`: a native permission request or an option list), or an unreadable screen.
+ * One read of the target after typing: the box holds exactly the line (`line`), the line with other text (`dirty`),
+ * other text without the whole line (`other`), nothing or an unreadable box (`gone`); or the line sits under a dialog
+ * (`dialog`: a native permission request or an option list); or the screen cannot be read (`unreadable`).
  */
 const look = async (deps: INotePointTargetDeps, tab: ITab, line: string): Promise<TLook> => {
   const pane = await deps.capture(tab.sessionName).catch(() => null);
   if (!pane) return 'unreadable';
   const plain = paneAsSeen(tab.panelType, pane);
-  if (!isPaneShowingPendingLine(plain, line)) return 'gone';
-  return deps.status(tab.id)?.permissionRequest || plainPaneShowsOptionList(plain) ? 'dialog' : 'line';
+  const holds = composerHolds(plain, line);
+  if (holds === 'empty' || holds === 'unknown') return 'gone';
+  if (holds === 'other-text') return 'other';
+  if (deps.status(tab.id)?.permissionRequest || plainPaneShowsOptionList(plain)) return 'dialog';
+  return holds === 'exact' ? 'line' : 'dirty';
 };
 
 /**
- * Type the line, then submit it only when a capture shows it whole in the box with no dialog: a mid-turn agent can
- * raise a permission prompt at any moment, and an Enter would answer it. At most one more Enter, after a fresh capture.
- * An unreadable capture is never a receipt.
+ * Type the line, then submit it only when a capture shows the box holding exactly that line, with no dialog: a
+ * mid-turn agent can raise a permission prompt at any moment, and an Enter would answer it; a person may type in the
+ * box, and an Enter would submit their draft with the line. At most one more Enter, after a fresh capture. An
+ * unreadable capture is never a receipt. Other text in the box is never cleared.
  */
 export const typeGuarded = async (deps: INotePointTargetDeps, tab: ITab, line: string): Promise<IPointerTypeResult> => {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
@@ -163,16 +170,20 @@ export const typeGuarded = async (deps: INotePointTargetDeps, tab: ITab, line: s
     cliState,
     detail: seen === 'gone' ? 'line-not-in-composer' : seen === 'dialog' ? 'dialog' : 'capture-failed',
   });
+  const notClean: IPointerTypeResult = { outcome: 'not-clean', cliState, detail: 'composer-not-clean' };
   await deps.typeText(tab.sessionName, line);
   await sleep(POINTER_DRAW_MS);
   const typed = await look(deps, tab, line);
+  if (typed === 'dirty' || typed === 'other') return notClean;
   if (typed !== 'line') return unverified(typed);
   await deps.beforeSubmit?.(tab.sessionName);
   for (let press = 0; press < 2; press += 1) {
     await deps.pressEnter(tab.sessionName);
     await sleep(POINTER_SUBMIT_MS);
     const after = await look(deps, tab, line);
-    if (after === 'gone') return { outcome: 'submitted', cliState };
+    // The line left the box: submitted, whatever a person typed in the box since.
+    if (after === 'gone' || after === 'other') return { outcome: 'submitted', cliState };
+    if (after === 'dirty') return notClean;
     if (after !== 'line') return unverified(after);
   }
   return { outcome: 'stranded', cliState, detail: 'line-in-composer' };
