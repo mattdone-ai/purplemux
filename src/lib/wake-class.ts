@@ -8,7 +8,8 @@ import type { TOrchestrationNudgeKind } from '@/types/status';
 import type { TWakeClass } from '@/types/tab-events';
 
 /** Kinds that are not watchdog nudges or inbox notices. */
-export type TWakeOtherKind = 'tab-send' | 'flag' | 'alarm' | 'red-main' | 'rotate' | 'standing-order' | 'curator-candidate';
+export type TWakeOtherKind = 'tab-send' | 'flag' | 'alarm' | 'red-main' | 'rotate' | 'standing-order' | 'curator-candidate'
+  | 'note-acked' | 'note-pointer-spent';
 export type TWakeKind = TOrchestrationNudgeKind | TInboxKind | TWakeOtherKind;
 
 export interface IWakeDetail {
@@ -138,6 +139,10 @@ export const WAKE_CLASS_TABLE: Readonly<Record<TWakeKind, TRule>> = {
   'standing-order': 'urgent',
   // A standing-order candidate for v2's SM (story 23, consult C1): read at its next digest, never a wake of its own.
   'curator-candidate': 'digest',
+  // An ack is recorded for its sender, never typed (ADR-0013, F6 and PMUX-NOTE-DELIVERY): read with `events show`.
+  'note-acked': 'log',
+  // A pointer line that may sit in a recipient's composer: its sender must know now.
+  'note-pointer-spent': 'urgent',
 };
 
 /** The kind's class; a kind the table does not hold is urgent. */

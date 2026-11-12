@@ -120,3 +120,95 @@ epic that nobody held stayed `target-epic-unowned` for about 2.5 h, and nobody s
   `its sender has no live tab and was not told`. Both digest lines carry a fixed time, not an age:
   `… has not reached its recipient's composer since it was routed at <time>; …`. The text is fixed per note, so the
   router's duplicate filter (same tab, kind and text inside 15 min) logs a repeat alert as a duplicate.
+
+## Amendment: owner items reach a busy orchestrator, acks are recorded, and inboxes are counted (2026-11-12, PMUX-NOTE-DELIVERY)
+Measured on 12 Nov: seven notes from the Scrum Master seat to one orchestrator waited, the oldest 37 min, among them
+the owner's answers. The orchestrator's turns are long, and the inbox types only into a ready composer. The 15-min
+`undelivered` notice worked, but it was too late for an owner item. A design consult (Opus 5.5 xhigh) ruled
+APPROVE-WITH-CHANGES; the changes are in this amendment.
+
+**1. The owner item.**
+- `note send --owner-item` (`ownerItem: true`) is accepted only from the verified current orchestrator of the
+  sender's own workspace, the check `note point` uses. The Scrum Master seat qualifies (ADR-0045 §1).
+- Every other sender gets 403 `forbidden` and one `owner-item-refused` audit line, and nothing is stored: a worker,
+  the admin token, an unverified tab, a human session, a server-local send, or an owner-granted tab that is not its
+  workspace's orchestrator. Any value other than `true` is 400 `note-invalid`.
+- The note routes as before. Its inbox notice is the fallback, and that notice still waits for the window.
+- The server points at the note through the G7 pointer path: once after the send's lock is released, and on every
+  notes pass after the pass releases the notes lock. Calling it inside the pass would deadlock: the inbox takes the
+  dispatch lock first, then the notes lock. The authority is the stored flag.
+- The owner item is armed while all of these hold:
+  - it is routed to another workspace's enabled orchestrator;
+  - its line has not reached that composer;
+  - its notice is queued or held by a recoverable hold;
+  - it has no pointer stamp on that route.
+- Per target per pass, oldest first, and every check runs again inside the target's dispatch lock and the notes lock.
+  The note's own checks run before the target's. A note refused for itself (disarmed, or its line refused) keeps its
+  reason and does not block the next owner item for that tab (review round 2). A refusal of the target, a typing, or
+  the spacing ends the target's turn: the next note would meet the same tab.
+- The line says that the sender flagged it, not that the owner decided:
+  `[purplemux note <id>] from <ws>/<tab> at <time>, flagged owner item, needs action now: run purplemux note show <id>
+  now, then purplemux note ack <id>`.
+- An owner line neither waits for the F6 coordinator window nor claims it. A claim every 60 s would move the window
+  forward and starve the target's digests. This narrows F6's "the owner's GO note included" for this one line only.
+  An owner item comes from the owner through the seat, and its count is capped, so it passes F6's exemption test.
+- Bounds:
+  - At least 60 s (`OWNER_POINTER_SPACING_MS`) between any two pointer lines at one tab, manual or owner item, from
+    any sender.
+  - At most 5 armed owner items per sender (`note-cap`, `owner-item-cap`). The cap counts armed items (routed, not yet
+    in a composer, pointer not spent), not open ones, so a note that was read but never acked does not block the sender
+    for 14 days, and a bounced one does not count either (review round 2). When bounced notes route at once, the 60 s
+    spacing bounds what reaches one tab.
+- The sender's `undelivered` notice comes at 5 min for an owner item. Ordinary notes keep 15 min, because the window
+  holds them back up to 10 min by design. Each notice states its own minutes.
+
+**2. One line per note per route, and a guarded Enter (both for `note point` too).**
+- Before typing, the pointer stores a stamp on the note: `{ route, at, outcome: 'typing', by }`. After typing, the
+  stamp records `submitted`, `stranded` or `unverified`. A note with a stamp on its current route is never typed
+  again: not after a restart, not after a crash mid-paste, and not by the other pointer (`note-point-spent`). A
+  re-queue clears the stamp, so a handover gives the new orchestrator one line.
+- A note whose notice is held `stranded-in-composer` or `transport-uncertain` was already typed. It takes no pointer.
+- The old submit pressed Enter, waited 600 ms and pressed Enter again without looking. A mid-turn agent can raise a
+  permission dialog in that gap, and the second Enter would answer it. The pointer now works in these steps:
+  1. Type the line without Enter.
+  2. Capture the screen. Press Enter only when the box holds exactly the line and nothing else (whitespace aside), and
+     there is no option list and no permission request.
+  3. Capture again. If the box still holds exactly the line, press Enter once more after that capture.
+  4. If the line is still in the box after the second Enter, the outcome is `stranded`.
+  5. If the line was never seen in the box, a dialog appeared, or a capture failed, the outcome is `unverified`. This
+     is never a receipt.
+  6. Review round 2: if the box holds any other text (a person typed before, after or inside the line), the outcome
+     is `not-clean`: no Enter, nothing cleared, the stamp removed. The note stays armed with the reason
+     `composer-not-clean`, and the next attempt waits for an empty composer (`note point` answers
+     `note-point-not-ready`, exit 5). A person who then submits their draft with the line delivers it without a
+     receipt, and the note may take one more line later: one extra id-only line, never a submitted draft.
+- An owner line that is `stranded` or `unverified` sends its sender an urgent `note-pointer-spent` line, and the Scrum
+  Master seat gets a digest line. The note leaves the armed set, so it does not block the next one.
+- `note point` answers `not-verified` (exit 1) where the screen could not confirm the line.
+- Busy typing is admitted for Claude Code tabs only. On 2.1.322 a line submitted mid-turn is queued above the box, and
+  the box reads empty again (`tests/fixtures/panes/claude-busy-*.ansi`, captured 2026-11-12). The model ran the pulled
+  `note show` when the queued line reached it. No other TUI's mid-turn Enter is measured.
+
+**3. Acks are recorded, never typed.**
+- Since F6, `note ack` queues nothing. A newly acked note now also writes one `note-acked` row of class `log`
+  (`classifyWake('note-acked') === 'log'`) to the sender tab's `tab_events`:
+  `note n-… acked by <ws>/<tab> at <time>[ with a comment] — purplemux note show n-…`. The comment is not in the row.
+  A log row is never typed and never in a digest, and with the ledger down it is not typed either.
+- At boot, the notes runtime withdraws every queued or held `note:<id>:acked:` item (`note-ack-notice-retired`).
+- The held "ack receipts" in an orchestrator's inbox are pre-F6 notices held `stranded-in-composer`. That hold is
+  never retried and never reaches the preflight, so it stays in `inbox list` until the 7-day prune. The sweep is
+  cleanup: those items blocked nothing.
+
+**4. Counts.** `GET /api/cli/inbox` adds `counts` over every retained item of the workspace, whatever `all` says:
+- per state;
+- held items by the first word of their reason;
+- per target tab.
+
+`inbox list --counts` prints one line per state, then one line per tab.
+
+**Alternatives.**
+- Inbox priority for one class. Rejected: it breaks ADR-0012's ready-only rule.
+- An urgent tab event. Rejected: the window turns it into a digest row, and the router keeps no note receipt.
+- One coalesced line per target. Rejected: the receipt is per note.
+- A `PostToolUse` hook that returns `additionalContext`. This reaches the model without the composer, so it has no
+  dialog race. It needs a server read on every tool call. It is the follow-up if the race shows up in measurements.

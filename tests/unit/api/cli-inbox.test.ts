@@ -75,6 +75,21 @@ describe('inbox routes (ADR-0012)', () => {
     return state;
   };
 
+  it('carries counts of every retained item of the workspace, with or without --all (PMUX-NOTE-DELIVERY)', async () => {
+    await seed();
+    const expected = {
+      total: { queued: 1, held: 1, delivered: 1, dropped: 0 },
+      heldBy: { 'composer-not-empty': 1 },
+      tabs: {
+        'tab-a': { queued: 1, held: 0, delivered: 0, dropped: 0 },
+        'tab-b': { queued: 0, held: 1, delivered: 0, dropped: 0 },
+        'tab-c': { queued: 0, held: 0, delivered: 1, dropped: 0 },
+      },
+    };
+    expect((await list({ workspaceId: 'ws-1' })).body).toMatchObject({ counts: expected });
+    expect((await list({ workspaceId: 'ws-1', all: '1' })).body).toMatchObject({ counts: expected });
+  });
+
   it('lists queued and held items of the workspace; --all adds delivered; never another workspace', async () => {
     const ids = await seed();
     const open = await list({ workspaceId: 'ws-1' });

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ICaller } from '@/lib/caller';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import { renderInboxLine, renderNotePointerLine } from '@/lib/inbox-templates';
-import { NOTE_POINT_BOUND_MS, notePointPort, pointerRefusal, type INotePointPort, type INotePointTarget, type INotePointTargetDeps } from '@/lib/note-pointer';
+import { NOTE_POINT_BOUND_MS, notePointPort, pointerRefusal, type INotePointPort, type INotePointTarget, type INotePointTargetDeps, type TPointerTyped } from '@/lib/note-pointer';
 import { NoteError } from '@/lib/notes-store';
 import { NotesService, type INotesDeps } from '@/lib/notes-service';
 import type { IInboxItem } from '@/types/inbox';
@@ -87,7 +87,7 @@ class Fakes {
 class FakePort implements INotePointPort {
   typed: Array<{ tab: string; line: string }> = [];
   refusal: Awaited<ReturnType<INotePointTarget['refusal']>> = null;
-  submitted = true;
+  outcome: TPointerTyped = 'submitted';
   gone = false;
   insideLock: (() => void) | null = null;
 
@@ -98,7 +98,7 @@ class FakePort implements INotePointPort {
       refusal: async () => this.refusal,
       type: async (line) => {
         this.typed.push({ tab: `${workspaceId}/${tabId}`, line });
-        return { submitted: this.submitted, cliState: 'busy' };
+        return { outcome: this.outcome, cliState: 'busy' };
       },
     });
   }
@@ -228,14 +228,78 @@ describe('note point (G7 step 0)', () => {
     expect(port.typed.map((t) => t.line.slice(0, 30))).toHaveLength(2);
   });
 
-  it('a line left in the composer is reported, keeps no receipt, and still spends the bound', async () => {
+  it('a line left in the composer is reported, keeps no receipt, and spends the note on this route', async () => {
     const note = await send();
-    port.submitted = false;
+    port.outcome = 'stranded';
     await expect(svc.point(B, note.id, port)).resolves.toMatchObject({ submitted: false, notSubmitted: 'typed-not-submitted' });
     expect(f.note(note.id).deliveredAt).toBeNull();
+    expect(f.note(note.id).pointer).toMatchObject({ route: 'ws-1/tab-a', outcome: 'stranded', by: 'point' });
     expect(f.withdrawn).toEqual([]);
     expect(f.claims).toEqual([]);
-    await expectCode(svc.point(B, note.id, port), 'note-point-too-soon');
+    // The stamp is persisted: past the 10-min bound (or after a restart) the note is still never typed again.
+    f.now += NOTE_POINT_BOUND_MS;
+    await expectCode(svc.point(B, note.id, port), 'note-point-spent');
+    await expectCode(new NotesService(f.deps()).point(B, note.id, port), 'note-point-spent');
+    expect(port.typed).toHaveLength(1);
+  });
+
+  it('a line the screen could not confirm answers not-verified and is no receipt', async () => {
+    const note = await send();
+    port.outcome = 'unverified';
+    await expect(svc.point(B, note.id, port)).resolves.toMatchObject({ submitted: false, notSubmitted: 'not-verified' });
+    expect(f.note(note.id).deliveredAt).toBeNull();
+    expect(f.audits.at(-1)).toMatchObject({ event: 'note-pointer', result: 'not-verified' });
+  });
+
+  it('a composer that was not clean: no Enter, not-ready answer, the stamp removed so the note may be pointed again', async () => {
+    const note = await send();
+    port.outcome = 'not-clean';
+    const refused = svc.point(B, note.id, port);
+    await expectCode(refused, 'note-point-not-ready');
+    await expect(refused).rejects.toThrow(/composer-not-clean/);
+    expect(f.note(note.id)).toMatchObject({ deliveredAt: null, pointer: null });
+    port.outcome = 'submitted';
+    f.now += NOTE_POINT_BOUND_MS;
+    await expect(svc.point(B, note.id, port)).resolves.toMatchObject({ submitted: true });
+  });
+
+  it('the stamp is written before the typing: a crash mid-typing never types the note again', async () => {
+    const note = await send();
+    let seenDuringTyping: unknown = null;
+    port.insideLock = null;
+    const typing = new FakePort();
+    typing.withTarget = async (ws, tab, work) => work({
+      refusal: async () => null,
+      type: async (line) => {
+        seenDuringTyping = f.note(note.id).pointer;
+        typing.typed.push({ tab: `${ws}/${tab}`, line });
+        throw new Error('server killed mid-paste');
+      },
+    });
+    await expect(svc.point(B, note.id, typing)).rejects.toThrow('server killed');
+    expect(seenDuringTyping).toMatchObject({ route: 'ws-1/tab-a', outcome: 'typing' });
+    await expectCode(new NotesService(f.deps()).point(B, note.id, port), 'note-point-spent');
+  });
+
+  it('refuses a note whose inbox notice was already typed and is held stranded', async () => {
+    const note = await send();
+    f.inbox.set(note.inboxItemId!, { ...f.inbox.get(note.inboxItemId!)!, state: 'held', heldReason: 'stranded-in-composer' } as IInboxItem);
+    await expectCode(svc.point(B, note.id, port), 'forbidden');
+    expect(port.typed).toEqual([]);
+  });
+
+  it('a re-route clears the stamp: the new recipient may take one line', async () => {
+    const note = await send();
+    port.outcome = 'stranded';
+    await svc.point(B, note.id, port);
+    // The recipient workspace hands over to a new orchestrator: the next pass re-routes the note.
+    f.orchestrators.set('ws-1', 'tab-a2');
+    await svc.tick();
+    expect(f.note(note.id).deliveredTo).toEqual({ workspaceId: 'ws-1', tabId: 'tab-a2' });
+    expect(f.note(note.id).pointer).toBeNull();
+    port.outcome = 'submitted';
+    f.now += NOTE_POINT_BOUND_MS;
+    await expect(svc.point(B, note.id, port)).resolves.toMatchObject({ submitted: true, target: { workspaceId: 'ws-1', tabId: 'tab-a2' } });
   });
 
   it('a submitted pointer is the composer receipt: the 15-min undelivered notice never goes to the sender (G7 i+ii)', async () => {
@@ -270,8 +334,9 @@ describe('pointerRefusal — the inbox checks with busy admitted', () => {
       halted: () => over.halted ?? false,
       capture: async () => over.pane ?? EMPTY,
       withDispatchLock: async (_ws, _tab, work) => work(async () => ({ ok: true })),
-      deliver: async (_s, line) => { delivered.push(line); },
-      isPending: async () => false,
+      typeText: async (_s: string, line: string) => { delivered.push(line); },
+      pressEnter: async () => {},
+      sleep: async () => {},
     };
     return { d, delivered };
   };
@@ -306,9 +371,10 @@ describe('pointerRefusal — the inbox checks with busy admitted', () => {
     const { d, delivered } = deps();
     const lock = vi.fn(d.withDispatchLock);
     const p = notePointPort({ ...d, withDispatchLock: lock as INotePointTargetDeps['withDispatchLock'] });
-    const out = await p.withTarget('ws-1', 'tab-a', async (t) => ((await t.refusal()) ? null : t.type('LINE')));
-    expect(out).toEqual({ submitted: true, cliState: 'busy' });
-    expect(delivered).toEqual(['LINE']);
+    // The capture shows an empty composer, so the typed line is not seen in the box: no Enter, no receipt.
+    const out = await p.withTarget('ws-1', 'tab-a', async (t) => ((await t.refusal()) ? null : t.type('LINE of the pointer')));
+    expect(out).toEqual({ outcome: 'unverified', cliState: 'busy', detail: 'line-not-in-composer' });
+    expect(delivered).toEqual(['LINE of the pointer']);
     expect(lock).toHaveBeenCalledOnce();
     expect(await notePointPort({ ...d, findTab: async () => null }).withTarget('ws-1', 'tab-a', async () => 1)).toBeNull();
   });

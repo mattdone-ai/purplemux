@@ -707,6 +707,30 @@ describe('inbox (ADR-0012)', () => {
     expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/cli/inbox?workspaceId=WS&all=1' });
   });
 
+  it('--counts prints one line per state (held with its reasons), then one per tab', async () => {
+    reply = json(200, {
+      workspaceId: 'WS',
+      counts: {
+        total: { queued: 1, held: 26, delivered: 4, dropped: 0 },
+        heldBy: { 'composer-not-ready': 1, 'stranded-in-composer': 25 },
+        tabs: { 'tab-o': { queued: 1, held: 26, delivered: 3, dropped: 0 }, 'tab-a': { queued: 0, held: 0, delivered: 1, dropped: 0 } },
+      },
+      items: [],
+    });
+    const result = await cli(['inbox', 'list', '-w', 'WS', '--counts']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe([
+      'queued 1', 'held 26 (stranded-in-composer 25, composer-not-ready 1)', 'delivered 4', 'dropped 0',
+      'tab-a queued 0 held 0 delivered 1 dropped 0', 'tab-o queued 1 held 26 delivered 3 dropped 0', '',
+    ].join('\n'));
+    expect(requests[0]).toMatchObject({ method: 'GET', url: '/api/cli/inbox?workspaceId=WS' });
+  });
+
+  it('--counts against a server without counts fails instead of printing nothing', async () => {
+    reply = json(200, { workspaceId: 'WS', items: [] });
+    expect((await cli(['inbox', 'list', '-w', 'WS', '--counts'])).code).not.toBe(0);
+  });
+
   it.each([
     [409, 'inbox-not-held', 3],
     [404, 'inbox-not-found', 7],

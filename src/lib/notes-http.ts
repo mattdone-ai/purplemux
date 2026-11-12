@@ -18,6 +18,7 @@ const STATUS: Record<TNoteErrorCode, number> = {
   'session-not-running': 409,
   'note-point-not-ready': 409,
   'note-point-too-soon': 409,
+  'note-point-spent': 409,
 };
 
 /**

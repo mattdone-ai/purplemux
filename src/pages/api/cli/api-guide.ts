@@ -58,6 +58,8 @@ to an exit code through one table:
                                                  tab-count-unreadable
      1  typed, no turn proven (tab send)         typed-not-submitted, submit-unconfirmed    never resend: inspect
                                                  (the text was typed; vel-RETRO-R3)         the tab first
+     1  typed, not confirmed (note point)        not-verified (no receipt; the line may     never resend: inspect
+                                                 sit in the composer)                       the tab first
      2  usage error                              bad or missing argument; invalid-request,  fix the command
                                                  lease-policy, watch-invalid,
                                                  reports-to-invalid, report-on-invalid,
@@ -145,6 +147,8 @@ to an exit code through one table:
      5  not ready (typed events, ADR-0043)       event-no-recipient                         yes, bounded
      3  refused by state (note point, G7)        note-point-too-soon (one pointer per note  after 10 min
                                                  and per target tab in 10 min)
+     3  refused by state (note point)            note-point-spent (one pointer line per     no: the note
+                                                 note per route, ever)                      re-routes first
      5  not ready (note point, G7)               note-point-not-ready (a prompt, a halt,    yes, bounded
                                                  a policy refusal or text in the
                                                  composer; nothing typed)
@@ -798,9 +802,14 @@ probed again every 5 min, and sooner when its tab ends a turn, until 24 h after 
 stays first in its tab's queue, so notices behind it arrive in order. Closing the target tab drops
 its queued and held items. Delivered, dropped and held items are kept 7 days.
 
-GET /api/cli/inbox?workspaceId=WS[&all=1]
-  Read scope. Queued and held items targeting WS's tabs; all=1 adds delivered and dropped.
-  Response: { "workspaceId", "items": [{ "id", "kind", "targetWorkspaceId", "targetTabId", "dedupeKey",
+GET /api/cli/inbox?workspaceId=WS[&all=1]   (CLI: inbox list -w WS [--all] [--counts])
+  Read scope. Queued and held items targeting WS's tabs; all=1 adds delivered and dropped. counts covers
+  every retained item of WS whatever all says: per state, held items by the first word of their reason,
+  and per target tab. --counts prints them alone: "queued N", "held N (<reason> N, …)", "delivered N",
+  "dropped N", then "<tabId> queued N held N delivered N dropped N" per tab.
+  Response: { "workspaceId", "counts": { "total": { "queued", "held", "delivered", "dropped" },
+    "heldBy": { "<reason head>": N }, "tabs": { "<tabId>": { "queued", "held", "delivered", "dropped" } } },
+    "items": [{ "id", "kind", "targetWorkspaceId", "targetTabId", "dedupeKey",
     "line", "state", "attempts", "lastRefusal", "notBefore", "createdAt", "deliveredAt", "heldReason",
     "droppedReason", "expiresAt", "transitionAt", ... }] }
 
@@ -827,13 +836,31 @@ receives only the inbox's fixed line "[purplemux note n-…] from <ws>/<tab> at 
 show n-…, then purplemux note ack n-…" (from "owner (<ws>/<tab>)" for an owner note); the subject and
 body are never typed. Every note view carries fromLabel, the same server-made words after "from". If that tab closes
 before the line is delivered, the note re-routes. One reminder reaches the recipient 30 min after
-the line reached its composer, and one notice reaches the sender's tab (if live): at 15 min when the line
-has not reached the recipient's composer (the portfolio Scrum Master seat's digest gets one line too), else at
-60 min; no more. A coordinator's digest, and each watchdog nudge typed to it, carry
+the line reached its composer, and one notice reaches the sender's tab (if live): at 15 min (an owner item: 5 min)
+when the line has not reached the recipient's composer (the portfolio Scrum Master seat's digest gets one line too),
+else at 60 min; no more. A coordinator's digest, and each watchdog nudge typed to it, carry
 "N notes pending, oldest <age>: run purplemux note list --open --to-me" while notes wait for it. A note unacked or undeliverable for 14 days expires (one notice to a live sender); acked and
 expired notes are pruned 14 days later. An ack types nothing into the sender's tab (F6): the sender
-reads the state, ackedBy and ackComment with \`note list --from-me\` or note show. At turn start, run
-\`note list --open --to-me\`.
+reads the state, ackedBy and ackComment with \`note list --from-me\` or note show, and the ack is recorded
+in the sender tab's ledger as a log row "note n-… acked by <ws>/<tab> at <time>" (\`events show\`). At turn
+start, run \`note list --open --to-me\`.
+
+An owner item (ownerItem: true; CLI note send --owner-item) is a note the verified current orchestrator
+of the sender's workspace flags; any other sender is 403 forbidden (exit 3), audited as owner-item-refused.
+While it is routed to another workspace's enabled orchestrator and its line has not reached that composer,
+the server points at it at once and on every notes pass (15 s), busy included, with no 10-min bound:
+  [purplemux note <id>] from <ws>/<tab> at <time>, flagged owner item, needs action now: run purplemux
+  note show <id> now, then purplemux note ack <id>
+"flagged" names the sender's claim; the server verified the sender, not who decided. The target checks
+are note point's; busy is admitted for Claude Code tabs only. One line per note per route, ever (the
+pointer stamp is stored before the line is typed, and is shared with note point), at least 60 s between
+any two pointer lines at one tab, the oldest owner item first; a note refused for itself does not block
+the next one for that tab. The line neither waits for nor claims the
+coordinator window. A line that stays in the composer or cannot be confirmed is not typed again: its
+sender gets an urgent line and the Scrum Master seat a digest line, and the inbox notice still waits. A
+box that holds other text beside the line is never submitted or cleared: the note stays armed with the
+reason composer-not-clean. A sender holds at most 5 routed owner items not yet in a composer (409
+note-cap, owner-item-cap, exit 3); bounced ones do not count.
 
 A routed note reads state "pending" while its notice waits in the inbox, "held" while the inbox
 holds it, and "delivered" only after the notice reached a composer (deliveredAt, also
@@ -845,8 +872,9 @@ recipient notices are dropped.
 
 POST /api/cli/notes
   Any resolved caller. Body: { "toEpic"? , "toWorkspace"? (exactly one), "subject" (≤ 120, control
-  characters removed), "body" (≤ 16 KiB UTF-8), "fromEpic"? (only the holder of epic:<slug>) }.
-  Response: { "note": INoteView }. 413 note-too-large (exit 2), 400 note-target-missing / note-invalid
+  characters removed), "body" (≤ 16 KiB UTF-8), "fromEpic"? (only the holder of epic:<slug>),
+  "ownerItem"? (exactly true; the verified current orchestrator only; anything else 400 note-invalid) }.
+  Response: { "note": INoteView } (an owner item adds "ownerPointer": "armed" or "inactive:<why>"). 413 note-too-large (exit 2), 400 note-target-missing / note-invalid
   (exit 2), 403 forbidden (exit 3) for a fromEpic the caller does not hold or a cross-workspace
   sender that is neither the verified current source orchestrator nor the owner-granted tab.
 
@@ -862,7 +890,7 @@ GET /api/cli/notes/<id>
 POST /api/cli/notes/<id>/ack
   Same-workspace notes: the recipient workspace. Cross-workspace and legacy unknown-source notes:
   the verified currently routed recipient coordinator. Body: { "comment"? (≤ 500) }.
-  A non-empty comment queues one "acked … with a comment" line to the sender's tab (above); the
+  Nothing is typed to the sender (F6); one log row is recorded in the sender tab's ledger (above). The
   comment itself is pulled with note show.
   Response: { "note" } in state "acked". 404 note-not-found (exit 7); 403 forbidden (exit 3),
   also for a note that is not delivered.
@@ -875,12 +903,17 @@ POST /api/cli/notes/<id>/point   (CLI: note point ID; G7)
     then purplemux note ack <id>
   ("carries an owner decision" in place of "needs action now" only for a note sent under an owner grant).
   The target takes it only with an empty composer: no permission prompt, no option list, no usage-limit
-  halt, no needs-input or startup-prompt state, and the dispatch policy passes. A submitted line is the
-  note's composer receipt (deliveredAt), and its queued notice is withdrawn. One pointer per note and one
-  per target tab per 10 min. Response: { "status": "sent", "submitted", "noteId", "target", "cliState",
+  halt, no needs-input or startup-prompt state, and the dispatch policy passes; busy only for a Claude
+  Code tab. Enter is pressed only when a capture shows the box holding exactly the line (no other text)
+  with no dialog, and once more at most. Other text beside the line: no Enter, nothing cleared, 409
+  note-point-not-ready "composer-not-clean" (exit 5), and the note may be pointed again. A submitted line is the note's composer receipt (deliveredAt), and its queued notice is
+  withdrawn. One pointer per note and one per target tab per 10 min, and one line per note per route
+  ever (shared with the owner-item pointer). A note whose notice is held stranded or transport-uncertain
+  takes none (403). Response: { "status": "sent", "submitted", "noteId", "target", "cliState",
   "line", "notSubmitted"? }. 403 forbidden (exit 3); 404 note-not-found (exit 7); 404 tab-not-found /
-  409 session-not-running (exit 4); 409 note-point-not-ready (exit 5); 409 note-point-too-soon (exit 3);
-  200 with notSubmitted "typed-not-submitted" (exit 1: never point again, inspect the tab).
+  409 session-not-running (exit 4); 409 note-point-not-ready (exit 5); 409 note-point-too-soon or
+  note-point-spent (exit 3); 200 with notSubmitted "typed-not-submitted" or "not-verified" (exit 1: the
+  line may sit in that composer; it is never typed again; inspect the tab).
 
 ## Typed worker events (ADR-0043)
 

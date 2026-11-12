@@ -1086,6 +1086,31 @@ export const isPaneShowingPendingLine = (pane: string, content: string): boolean
   return squash(box.join('')).includes(needle);
 };
 
+/**
+ * What the input box holds, read against one line we typed (PMUX-NOTE-DELIVERY round 2). Whitespace is ignored, so a
+ * wrapped line still reads whole, but nothing else is: `exact` is the line and nothing more; `with-other-text` is the
+ * line plus text before, after or around it; `other-text` is text that does not hold the whole line (a person typed
+ * inside it, or the line is gone and their draft is there); `empty` is an empty box. With no drawn box (fewer than two
+ * rules) only one marker line can be read: `exact` or `with-other-text` when it holds the line, else `unknown`.
+ */
+export type TComposerHolds = 'exact' | 'with-other-text' | 'other-text' | 'empty' | 'unknown';
+
+const stripBoxLine = (line: string): string => line.replace(/^[\s│|]*(?:[❯>][\s\u00a0]?)?/, '').replace(/[\s│|]*$/, '');
+
+export const composerHolds = (pane: string, content: string): TComposerHolds => {
+  const needle = squash(content.trim().split('\n')[0]);
+  const lines = pane.split('\n');
+  if (lines.filter((line) => COMPOSER_RULE.test(line)).length < 2) {
+    const marked = lines.slice(-8).filter((line) => /[>❯│|]/.test(line) && squash(line).includes(needle));
+    if (needle.length < 3 || marked.length === 0) return 'unknown';
+    return squash(stripBoxLine(marked[marked.length - 1])) === needle ? 'exact' : 'with-other-text';
+  }
+  const box = squash(composerRegion(lines).map(stripBoxLine).join(''));
+  if (box === '') return 'empty';
+  if (box === needle) return 'exact';
+  return needle.length >= 3 && box.includes(needle) ? 'with-other-text' : 'other-text';
+};
+
 /** The capture behind {@link isPaneShowingPendingLine}; false when the pane cannot be read. */
 export const isLinePendingInComposer = async (sessionName: string, content: string): Promise<boolean> => {
   const pane = await capturePaneContent(sessionName);
