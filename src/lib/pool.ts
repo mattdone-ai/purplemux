@@ -12,8 +12,13 @@ import {
   type IPoolPin,
   type IPoolPlacementRequest,
   type IPoolQueueEntry,
+  type IPoolHostJob,
+  type IPoolRoomAnswer,
   type IPoolSlotUse,
+  type IPoolTabPlaceView,
+  type IPoolTabRoom,
   type IPoolTotals,
+  type IPoolWorkspaceTabs,
   type IPoolUse,
   type IPoolView,
   type TPoolClass,
@@ -22,6 +27,7 @@ import {
   type TPoolKind,
   type TPoolPlacement,
   type TPoolMode,
+  type TPoolTabPlaceMode,
   type TPoolRefusalReason,
   type TPoolShadowedRefusal,
   type IPoolWouldRefuse,
@@ -73,7 +79,25 @@ export const POOL_HARNESS_SHARE_KEY = 'pool.harness-share-pct';
 export const POOL_MODE_KEY = 'pool.mode';
 
 /** What this server honours (vel-POOL-ENF); `pool show --json` lists them, and a client checks before it relies on them. */
-export const POOL_FEATURES: readonly TPoolFeature[] = Object.freeze(['ask-token', 'host-pin']);
+export const POOL_FEATURES: readonly TPoolFeature[] = Object.freeze(['ask-token', 'host-pin', 'tab-room', 'item']);
+
+/** `pool.tab-place.<workspaceId>` (ADR-0045): what a `tab create` without `--host` does in that workspace. */
+export const POOL_TAB_PLACE_KEY_PREFIX = 'pool.tab-place.';
+export const POOL_TAB_PLACE_MODES: readonly TPoolTabPlaceMode[] = ['here', 'advise', 'place'];
+export const DEFAULT_TAB_PLACE_MODE: TPoolTabPlaceMode = 'advise';
+export const TAB_PLACE_KEY = /^pool\.tab-place\.([A-Za-z0-9_-]+)$/;
+
+export const isTabPlaceMode = (value: unknown): value is TPoolTabPlaceMode =>
+  typeof value === 'string' && (POOL_TAB_PLACE_MODES as readonly string[]).includes(value);
+
+/** The workspace's plain-create mode; unset, or a hand-edited bad value, reads as `advise`. */
+export const tabPlaceModeOf = (config: TConfigValue, workspaceId: string): TPoolTabPlaceMode => {
+  const raw = config(`${POOL_TAB_PLACE_KEY_PREFIX}${workspaceId}`)?.trim();
+  return isTabPlaceMode(raw) ? raw : DEFAULT_TAB_PLACE_MODE;
+};
+
+/** `pool acquire --item` (ADR-0045): the work item a job runs for, as `pool show` names it. */
+export const POOL_ITEM_RE = /^[A-Za-z0-9][A-Za-z0-9._:#/@+-]{0,119}$/;
 
 /** A pool-cancel mark (vel-POOL-ENF): it refuses a late acquire with its ask token, and holds no budget. */
 export const POOL_CANCEL_LEASE_KIND = 'pool-cancel';
@@ -194,8 +218,8 @@ const notePositive = (note: string | null, field: string): number | null => {
 };
 
 /** A slot lease's note: what it reserves, so the ledger counts it for its whole life, and the ask token (vel-POOL-ENF). */
-export const poolLeaseNote = (envelope: IPoolEnvelope, cls: TPoolClass = 'product', ask: string | null = null): string =>
-  `pool mem=${gbOf(envelope.memBytes)} threads=${envelope.threads} class=${cls}${ask ? ` ask=${ask}` : ''}`;
+export const poolLeaseNote = (envelope: IPoolEnvelope, cls: TPoolClass = 'product', ask: string | null = null, item: string | null = null): string =>
+  `pool mem=${gbOf(envelope.memBytes)} threads=${envelope.threads} class=${cls}${ask ? ` ask=${ask}` : ''}${item ? ` item=${item}` : ''}`;
 
 export const memOfLease = (lease: ILease): number => {
   const gb = notePositive(lease.note, 'mem');
@@ -338,6 +362,8 @@ export interface IPoolHostTabs {
   controlPlane: number;
   /** Tabs this server created recently; they are in the layouts (the ledger) but not yet in the read. */
   recentStarts?: readonly IPoolRecentStart[];
+  /** The same tabs per workspace id (ADR-0045); absent in callers that do not count by workspace. */
+  byWorkspace?: Readonly<Record<string, IPoolWorkspaceTabs>>;
 }
 
 export const NO_TABS: IPoolHostTabs = Object.freeze({ worker: 0, controlPlane: 0 });
@@ -351,7 +377,12 @@ const addUse = (u: IPoolUse, e: IPoolEnvelope, times = 1): void => {
 export interface IPoolHostState {
   view: IPoolHostView;
   budget: IPoolBudget | null;
+  /** Every pool lease on the host by class (job and tab-start leases): the harness share reads it. */
   ledger: Record<TPoolClass, IPoolUse>;
+  /** Job-kind leases only by class: a job's budget check (step 3) reads it (ADR-0045). */
+  jobLedger: Record<TPoolClass, IPoolUse>;
+  /** The coordinator tabs' envelopes, on the reserve. */
+  controlPlaneUse: IPoolUse;
   /** Measured free memory after the leases the read cannot show; null when unknown. */
   memFreeBytes: number | null;
   /** min(load1, load5) plus the unseen leases' threads: the sustained-overload figure; null when unknown. */
@@ -369,9 +400,10 @@ export interface IPoolHostState {
   config: TConfigValue;
 }
 
-const workerUse = (s: Pick<IPoolHostState, 'ledger'>): IPoolUse => ({
-  threads: s.ledger.product.threads + s.ledger.harness.threads,
-  memBytes: s.ledger.product.memBytes + s.ledger.harness.memBytes,
+/** The job leases on the worker budget: what a job's step 3 and the view's `budget.free` both read. */
+const jobUse = (s: Pick<IPoolHostState, 'jobLedger'>): IPoolUse => ({
+  threads: s.jobLedger.product.threads + s.jobLedger.harness.threads,
+  memBytes: s.jobLedger.product.memBytes + s.jobLedger.harness.memBytes,
 });
 
 const fitsCount = (free: IPoolUse, e: IPoolEnvelope): number =>
@@ -379,17 +411,78 @@ const fitsCount = (free: IPoolUse, e: IPoolEnvelope): number =>
 
 const finiteOr = (n: number, cap: number): number => (Number.isFinite(n) ? n : cap);
 
+const rootDiskPctOf = (metrics: IPoolMetricsLike | null): number | null =>
+  metrics?.disks.find((d) => d.path === '/')?.usedPct ?? null;
+
+type IPoolMetricsLike = { disks: readonly { path: string; usedPct: number | null }[] };
+
+interface ITabRoomInput {
+  budget: IPoolBudget | null;
+  placeable: boolean;
+  sustainedLoad: number | null;
+  memFreeBytes: number | null;
+  used: number;
+  countCap: number | null;
+}
+
+/**
+ * The tab room (ADR-0045): free threads are min(threads - reserve, max-load) less the sustained load, free memory is
+ * the measured available memory less the unseen work and the reserve; each holds floor(free / envelope) tabs (the
+ * 4 GiB floor stays on top of the memory). The ceiling is `pool.slots.<host>.tab`, else floor(worker memory / tab
+ * memory): memory cannot be oversubscribed, threads only slow down. One function serves `fitOn` and the view.
+ */
+const defaultTabCeiling = (b: IPoolBudget, e: IPoolEnvelope): number =>
+  Math.min(SLOT_CAP_MAX, e.memBytes > 0 ? Math.floor(b.workerMemBytes / e.memBytes) : SLOT_CAP_MAX);
+
+const tabRoomOf = (input: ITabRoomInput, e: IPoolEnvelope): IPoolTabRoom | null => {
+  const b = input.budget;
+  if (!b || !input.placeable || input.sustainedLoad === null || input.memFreeBytes === null) return null;
+  const freeThreads = Math.min(b.threads - b.reserveThreads, b.maxLoad) - input.sustainedLoad;
+  const freeMemBytes = input.memFreeBytes - b.reserveMemBytes;
+  const byThreads = e.threads > 0 ? Math.floor(Math.max(0, freeThreads) / e.threads) : SLOT_CAP_MAX;
+  const byMem = e.memBytes > 0 ? Math.floor(Math.max(0, freeMemBytes - MEASURED_MEM_FLOOR_BYTES) / e.memBytes) : SLOT_CAP_MAX;
+  const room = Math.min(byThreads, byMem, SLOT_CAP_MAX);
+  const ceiling = input.countCap ?? defaultTabCeiling(b, e);
+  const limit = Math.min(input.used + room, ceiling);
+  const free = Math.max(0, limit - input.used);
+  return {
+    room,
+    used: input.used,
+    ceiling,
+    ceilingSource: input.countCap === null ? 'default' : 'pool.slots',
+    limit,
+    free,
+    binding: ceiling - input.used < room ? 'ceiling' : byThreads <= byMem ? 'threads' : 'memory',
+    freeThreads: round2(freeThreads),
+    freeMemBytes,
+  };
+};
+
+const jobView = (lease: ILease, kind: TPoolKind, config: TConfigValue): Omit<IPoolHostJob, 'ageSeconds'> => ({
+  kind: kind as IPoolHostJob['kind'],
+  lease: lease.name,
+  class: leaseClass(lease),
+  holder: { workspaceId: lease.holder.workspaceId, tabId: lease.holder.tabId, tabName: lease.holder.tabName, admin: lease.holder.admin },
+  item: noteField(lease.note, 'item'),
+  epic: lease.epic,
+  acquiredAt: lease.acquiredAt,
+  envelope: envelopeView(leaseEnvelope(lease, kind, config)),
+});
+
 export const hostState = (read: TPoolHostRead, leases: readonly ILease[], tabs: IPoolHostTabs, config: TConfigValue): IPoolHostState => {
   const mine = leasesOn(leases, read.host);
   const usedSlots = Object.fromEntries(POOL_KINDS.map((k) => [k, new Set<number>()])) as Record<TPoolKind, Set<number>>;
   const ledger: Record<TPoolClass, IPoolUse> = { product: zeroUse(), harness: zeroUse(), 'control-plane': zeroUse() };
+  const jobLedger: Record<TPoolClass, IPoolUse> = { product: zeroUse(), harness: zeroUse(), 'control-plane': zeroUse() };
   for (const l of mine) {
     usedSlots[l.kind].add(l.n);
-    addUse(ledger[leaseClass(l.lease)], leaseEnvelope(l.lease, l.kind, config));
+    const e = leaseEnvelope(l.lease, l.kind, config);
+    addUse(ledger[leaseClass(l.lease)], e);
+    if (isJobKind(l.kind)) addUse(jobLedger[leaseClass(l.lease)], e);
   }
   const tabEnvelope = kindEnvelope('tab', config);
-  addUse(ledger.product, tabEnvelope, tabs.worker);
-  addUse(ledger['control-plane'], tabEnvelope, tabs.controlPlane);
+  const controlPlaneUse = zeroUse();
+  addUse(controlPlaneUse, tabEnvelope, tabs.controlPlane);
   const budget = budgetOf(read, config);
   const known = read.state === 'known' ? read.metrics : null;
   // A host whose own alias failed is shown through its fallback but takes nothing new (review r2 F2):
@@ -397,17 +490,27 @@ export const hostState = (read: TPoolHostRead, leases: readonly ILease[], tabs: 
   const fallbackOnly = read.state === 'known' && read.primaryFailure !== undefined
     ? `answers only through ${read.via}; ${read.host} failed (${read.primaryFailure})`
     : null;
+  const placeable = read.state === 'known' && fallbackOnly === null;
   const pending = unseen(mine, read);
   const starts = (tabs.recentStarts ?? []).filter((t) => read.readAt === null || t.at > read.readAt - LOAD_LAG_MS);
   const pendingThreads = pending.reduce((sum, l) => sum + leaseEnvelope(l.lease, l.kind, config).threads, 0) + starts.reduce((sum, t) => sum + t.threads, 0);
   const pendingMem = pending.reduce((sum, l) => sum + leaseEnvelope(l.lease, l.kind, config).memBytes, 0) + starts.reduce((sum, t) => sum + t.memBytes, 0);
-  const counts = Object.fromEntries(POOL_KINDS.map((k) => [k, usedSlots[k].size + (k === 'tab' ? tabs.worker + tabs.controlPlane : 0)])) as Record<TPoolKind, number>;
+  // Coordinator tabs run on the reserve: the tab count (and its ceiling) holds worker tabs and live start leases (ADR-0045).
+  const counts = Object.fromEntries(POOL_KINDS.map((k) => [k, usedSlots[k].size + (k === 'tab' ? tabs.worker : 0)])) as Record<TPoolKind, number>;
   const countCaps = Object.fromEntries(POOL_KINDS.map((k) => [k, slotCountCapOf(read.host, k, config)])) as Record<TPoolKind, number | null>;
-  const used = workerUse({ ledger });
+  const memFreeBytes = known ? known.memAvailableBytes - pendingMem : null;
+  const sustainedLoad = known ? Math.min(known.load1, known.load5) + pendingThreads : null;
+  const tabRoom = tabRoomOf({ budget, placeable, sustainedLoad, memFreeBytes, used: counts.tab, countCap: countCaps.tab }, tabEnvelope);
+  const used = jobUse({ jobLedger });
   const free: IPoolUse = budget
     ? { threads: Math.max(0, budget.workerThreads - used.threads), memBytes: Math.max(0, budget.workerMemBytes - used.memBytes) }
     : zeroUse();
   const slots = Object.fromEntries(POOL_KINDS.map((kind) => {
+    if (kind === 'tab') {
+      // A host that cannot take a tab now still shows its ceiling (totals count it in cap, never in free).
+      const cap = tabRoom?.ceiling ?? countCaps.tab ?? (budget ? defaultTabCeiling(budget, tabEnvelope) : 0);
+      return [kind, { used: counts.tab, cap, free: tabRoom?.free ?? 0 }];
+    }
     const e = kindEnvelope(kind, config);
     const countCap = countCaps[kind];
     const budgetCap = budget ? finiteOr(fitsCount({ threads: budget.workerThreads, memBytes: budget.workerMemBytes }, e), SLOT_CAP_MAX) : 0;
@@ -424,9 +527,13 @@ export const hostState = (read: TPoolHostRead, leases: readonly ILease[], tabs: 
     workerMemBytes: budget.workerMemBytes,
     maxLoad: budget.maxLoad,
     harnessSharePct: budget.harnessSharePct,
-    used: { product: { ...ledger.product }, harness: { ...ledger.harness }, 'control-plane': { ...ledger['control-plane'] } },
+    used: { product: { ...jobLedger.product }, harness: { ...jobLedger.harness }, 'control-plane': { ...controlPlaneUse } },
     free,
   } : null;
+  const jobs = mine
+    .filter((l) => isJobKind(l.kind))
+    .sort((a, b) => Date.parse(a.lease.acquiredAt) - Date.parse(b.lease.acquiredAt) || a.lease.name.localeCompare(b.lease.name))
+    .map((l) => ({ ...jobView(l.lease, l.kind, config), ageSeconds: 0 }));
   return {
     view: {
       host: read.host,
@@ -435,18 +542,26 @@ export const hostState = (read: TPoolHostRead, leases: readonly ILease[], tabs: 
       readAt: read.readAt === null ? null : new Date(read.readAt).toISOString(),
       via: read.via,
       reason: read.state === 'unknown' ? read.reason : fallbackOnly,
-      placeable: read.state === 'known' && fallbackOnly === null,
+      placeable,
       metrics: known,
       loadPerThread: known ? Math.round((known.load1 / known.threads) * 1000) / 1000 : null,
       slots,
       agentTabs: tabs.worker + tabs.controlPlane,
+      tabsByWorkspace: Object.fromEntries(Object.entries(tabs.byWorkspace ?? {}).map(([ws, t]) => [ws, { ...t }])),
+      jobs,
+      tabRoom,
+      memFreeBytes,
+      diskRootUsedPct: rootDiskPctOf(known),
+      readAgeSeconds: null,
       budget: budgetView,
       path: read.path ? pathView(read.path, pathSlowMsOf(config)) : null,
     },
     budget,
     ledger,
-    memFreeBytes: known ? known.memAvailableBytes - pendingMem : null,
-    sustainedLoad: known ? Math.min(known.load1, known.load5) + pendingThreads : null,
+    jobLedger,
+    controlPlaneUse,
+    memFreeBytes,
+    sustainedLoad,
     projectedLoadPerThread: known ? (known.load1 + pendingThreads) / known.threads : null,
     minLoad: known ? Math.min(known.load1, known.load5) : null,
     pendingThreads,
@@ -554,15 +669,54 @@ type TFit = { ok: true; shadowed: ICheck[] } | ({ ok: false } & ICheck);
 
 const refuse = (refusal: TPoolRefusalReason, step: number, detail: string): TFit => ({ ok: false, refusal, step, detail });
 
-const rootDiskPct = (s: IPoolHostState): number | null =>
-  s.view.metrics?.disks.find((d) => d.path === '/')?.usedPct ?? null;
+const rootDiskPct = (s: IPoolHostState): number | null => rootDiskPctOf(s.view.metrics);
+
+/** The tab room of a host for one request's envelope (ADR-0045): the same function the view shows. */
+const tabRoomFor = (s: IPoolHostState, e: IPoolEnvelope): IPoolTabRoom | null =>
+  tabRoomOf({ budget: s.budget, placeable: s.view.placeable, sustainedLoad: s.sustainedLoad, memFreeBytes: s.memFreeBytes, used: s.counts.tab, countCap: s.countCaps.tab }, e);
 
 /**
- * The admission checks on one host, in order (vel-D4 §2). The ledger checks compare envelopes with the budget and
- * never read measured use; the measured checks subtract only what the read cannot show yet. A refusal states the
- * measured figure against the expected one. In shadow mode the budget, measured-memory and sustained-load checks
- * do not refuse: they are returned as `shadowed`, and every other check still refuses.
+ * The admission checks on one host, in order (vel-D4 §2). For a job the ledger check compares envelopes with the
+ * budget, counting job leases only, and never reads measured use; the measured checks subtract only what the read
+ * cannot show yet. A worker tab is admitted by its tab room instead (ADR-0045): the measured free threads and memory
+ * after the reserve, under the ceiling. A refusal states the measured figure against the expected one. In shadow mode
+ * the budget, measured-memory, sustained-load, tab-room and default-ceiling checks do not refuse: they are returned as
+ * `shadowed`, and every other check, an explicit `pool.slots` cap included, still refuses.
  */
+const harnessShareCheck = (s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEnvelope): TFit | null => {
+  if ((req.class ?? 'product') !== 'harness' || harnessFits(s, e)) return null;
+  const b = s.budget!;
+  const share = b.harnessSharePct / 100;
+  return refuse('harness-share', 4, `${s.view.host}: harness holds threads ${s.ledger.harness.threads}/${Math.floor(share * b.workerThreads)} and ${fmtGb(s.ledger.harness.memBytes)}/${fmtGb(share * b.workerMemBytes)} (${b.harnessSharePct}% share), needs ${e.threads} threads and ${fmtGb(e.memBytes)}`);
+};
+
+const roomText = (host: string, r: IPoolTabRoom, b: IPoolBudget, e: IPoolEnvelope): string =>
+  `${host}: tab room ${r.room}: free threads ${r.freeThreads} of min(${b.threads} - ${b.reserveThreads} reserve, max load ${b.maxLoad}), `
+  + `free memory ${fmtGb(r.freeMemBytes)} after the ${fmtGb(b.reserveMemBytes)} reserve; a tab needs ${e.threads} threads and ${fmtGb(e.memBytes)} + ${fmtGb(MEASURED_MEM_FLOOR_BYTES)} floor`;
+
+/** A worker tab (ADR-0045): the explicit cap refuses; the measured room and the default ceiling are soft in shadow mode. */
+const fitTab = (
+  s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEnvelope, blockedBy: number,
+  soft: (check: ICheck) => TFit | null, shadowed: ICheck[],
+): TFit => {
+  const host = s.view.host;
+  const b = s.budget!;
+  const r = tabRoomFor(s, e);
+  if (!r) return refuse('no-known-host', 0, `${host}: ${s.view.reason ?? 'not read'}`);
+  if (r.room < 1) {
+    const out = soft({ refusal: 'no-room', step: 3, detail: roomText(host, r, b, e) });
+    if (out) return out;
+  }
+  if (r.ceilingSource === 'default' && r.used >= r.ceiling) {
+    const out = soft({ refusal: 'tab-ceiling', step: 3, detail: `${host}: tab ${r.used}/${r.ceiling} (default ceiling: worker memory ${fmtGb(b.workerMemBytes)} / ${fmtGb(e.memBytes)})` });
+    if (out) return out;
+  }
+  const share = harnessShareCheck(s, req, e);
+  if (share) return share;
+  if (blockedBy > 0) return refuse('queued-ahead', 7, `${host}: ${blockedBy} earlier ticket(s) wait for it`);
+  return { ok: true, shadowed };
+};
+
 const fitOn = (s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEnvelope, blockedBy: number, mode: TPoolMode): TFit => {
   const host = s.view.host;
   if (!s.view.placeable || !s.budget) return refuse('no-known-host', 0, `${host}: ${s.view.reason ?? 'not read'}`);
@@ -573,7 +727,7 @@ const fitOn = (s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEnvelope, 
   }
   const cap = s.countCaps[req.kind];
   if (cap !== null && s.counts[req.kind] >= cap) return refuse('no-free-slot', 2, `${host}: ${req.kind} ${s.counts[req.kind]}/${cap} (pool.slots)`);
-  const used = workerUse(s);
+  const used = jobUse(s);
   const b = s.budget;
   const shadowed: ICheck[] = [];
   const soft = (check: ICheck): TFit | null => {
@@ -581,14 +735,13 @@ const fitOn = (s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEnvelope, 
     shadowed.push(check);
     return null;
   };
+  if (req.kind === 'tab') return fitTab(s, req, e, blockedBy, soft, shadowed);
   if (used.threads + e.threads > b.workerThreads || used.memBytes + e.memBytes > b.workerMemBytes) {
     const r = soft({ refusal: 'no-budget', step: 3, detail: `${host}: budget threads ${used.threads}/${b.workerThreads} used, needs ${e.threads}; budget memory ${fmtGb(used.memBytes)}/${fmtGb(b.workerMemBytes)} used, needs ${fmtGb(e.memBytes)}` });
     if (r) return r;
   }
-  if ((req.class ?? 'product') === 'harness' && !harnessFits(s, e)) {
-    const share = b.harnessSharePct / 100;
-    return refuse('harness-share', 4, `${host}: harness holds threads ${s.ledger.harness.threads}/${Math.floor(share * b.workerThreads)} and ${fmtGb(s.ledger.harness.memBytes)}/${fmtGb(share * b.workerMemBytes)} (${b.harnessSharePct}% share), needs ${e.threads} threads and ${fmtGb(e.memBytes)}`);
-  }
+  const share = harnessShareCheck(s, req, e);
+  if (share) return share;
   const memFree = s.memFreeBytes ?? 0;
   if (memFree - e.memBytes < MEASURED_MEM_FLOOR_BYTES) {
     const r = soft({ refusal: 'no-memory', step: 5, detail: `${host}: measured ${fmtGb(memFree)} free, needs ${fmtGb(e.memBytes + MEASURED_MEM_FLOOR_BYTES)} (${fmtGb(e.memBytes)} envelope + ${fmtGb(MEASURED_MEM_FLOOR_BYTES)} floor)` });
@@ -606,6 +759,7 @@ const fitOn = (s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEnvelope, 
 const byMem = (a: IPoolHostState, b: IPoolHostState) => (b.memFreeBytes ?? 0) - (a.memFreeBytes ?? 0);
 const byLoad = (a: IPoolHostState, b: IPoolHostState) => (a.projectedLoadPerThread ?? Infinity) - (b.projectedLoadPerThread ?? Infinity);
 const localFirst = (a: IPoolHostState, b: IPoolHostState) => Number(b.view.local) - Number(a.view.local);
+const remoteFirst = (a: IPoolHostState, b: IPoolHostState) => Number(a.view.local) - Number(b.view.local);
 
 export interface IPlaceContext {
   /** Waiting tickets (any order; they are ordered here). */
@@ -642,7 +796,7 @@ const controlPlaneTab = (states: readonly IPoolHostState[], e: IPoolEnvelope): T
   const host = local?.view.host ?? '';
   const b = local?.budget;
   if (!local || !b) return { ok: true, host, local: true, envelope: envelopeView(e), reason: 'control-plane: on this host\'s reserve (this host is not read; a coordinator is never queued)' };
-  const u = local.ledger['control-plane'];
+  const u = local.controlPlaneUse;
   const over = u.threads + e.threads > b.reserveThreads || u.memBytes + e.memBytes > b.reserveMemBytes;
   return {
     ok: true, host, local: true, envelope: envelopeView(e),
@@ -661,7 +815,7 @@ const wouldRefuseOf = (s: IPoolHostState, req: IPoolPlacementRequest, e: IPoolEn
   envelope: envelopeView(e),
   maxLoad: s.budget!.maxLoad,
   memFreeBytes: s.memFreeBytes ?? 0,
-  workerUsed: workerUse(s),
+  workerUsed: jobUse(s),
   workerThreads: s.budget!.workerThreads,
   workerMemBytes: s.budget!.workerMemBytes,
   agentTabs: { worker: s.tabs.worker, controlPlane: s.tabs.controlPlane },
@@ -686,8 +840,8 @@ export const wouldRefuseLine = (w: IPoolWouldRefuse): string => [
 /**
  * One admission (vel-D4). A control-plane tab runs here on the reserve. A non-agent tab has no envelope and runs
  * here. Every other request goes to an allowed host that passes every check in `fitOn` and that no earlier ticket
- * that could run there waits for: jobs by the lowest projected load per thread, then the most free memory; tabs by
- * the most free memory. A tie keeps this host. In shadow mode (`pool.mode`, the default) a host that only fails
+ * that could run there waits for: jobs by the lowest projected load per thread, then the most free memory, a tie
+ * keeping this host; tabs by the most tab room, then the most free memory, a tie going to a remote host (ADR-0045). In shadow mode (`pool.mode`, the default) a host that only fails
  * the budget, measured-memory or sustained-load checks still takes the work when no host passes every check, and
  * the answer carries `wouldRefuse`. No fit is a refusal that names, per host, the measured and expected figures;
  * it is queueable unless the envelope can never fit an allowed host.
@@ -727,18 +881,23 @@ export const placeWork = (states: readonly IPoolHostState[], req: IPoolPlacement
   const clean = passed.filter((p) => p.shadowed.length === 0);
   const pool = clean.length > 0 ? clean : passed;
   if (pool.length > 0) {
-    const order = req.kind === 'tab' ? (a: IPoolHostState, b: IPoolHostState) => byMem(a, b) || localFirst(a, b) : (a: IPoolHostState, b: IPoolHostState) => byLoad(a, b) || byMem(a, b) || localFirst(a, b);
+    const roomOf = (s: IPoolHostState) => tabRoomFor(s, e)?.free ?? 0;
+    const order = req.kind === 'tab'
+      ? (a: IPoolHostState, b: IPoolHostState) => roomOf(b) - roomOf(a) || byMem(a, b) || remoteFirst(a, b)
+      : (a: IPoolHostState, b: IPoolHostState) => byLoad(a, b) || byMem(a, b) || localFirst(a, b);
     const chosen = [...pool].sort((a, b) => order(a.s, b.s))[0];
     const best = chosen.s;
-    const head = req.kind === 'tab'
-      ? `most free memory: ${fmtGb(best.memFreeBytes ?? 0)} measured`
-      : `lowest load per thread: ${(best.projectedLoadPerThread ?? 0).toFixed(2)} (projected), ${fmtGb(best.memFreeBytes ?? 0)} free`;
     const b = best.budget!;
-    const used = workerUse(best);
+    const used = jobUse(best);
+    const room = req.kind === 'tab' ? tabRoomFor(best, e) : null;
+    const tail = room
+      ? `most tab room: ${room.free} more (${room.used}/${room.limit}, ${room.binding}), ${fmtGb(best.memFreeBytes ?? 0)} measured free`
+      : `lowest load per thread: ${(best.projectedLoadPerThread ?? 0).toFixed(2)} (projected), ${fmtGb(best.memFreeBytes ?? 0)} free; `
+        + `budget threads ${used.threads + e.threads}/${b.workerThreads}, memory ${fmtGb(used.memBytes + e.memBytes)}/${fmtGb(b.workerMemBytes)}`;
     const shadow = chosen.shadowed.length > 0 ? wouldRefuseOf(best, req, e, chosen.shadowed) : null;
     return {
       ok: true, host: best.view.host, local: best.view.local, envelope: envelopeView(e),
-      reason: `${head}; budget threads ${used.threads + e.threads}/${b.workerThreads}, memory ${fmtGb(used.memBytes + e.memBytes)}/${fmtGb(b.workerMemBytes)}${why ? ` (${why})` : ''}`
+      reason: `${tail}${why ? ` (${why})` : ''}`
         + (shadow ? `; shadow mode admitted what enforce would refuse (${shadow.refusals.join(', ')}): ${shadow.detail}` : ''),
       ...(shadow ? { wouldRefuse: shadow } : {}),
     };
@@ -787,12 +946,74 @@ export const queueView = (tickets: readonly IPoolTicket[], states: readonly IPoo
 /** No would-refuse yet, in the mode the fleet config holds. */
 export const emptyWouldRefuse = (mode: TPoolMode, since: number): IPoolWouldRefuseView => ({ mode, total: 0, since: new Date(since).toISOString(), byHost: {}, last: null });
 
+/** The "where is room" answer for one request: a host only when it passes every check cleanly (ADR-0045). */
+export const poolRoomAnswer = (states: readonly IPoolHostState[], req: IPoolPlacementRequest, tickets: readonly IPoolTicket[]): IPoolRoomAnswer => {
+  const placed = placeWork(states, req, { queue: tickets });
+  if (!placed.ok) return { host: null, local: false, reason: placed.reason };
+  if (placed.wouldRefuse) return { host: null, local: false, reason: `no host passes every check; shadow mode would admit ${placed.host}: ${placed.wouldRefuse.detail}` };
+  const free = req.kind === 'tab' ? states.find((s) => s.view.host === placed.host)?.view.tabRoom?.free : undefined;
+  return { host: placed.host, local: placed.local, ...(free !== undefined ? { free } : {}), reason: placed.reason };
+};
+
+export const ROOM_TAB_REQUEST: IPoolPlacementRequest = Object.freeze({ kind: 'tab', memGb: 0, panelType: 'claude-code' });
+export const ROOM_GATE_REQUEST: IPoolPlacementRequest = Object.freeze({ kind: 'gate', memGb: 0 });
+
+export const emptyTabPlace = (): IPoolTabPlaceView => ({ advised: 0, placedRemote: 0, here: 0, hereAtNoRoom: 0, last: null });
+
+const ageOf = (iso: string | null, now: number): number | null => {
+  const at = iso === null ? NaN : Date.parse(iso);
+  return Number.isFinite(at) ? Math.max(0, Math.round((now - at) / 1000)) : null;
+};
+
 export const buildPoolView = (
   states: readonly IPoolHostState[],
   now: number,
   tickets: readonly IPoolTicket[] = [],
   wouldRefuse: IPoolWouldRefuseView = emptyWouldRefuse(poolModeOf(states[0]?.config ?? (() => null)), now),
+  tabPlace: IPoolTabPlaceView = emptyTabPlace(),
 ): IPoolView => {
-  const hosts = states.map((s) => s.view);
-  return { at: new Date(now).toISOString(), hosts, totals: poolTotals(hosts), queue: queueView(tickets, states), wouldRefuse, features: POOL_FEATURES };
+  const hosts = states.map((s) => ({
+    ...s.view,
+    readAgeSeconds: ageOf(s.view.readAt, now),
+    jobs: s.view.jobs.map((j) => ({ ...j, ageSeconds: ageOf(j.acquiredAt, now) ?? 0 })),
+  }));
+  return {
+    at: new Date(now).toISOString(),
+    hosts,
+    totals: poolTotals(hosts),
+    queue: queueView(tickets, states),
+    wouldRefuse,
+    room: { tab: poolRoomAnswer(states, ROOM_TAB_REQUEST, tickets), gate: poolRoomAnswer(states, ROOM_GATE_REQUEST, tickets) },
+    tabPlace,
+    features: POOL_FEATURES,
+  };
+};
+
+export const OTHER_WORKSPACES = 'other';
+
+/**
+ * The view as one caller may see it (ADR-0045, ruling 13): the tabs of a workspace the caller cannot read fold into
+ * `other`, and that workspace's jobs keep their kind, class, age and envelope only. The queue's holder is redacted too.
+ */
+export const redactPoolView = (view: IPoolView, canRead: (workspaceId: string) => boolean): IPoolView => {
+  const readable = (ws: string | null): boolean => ws !== null && canRead(ws);
+  return {
+    ...view,
+    hosts: view.hosts.map((h) => {
+      const tabsByWorkspace: Record<string, IPoolWorkspaceTabs> = {};
+      for (const [ws, t] of Object.entries(h.tabsByWorkspace)) {
+        const key = readable(ws) ? ws : OTHER_WORKSPACES;
+        const into = tabsByWorkspace[key] ?? { worker: 0, controlPlane: 0 };
+        tabsByWorkspace[key] = { worker: into.worker + t.worker, controlPlane: into.controlPlane + t.controlPlane };
+      }
+      const jobs = h.jobs.map((j) => (j.holder.admin || readable(j.holder.workspaceId)
+        ? j
+        : { ...j, holder: { workspaceId: null, tabId: null, tabName: null, admin: false }, item: null, epic: null }));
+      return { ...h, tabsByWorkspace, jobs };
+    }),
+    queue: view.queue.map((q) => {
+      const ws = q.holder === 'admin' ? null : q.holder.slice(0, q.holder.indexOf('/'));
+      return q.holder === 'admin' || readable(ws) ? q : { ...q, holder: OTHER_WORKSPACES };
+    }),
+  };
 };

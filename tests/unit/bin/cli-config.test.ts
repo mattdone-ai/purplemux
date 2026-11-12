@@ -300,9 +300,13 @@ describe('purplemux config — the installed CLI against the real fleet-config r
     ]) {
       expect((await cli(args, orch)).code, args.join(' ')).toBe(2);
     }
+    expect(await auditLines()).toEqual([]);
+    // The server refuses this one: a refusal to a launch-verified tab is audited (ADR-0045 review r1), never with the value.
     const bad = await cli(['config', 'set', 'gate.slots', 'x'.repeat(300)], orch);
     expect(bad.code).toBe(2);
     expect(bad.stderr).toContain('config-invalid');
-    expect(await auditLines()).toEqual([]);
+    const lines = await auditLines();
+    expect(lines).toEqual([expect.objectContaining({ event: 'fleet-config-refused', action: 'set', key: 'gate.slots', code: 'config-invalid', refusal: 'invalid', reason: null })]);
+    expect(JSON.stringify(lines)).not.toContain('x'.repeat(300));
   });
 });

@@ -281,17 +281,20 @@ describe('the queue (vel-D4 AC 3, AC 4, AC 6)', () => {
 });
 
 describe('tab starts (vel-D4 AC 3, design §4 input 3)', () => {
-  it('a burst of 20 starts fills the budgets in the lease lock; the rest queue with distinct positions', async () => {
+  it('a burst of 20 starts fills the tab room in the lease lock; the rest queue with distinct positions', async () => {
     const { startTabOnPool, releaseTabStart } = await service();
     tabs = new Map([['host-a', { worker: 10, controlPlane: 2 }], ['host-b-lan', { worker: 20, controlPlane: 0 }]]);
+    // ADR-0045: the room is measured. host-a 24 - 20 = 4 free threads, host-b 48 - 44 = 4: two tabs each, each start
+    // lease counted as unseen work until the read can show it.
+    reads = [{ ...md, readAt: now, metrics: metrics({ load1: 20, load5: 20 }) }, aiRead({ load1: 44, load5: 44 })];
     const d = await deps();
     const holders = Array.from({ length: 20 }, (_, i) => tab(`tab-${i + 1}`));
     const started = await Promise.all(holders.map((h) => startTabOnPool({ panelType: 'claude-code' }, h, authority, d)));
     const ok = started.filter((s) => s.state === 'admitted');
     const waiting = started.flatMap((s) => (s.state === 'queued' ? [s.queued] : []));
-    expect(ok.map((s) => (s.state === 'admitted' ? s.host : '')).sort()).toEqual(['host-a', 'host-a', 'host-b-lan', 'host-b-lan', 'host-b-lan', 'host-b-lan']);
-    expect(waiting.map((q) => q.position).sort((a, b) => a - b)).toEqual(Array.from({ length: 14 }, (_, i) => i + 1));
-    expect(waiting.every((q) => q.of >= q.position && q.reason.includes('budget threads'))).toBe(true);
+    expect(ok.map((s) => (s.state === 'admitted' ? s.host : '')).sort()).toEqual(['host-a', 'host-a', 'host-b-lan', 'host-b-lan']);
+    expect(waiting.map((q) => q.position).sort((a, b) => a - b)).toEqual(Array.from({ length: 16 }, (_, i) => i + 1));
+    expect(waiting.every((q) => q.of >= q.position && q.reason.includes('tab room 0'))).toBe(true);
     const freed = ok[0];
     const freedHolder = holders[started.indexOf(freed)];
     await releaseTabStart(freed.state === 'admitted' ? freed.lease : null, freedHolder, authority);
@@ -300,9 +303,9 @@ describe('tab starts (vel-D4 AC 3, design §4 input 3)', () => {
     expect(await startTabOnPool({ panelType: 'claude-code', ticket: head.ticket }, headHolder, authority, d)).toMatchObject({ state: 'admitted' });
   });
 
-  it('a control-plane start from the workspace orchestrator is admitted here when every worker budget is full', async () => {
+  it('a control-plane start from the workspace orchestrator is admitted here when no host has tab room', async () => {
     const { startTabOnPool } = await service();
-    tabs = new Map([['host-a', { worker: 12, controlPlane: 0 }], ['host-b-lan', { worker: 24, controlPlane: 0 }]]);
+    reads = [{ ...md, readAt: now, metrics: metrics({ load1: 24, load5: 24 }) }, aiRead({ load1: 48, load5: 48 })];
     const d = await deps();
     expect(await startTabOnPool({ panelType: 'claude-code' }, tabA, authority, d)).toMatchObject({ state: 'queued' });
     expect(await startTabOnPool({ panelType: 'claude-code', class: 'control-plane' }, tab('tab-o'), authority, d)).toMatchObject({
@@ -312,7 +315,7 @@ describe('tab starts (vel-D4 AC 3, design §4 input 3)', () => {
 
   it('a worker claiming control-plane is downgraded to product and queued like any worker; the answer says why (r1 F3)', async () => {
     const { startTabOnPool } = await service();
-    tabs = new Map([['host-a', { worker: 12, controlPlane: 0 }], ['host-b-lan', { worker: 24, controlPlane: 0 }]]);
+    reads = [{ ...md, readAt: now, metrics: metrics({ load1: 24, load5: 24 }) }, aiRead({ load1: 48, load5: 48 })];
     const d = await deps();
     const got = await startTabOnPool({ panelType: 'claude-code', class: 'control-plane' }, tabA, authority, d);
     expect(got).toMatchObject({
@@ -348,9 +351,9 @@ describe('tab starts (vel-D4 AC 3, design §4 input 3)', () => {
     const d = await deps();
     expect(await startTabOnPool({ panelType: 'terminal' }, tabA, authority, d)).toMatchObject({ state: 'admitted', host: 'host-a', lease: null, envelope: null });
     expect(await startTabOnPool({ panelType: 'claude-code' }, noTab, authority, d)).toMatchObject({ state: 'admitted', host: 'host-b-lan', lease: null });
-    tabs = new Map([['host-a', { worker: 12, controlPlane: 0 }], ['host-b-lan', { worker: 24, controlPlane: 0 }]]);
+    reads = [{ ...md, readAt: now, metrics: metrics({ load1: 24, load5: 24 }) }, aiRead({ load1: 48, load5: 48 })];
     expect(await startTabOnPool({ panelType: 'claude-code' }, noTab, authority, d)).toMatchObject({
-      state: 'refused', refusal: 'no-budget', reason: expect.stringContaining('a queued start needs a tab or the admin token'),
+      state: 'refused', refusal: 'no-room', reason: expect.stringContaining('a queued start needs a tab or the admin token'),
     });
   });
 
@@ -414,9 +417,10 @@ describe('tab placement (AC 3, AC 4)', () => {
     expect(await d.leases()).toEqual([]);
   });
 
-  it('agent tabs on a host fill its budget', async () => {
+  it('a host with no tab room takes no tab, whatever its free memory (ADR-0045)', async () => {
     const { placeOnPool, readPoolView } = await service();
     tabs = new Map([['host-b-lan', { worker: 46, controlPlane: 0 }], ['host-a', { worker: 2, controlPlane: 1 }]]);
+    reads = [reads[0], aiRead({ load1: 48, load5: 48 })];
     const d = await deps();
     expect(await placeOnPool({ kind: 'tab', memGb: 0, panelType: 'claude-code' }, d)).toMatchObject({ host: 'host-a' });
     expect((await readPoolView(d)).hosts.map((h) => h.agentTabs)).toEqual([3, 46]);
@@ -557,7 +561,7 @@ describe('the ask token and the host pin (vel-POOL-ENF)', () => {
     const d = { ...(await deps()), leases: async () => listLeases(undefined, now) };
     const view = await readPoolView(d);
     expect(view.totals.slots.gate.used).toBe(0);
-    expect(view.features).toEqual(['ask-token', 'host-pin']);
+    expect(view.features).toEqual(['ask-token', 'host-pin', 'tab-room', 'item']);
   });
 
   it('a pin that matches no pool host is pool-no-pinned-host; pinned hosts that are full are pool-full', async () => {
@@ -665,5 +669,49 @@ describe('the ask token is the asker\'s alone (vel-POOL-ENF r2, review r1 of #64
     const hosts = Array.from({ length: 16 }, (_, i) => `h${i}-${'x'.repeat(40)}`);
     await expect(acquirePoolSlot({ kind: 'gate', ask: T, pin: { hosts } }, tabA, authority, await deps()))
       .rejects.toMatchObject({ code: 'pool-invalid', message: expect.stringContaining('at most 500') });
+  });
+});
+
+describe('plain creates and the live view (ADR-0045)', () => {
+  it('startPlainTab places on a clean answer with a start lease; a shadow-only or refused answer is here, never a ticket', async () => {
+    const { startPlainTab } = await service();
+    const d = await deps();
+    expect(await startPlainTab({ panelType: 'claude-code' }, tabA, authority, d)).toMatchObject({ state: 'placed', host: 'host-b-lan', local: false, lease: 'pool:host-b-lan/tab-1' });
+    reads = [{ ...md, readAt: now, metrics: metrics({ load1: 24, load5: 24 }) }, aiRead({ load1: 48, load5: 48 })];
+    expect(await startPlainTab({ panelType: 'claude-code' }, tabB, authority, d)).toMatchObject({ state: 'here', lease: null, reason: expect.stringContaining('tab room 0') });
+    config = {};
+    expect(await startPlainTab({ panelType: 'claude-code' }, tabC, authority, d)).toMatchObject({ state: 'here', reason: expect.stringContaining('no host passes every check; shadow mode would admit') });
+    const { listLeases } = await import('@/lib/lease-store');
+    expect((await listLeases('pool', now)).map((l) => l.name)).toEqual(['pool:host-b-lan/tab-1']);
+    expect(await startPlainTab({ panelType: 'claude-code' }, noTab, authority, d)).toMatchObject({ state: 'here', lease: null });
+  });
+
+  it('pool acquire --item writes the work item into the slot note; pool show names it with the holder', async () => {
+    const { acquirePoolSlot, readPoolView } = await service();
+    const d = await deps();
+    const got = admitted(await acquirePoolSlot({ kind: 'gate', item: 'PMUX-SM-LIMITS' }, tabA, authority, d));
+    const { listLeases } = await import('@/lib/lease-store');
+    expect((await listLeases('pool:', now)).find((l) => l.name === got.lease)?.note).toContain('item=PMUX-SM-LIMITS');
+    const job = (await readPoolView(d)).hosts.flatMap((h) => h.jobs).find((j) => j.lease === got.lease);
+    expect(job).toMatchObject({ kind: 'gate', item: 'PMUX-SM-LIMITS', holder: { workspaceId: 'ws1', tabId: 'tab-a' }, ageSeconds: 0 });
+    for (const item of ['two words', 'a'.repeat(121), '-leading', 7]) {
+      await expect(acquirePoolSlot({ kind: 'gate', item }, tabB, authority, d)).rejects.toMatchObject({ code: 'pool-invalid', message: expect.stringContaining('item must match') });
+    }
+  });
+
+  it('readPoolViewFor asks once per workspace the view names and folds the refused ones into other', async () => {
+    const { acquirePoolSlot, readPoolViewFor } = await service();
+    tabs = new Map([['host-a', { worker: 2, controlPlane: 0, byWorkspace: { ws1: { worker: 1, controlPlane: 0 }, ws9: { worker: 1, controlPlane: 0 } } }]]);
+    const d = await deps();
+    await acquirePoolSlot({ kind: 'gate', item: 'W9-1' }, { ...tab('tab-z'), workspaceId: 'ws9' }, authority, d);
+    const asked: string[] = [];
+    const view = await readPoolViewFor(async (ws) => {
+      asked.push(ws);
+      if (ws === 'ws9') throw new Error('unreadable');
+      return ws === 'ws1';
+    }, d);
+    expect(asked.sort()).toEqual(['ws1', 'ws9']);
+    expect(view.hosts[0].tabsByWorkspace).toEqual({ ws1: { worker: 1, controlPlane: 0 }, other: { worker: 1, controlPlane: 0 } });
+    expect(view.hosts.flatMap((h) => h.jobs)).toEqual([expect.objectContaining({ kind: 'gate', item: null, holder: { workspaceId: null, tabId: null, tabName: null, admin: false } })]);
   });
 });

@@ -166,3 +166,17 @@ describe('human-selected Scrum Master read scope', () => {
     expect(denied.out.status).toBe(403);
   });
 });
+
+describe('sameSelection (ADR-0045)', () => {
+  it('is the same actor, time, manager and workspaces; anything else, or null, is not', async () => {
+    const { sameSelection } = await import('@/lib/scrum-master-access');
+    const a = { actor: 'owner', updatedAt: 1, selection: { managerWorkspaceId: 'ws-pm', managerTabId: 'tab-sm', workspaceIds: ['ws-a', 'ws-b'] } };
+    expect(sameSelection(a, structuredClone(a))).toBe(true);
+    expect(sameSelection(a, { ...a, updatedAt: 2 })).toBe(false);
+    expect(sameSelection(a, { ...a, actor: 'other' })).toBe(false);
+    expect(sameSelection(a, { ...a, selection: { ...a.selection, managerTabId: 'tab-x' } })).toBe(false);
+    expect(sameSelection(a, { ...a, selection: { ...a.selection, workspaceIds: ['ws-a'] } })).toBe(false);
+    expect(sameSelection(a, null)).toBe(false);
+    expect(sameSelection(null, null)).toBe(false);
+  });
+});

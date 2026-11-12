@@ -12,7 +12,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     const result = await acquirePoolSlot(
       {
         kind: body.kind, memGb: body.memGb, threads: body.threads, ttlSeconds: body.ttlSeconds, panelType: body.panelType, role: body.role,
-        class: body.class, queue: body.queue, ticket: body.ticket, ask: body.ask, pin: body.pin,
+        class: body.class, queue: body.queue, ticket: body.ticket, ask: body.ask, pin: body.pin, item: body.item,
       },
       holderOf(caller),
       leaseAuthority,

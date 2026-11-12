@@ -6,7 +6,7 @@ vi.mock('@/lib/logger', () => {
   return { createLogger: () => logger };
 });
 
-const { AUTO_PLACE_TIMEOUT_MS, PoolTimeoutError, resolveAutoHost } = await import('@/lib/pool-tab-placement');
+const { AUTO_PLACE_TIMEOUT_MS, PoolTimeoutError, resolveAutoHost, resolvePlainHost } = await import('@/lib/pool-tab-placement');
 
 const remote: TTabStart = { state: 'admitted', host: 'host-b-lan', local: false, reason: 'most free memory', lease: 'pool:host-b-lan/tab-1', envelope: { threads: 2, memGb: 4 } };
 const here: TTabStart = { state: 'admitted', host: 'host-a', local: true, reason: 'local-only: budget threads 4/24', lease: 'pool:host-a/tab-1', envelope: { threads: 2, memGb: 4 } };
@@ -149,5 +149,62 @@ describe('resolveAutoHost: only a first-ask timeout falls back (review r1 F4)', 
     answer(waiting);
     await new Promise((r) => setTimeout(r, 10));
     expect(reask.release).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolvePlainHost (ADR-0045, ruling 11)', () => {
+  const placed = { state: 'placed' as const, host: 'host-b-lan', local: false, lease: 'pool:host-b-lan/tab-1', envelope: { threads: 2, memGb: 4 }, reason: 'most tab room: 9 more' };
+  const plainDeps = (over: Record<string, unknown> = {}) => ({
+    start: vi.fn(async () => placed as Awaited<ReturnType<Parameters<typeof resolvePlainHost>[1]['start']>>),
+    release: vi.fn(async () => {}),
+    registered: vi.fn(async () => ['host-b-lan']),
+    cwdOnHost: vi.fn(async () => true),
+    localName: () => 'host-a',
+    ...over,
+  });
+  it('a clean remote answer on a registered host with the cwd there is applied; the start lease goes with it', async () => {
+    const d = plainDeps();
+    expect(await resolvePlainHost({ cwd: '/srv/acme' }, d)).toEqual({
+      host: 'host-b-lan', lease: 'pool:host-b-lan/tab-1',
+      placement: { mode: 'place', host: 'host-b-lan', local: false, applied: true, reason: 'most tab room: 9 more', envelope: { threads: 2, memGb: 4 } },
+    });
+    expect(d.cwdOnHost).toHaveBeenCalledWith('host-b-lan', '/srv/acme');
+    expect(d.release).not.toHaveBeenCalled();
+  });
+
+  it('a local answer runs here and keeps its start lease', async () => {
+    const d = plainDeps({ start: vi.fn(async () => ({ ...placed, host: 'host-a', local: true, lease: 'pool:host-a/tab-1' })) });
+    expect(await resolvePlainHost({ cwd: '/srv/acme' }, d)).toMatchObject({ host: undefined, lease: 'pool:host-a/tab-1', placement: { local: true, applied: true } });
+    expect(d.cwdOnHost).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the pool answered here', { start: vi.fn(async () => ({ state: 'here', lease: null, reason: 'no host passes every check' })) }, 'fallback: no host passes every check', false],
+    ['a host not in remote.hosts', { registered: vi.fn(async () => []) }, 'host-b-lan is not in fleet config remote.hosts', true],
+    ['the cwd missing on the host', { cwdOnHost: vi.fn(async () => false) }, '/srv/acme is not a directory on host-b-lan', true],
+    ['an ssh error on the probe', { cwdOnHost: vi.fn(async () => { throw new Error('exit 255'); }) }, 'host-b-lan did not answer: exit 255', true],
+    ['the start itself fails', { start: vi.fn(async () => { throw new Error('lease store unreadable'); }) }, 'fallback: lease store unreadable', false],
+  ])('%s: created here, the reason says why, a taken start is given back', async (_name, over, reason, gaveBack) => {
+    const d = plainDeps(over);
+    const got = await resolvePlainHost({ cwd: '/srv/acme' }, d);
+    expect(got).toMatchObject({ host: undefined, lease: null, placement: { mode: 'place', host: 'host-a', local: true, applied: false, reason: expect.stringContaining(reason) } });
+    if (gaveBack) expect(d.release).toHaveBeenCalledWith('pool:host-b-lan/tab-1');
+    else expect(d.release).not.toHaveBeenCalled();
+  });
+
+  it('no answer in 2 s creates here; a late remote answer is given back', async () => {
+    vi.useFakeTimers();
+    try {
+      let answer: (v: typeof placed) => void = () => {};
+      const d = plainDeps({ start: vi.fn(() => new Promise((resolve) => { answer = resolve; })) });
+      const pending = resolvePlainHost({ cwd: '/srv/acme' }, d);
+      await vi.advanceTimersByTimeAsync(AUTO_PLACE_TIMEOUT_MS);
+      expect(await pending).toMatchObject({ host: undefined, placement: { applied: false, reason: 'fallback: no pool answer in 2000 ms' } });
+      answer(placed);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(d.release).toHaveBeenCalledWith('pool:host-b-lan/tab-1');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

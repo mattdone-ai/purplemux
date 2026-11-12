@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   budgetOf, buildPoolView, freeSlotNumber, hostState, leaseClass, leaseEnvelope, memOfLease, orderQueue, parsePoolLeaseName, parsePoolQueueName,
   parseTicket, placeWork, POOL_FEATURES, poolGateHostOf, poolLeaseName, poolLeaseNote, poolModeOf, poolNumberRefusal, poolQueueName, poolQueueNote,
-  requestEnvelope, slotCountCapOf,
+  redactPoolView, requestEnvelope, slotCountCapOf, tabPlaceModeOf,
   tabLocalOnly, wouldRefuseLine, type IPoolHostTabs, type IPoolTicket, type TConfigValue,
 } from '@/lib/pool';
 import type { ILease } from '@/types/lease';
@@ -192,11 +192,17 @@ describe('one budget per host at the measured sizes (vel-D4 AC 1)', () => {
 describe('the control-plane reserve (vel-D4 AC 2)', () => {
   const fullWorkers = { 'host-a': tabsOf(12) };
 
-  it('with the worker budget full, a gate and a worker tab are refused; the idle reserve is never given to them', () => {
-    expect(place([md()], { kind: 'gate', memGb: 0 }, [], fullWorkers)).toMatchObject({ ok: false, refusal: 'no-budget', queueable: true });
-    expect(place([md()], { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], fullWorkers)).toMatchObject({
-      ok: false, refusal: 'no-budget', reason: expect.stringContaining('budget threads 24/24 used, needs 2'),
+  it('with the worker budget and the worker room used up, a gate and a worker tab are refused; the idle reserve is never given to them', () => {
+    const gates = [1, 2, 3].map((n) => lease(`pool:host-a/gate-${n}`));
+    expect(place([md()], { kind: 'gate', memGb: 0 }, gates)).toMatchObject({ ok: false, refusal: 'no-budget', queueable: true });
+    expect(place([md({ load1: 24, load5: 24 })], { kind: 'tab', memGb: 0, panelType: 'codex-cli' })).toMatchObject({
+      ok: false, refusal: 'no-room', reason: expect.stringContaining('host-a: tab room 0: free threads 0 of min(32 - 8 reserve, max load 32)'),
     });
+  });
+
+  it('idle worker tabs no longer fill a gate\'s budget (ADR-0045): a gate counts job leases; tabs reach it through the measured load', () => {
+    expect(place([md()], { kind: 'gate', memGb: 0 }, [], fullWorkers)).toMatchObject({ ok: true, host: 'host-a' });
+    expect(place([md({ load1: 30, load5: 30 })], { kind: 'gate', memGb: 0 }, [], fullWorkers)).toMatchObject({ ok: false, refusal: 'overloaded' });
   });
 
   it('a control-plane tab is admitted here on the reserve, never queued, and says so', () => {
@@ -253,7 +259,7 @@ describe('priority classes (vel-D4 AC 5)', () => {
 
   it('a product ticket ahead keeps its host; a ticket that may run only elsewhere does not block', () => {
     const codex = ticket('tab', 1, { panelType: 'codex-cli' }, NOW - 20_000);
-    const s = states([md(), ai()]);
+    const s = states([md(), ai({ memAvailableBytes: 300 * GIB })]);
     expect(placeWork(s, { kind: 'tab', memGb: 0, panelType: 'claude-code' }, { queue: [codex] })).toMatchObject({ ok: true, host: 'host-b-lan' });
     expect(placeWork(s, { kind: 'tab', memGb: 0, panelType: 'grok-cli' }, { queue: [codex] })).toMatchObject({ ok: false, refusal: 'queued-ahead' });
     expect(placeWork(s, codex.req, { queue: [codex], self: codex.name })).toMatchObject({ ok: true, host: 'host-a' });
@@ -261,10 +267,30 @@ describe('priority classes (vel-D4 AC 5)', () => {
 });
 
 describe('a tab start that fits no host (vel-D4 AC 3)', () => {
-  it('a claude-code tab with every budget full is refused and queueable, never placed here', () => {
-    expect(place([md(), ai()], { kind: 'tab', memGb: 1 }, [], { 'host-a': 12, 'host-b-lan': 24 })).toMatchObject({
-      ok: false, refusal: 'no-budget', queueable: true, reason: expect.stringMatching(/host-a: budget threads 24\/24 used, needs 2.*host-b-lan: budget threads 48\/48 used, needs 2/),
+  it('a claude-code tab with no room on any host is refused and queueable, never placed here', () => {
+    expect(place([md({ load1: 30, load5: 30 }), ai({ load1: 60, load5: 60, memAvailableBytes: 300 * GIB })], { kind: 'tab', memGb: 1 })).toMatchObject({
+      ok: false, refusal: 'no-room', queueable: true, reason: expect.stringMatching(/host-a: tab room 0: free threads -6 .*host-b-lan: tab room 0: free threads -12 /),
     });
+  });
+
+  it('an explicit pool.slots tab cap refuses in either mode; the default ceiling only in enforce mode', () => {
+    const roomy = [md({ load1: 1, load5: 1, memAvailableBytes: 90 * GIB })];
+    const capped = { 'pool.slots.host-a.tab': '3' };
+    expect(place(roomy, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], { 'host-a': 3 }, (key) => capped[key as keyof typeof capped] ?? null)).toMatchObject({
+      ok: false, refusal: 'no-free-slot', reason: expect.stringContaining('tab 3/3 (pool.slots)'),
+    });
+    expect(place(roomy, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], { 'host-a': 19 })).toMatchObject({
+      ok: false, refusal: 'tab-ceiling', reason: expect.stringContaining('tab 19/19 (default ceiling: worker memory 77.0 GiB / 4.0 GiB)'),
+    });
+    expect(place(roomy, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], { 'host-a': 19 }, noConfig)).toMatchObject({
+      ok: true, host: 'host-a', wouldRefuse: { refusals: ['tab-ceiling'] },
+    });
+  });
+
+  it('coordinator tabs are not counted against the tab ceiling: they run on the reserve', () => {
+    const [s] = states([md({ load1: 1, load5: 1, memAvailableBytes: 90 * GIB })], [], { 'host-a': tabsOf(2, 5) });
+    expect(s.view.tabRoom).toMatchObject({ used: 2, ceiling: 19 });
+    expect(s.view.agentTabs).toBe(7);
   });
 
   it('a codex-cli tab with this host unknown waits; it is never sent remote', () => {
@@ -273,13 +299,13 @@ describe('a tab start that fits no host (vel-D4 AC 3)', () => {
 
   it('this host short of memory and no remote room: refused with the measured figures', () => {
     expect(place([md({ memAvailableBytes: 1 * GIB }), ai({ memAvailableBytes: 1 * GIB })], { kind: 'tab', memGb: 2 })).toMatchObject({
-      ok: false, refusal: 'no-memory', reason: expect.stringContaining('host-a: measured 1.0 GiB free, needs 8.0 GiB (4.0 GiB envelope + 4.0 GiB floor)'),
+      ok: false, refusal: 'no-room', reason: expect.stringContaining('host-a: tab room 0: free threads 8 of min(32 - 8 reserve, max load 32), free memory -13.0 GiB after the 14.0 GiB reserve; a tab needs 2 threads and 4.0 GiB + 4.0 GiB floor'),
     });
   });
 
   it('a local-only re-ask (the --cwd missing on the first host) is judged on this host alone', () => {
     expect(place([md(), ai()], { kind: 'tab', memGb: 0, localOnly: true })).toMatchObject({ ok: true, host: 'host-a', reason: expect.stringContaining('local-only') });
-    expect(place([md(), ai()], { kind: 'tab', memGb: 0, localOnly: true }, [], { 'host-a': 12 })).toMatchObject({ ok: false, queueable: true });
+    expect(place([md({ load1: 24, load5: 24 }), ai({ memAvailableBytes: 300 * GIB })], { kind: 'tab', memGb: 0, localOnly: true })).toMatchObject({ ok: false, queueable: true });
   });
 });
 
@@ -293,15 +319,20 @@ describe('the read model (AC 1, AC 7)', () => {
     ), NOW);
     const [mdView, aiView, third] = view.hosts;
     expect(mdView).toMatchObject({ host: 'host-a', local: true, state: 'known', loadPerThread: 0.5, agentTabs: 5 });
-    expect(mdView.slots).toMatchObject({ gate: { used: 0, cap: 3, free: 1 }, build: { used: 0, cap: 3, free: 1 }, tab: { used: 6, cap: 12, free: 6 } });
-    expect(mdView.budget).toMatchObject({ workerThreads: 24, used: { product: { threads: 12, memBytes: 24 * GIB } }, free: { threads: 12, memBytes: 53 * GIB } });
+    // ADR-0045: the tab slot is the measured tab room (4 more at load 16 and 40 GiB) under the default ceiling 19, and the
+    // five idle tabs take nothing from a gate's budget.
+    expect(mdView.slots).toMatchObject({ gate: { used: 0, cap: 3, free: 3 }, build: { used: 0, cap: 3, free: 3 }, tab: { used: 6, cap: 19, free: 4 } });
+    expect(mdView.tabRoom).toEqual({ room: 4, used: 6, ceiling: 19, ceilingSource: 'default', limit: 10, free: 4, binding: 'threads', freeThreads: 8, freeMemBytes: 26 * GIB });
+    expect(mdView.budget).toMatchObject({ workerThreads: 24, used: { product: { threads: 0, memBytes: 0 } }, free: { threads: 24, memBytes: 77 * GIB } });
     expect(aiView).toMatchObject({ host: 'host-b-lan', local: false, state: 'known', loadPerThread: 0.5 });
     expect(aiView.metrics?.gpus).toEqual(gpu);
-    expect(aiView.slots.gate).toEqual({ used: 1, cap: 6, free: 3 });
-    expect(aiView.slots.build).toEqual({ used: 1, cap: 6, free: 3 });
+    expect(aiView.slots.gate).toEqual({ used: 1, cap: 6, free: 4 });
+    expect(aiView.slots.build).toEqual({ used: 1, cap: 6, free: 4 });
+    expect(aiView.jobs.map((j) => [j.kind, j.lease, j.ageSeconds])).toEqual([['build', 'pool:host-b-lan/build-2', 600], ['gate', 'pool:host-b-lan/gate-1', 600]]);
+    expect(third.tabRoom).toBeNull();
     expect(third).toMatchObject({ state: 'unknown', metrics: null, loadPerThread: null, budget: null, reason: expect.stringContaining('timed out') });
     expect(view.totals).toMatchObject({ threads: 96, memTotalBytes: 464 * GIB, knownHosts: 2, unknownHosts: 1 });
-    expect(view.totals.slots.gate).toEqual({ used: 1, cap: 9, free: 4 });
+    expect(view.totals.slots.gate).toEqual({ used: 1, cap: 9, free: 7 });
     expect(view.queue).toEqual([]);
   });
 
@@ -350,18 +381,20 @@ describe('placement (AC 3)', () => {
     ['build: by load as a gate', [md({ load1: 20 }), ai({ load1: 20 })], { kind: 'build', memGb: 4 }, 'host-b-lan'],
     ['gate: a host short of memory is skipped', [md({ load1: 20 }), ai({ load1: 10, memAvailableBytes: 10 * GIB })], { kind: 'gate', memGb: 8 }, 'host-a'],
     ['gate: a root at 85% is skipped', [md({ load1: 20 }), ai({ load1: 10, disks: [{ path: '/', usedPct: 85, freeBytes: 1 }] })], { kind: 'gate', memGb: 1 }, 'host-a'],
-    ['tab: most free memory, whatever the load', [md({ load1: 2, memAvailableBytes: 40 * GIB }), ai({ load1: 60, memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2 }, 'host-b-lan'],
-    ['tab: a tie keeps this host', [md({ memAvailableBytes: 40 * GIB }), ai({ memAvailableBytes: 40 * GIB })], { kind: 'tab', memGb: 2 }, 'host-a'],
+    ['tab: the most room wins, whatever the load per thread', [md({ load1: 2, load5: 2, memAvailableBytes: 40 * GIB }), ai({ load1: 30, load5: 30, memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2 }, 'host-b-lan'],
+    ['tab: more room wins over more free memory', [md({ load1: 2, load5: 2, memAvailableBytes: 90 * GIB }), ai({ load1: 40, load5: 40, memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2 }, 'host-a'],
+    ['tab: equal room, more free memory wins', [md({ load1: 16, memAvailableBytes: 40 * GIB }), ai({ load1: 40, memAvailableBytes: 82 * GIB })], { kind: 'tab', memGb: 2 }, 'host-b-lan'],
+    ['tab: a full tie goes to the remote host (ADR-0045)', [md({ load1: 16, memAvailableBytes: 80 * GIB }), ai({ load1: 40, memAvailableBytes: 80 * GIB })], { kind: 'tab', memGb: 2 }, 'host-b-lan'],
     ['tab: a full root does not refuse a tab', [md({ memAvailableBytes: 10 * GIB }), ai({ memAvailableBytes: 250 * GIB, disks: [{ path: '/', usedPct: 90, freeBytes: 1 }] })], { kind: 'tab', memGb: 2 }, 'host-b-lan'],
-    ['tab: codex-cli never remote', [md({ memAvailableBytes: 10 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'codex-cli' }, 'host-a'],
-    ['tab: grok-cli never remote', [md({ memAvailableBytes: 10 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'grok-cli' }, 'host-a'],
-    ['tab: terminal never remote', [md({ memAvailableBytes: 10 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'terminal' }, 'host-a'],
-    ['tab: an orchestrator-class (any role) tab never remote', [md({ memAvailableBytes: 10 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, role: 'evaluator' }, 'host-a'],
-    ['tab: claude-code with no role may go remote', [md({ memAvailableBytes: 10 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'claude-code' }, 'host-b-lan'],
+    ['tab: codex-cli never remote', [md({ memAvailableBytes: 40 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'codex-cli' }, 'host-a'],
+    ['tab: grok-cli never remote', [md({ memAvailableBytes: 40 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'grok-cli' }, 'host-a'],
+    ['tab: terminal never remote', [md({ memAvailableBytes: 40 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'terminal' }, 'host-a'],
+    ['tab: an orchestrator-class (any role) tab never remote', [md({ memAvailableBytes: 40 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, role: 'evaluator' }, 'host-a'],
+    ['tab: claude-code with no role may go remote', [md({ memAvailableBytes: 40 * GIB }), ai({ memAvailableBytes: 250 * GIB })], { kind: 'tab', memGb: 2, panelType: 'claude-code' }, 'host-b-lan'],
     ['an unknown remote host takes nothing new', [md({ load1: 16 }), unknown('host-b-lan')], { kind: 'gate', memGb: 8 }, 'host-a'],
-    ['an unknown host takes nothing, even a tab', [md({ memAvailableBytes: 10 * GIB }), unknown('host-b-lan')], { kind: 'tab', memGb: 2 }, 'host-a'],
+    ['an unknown host takes nothing, even a tab', [md({ memAvailableBytes: 40 * GIB }), unknown('host-b-lan')], { kind: 'tab', memGb: 2 }, 'host-a'],
     ['a host read only through its fallback takes no gate (r2 F2)', [md({ load1: 16 }), viaFallback()], { kind: 'gate', memGb: 1 }, 'host-a'],
-    ['a host read only through its fallback takes no tab (r2 F2)', [md({ memAvailableBytes: 10 * GIB }), viaFallback()], { kind: 'tab', memGb: 2 }, 'host-a'],
+    ['a host read only through its fallback takes no tab (r2 F2)', [md({ memAvailableBytes: 40 * GIB }), viaFallback()], { kind: 'tab', memGb: 2 }, 'host-a'],
   ])('%s', (_name, reads, req, host) => {
     expect(place(reads, req)).toMatchObject({ ok: true, host });
   });
@@ -379,8 +412,8 @@ describe('placement (AC 3)', () => {
     expect(place(reads, req, leases)).toMatchObject({ ok: false, refusal, queueable: true });
   });
 
-  it('memory leased since the read counts against the host; older leases are in the read already', () => {
-    const reads = [md({ memAvailableBytes: 20 * GIB, load1: 2 }), ai({ memAvailableBytes: 30 * GIB, load1: 40, load5: 40 })];
+  it('work leased since the read counts against the host; older leases are in the read already', () => {
+    const reads = [md({ memAvailableBytes: 30 * GIB, load1: 20, load5: 20 }), ai({ memAvailableBytes: 76 * GIB, load1: 40, load5: 40 })];
     expect(place(reads, { kind: 'tab', memGb: 2 })).toMatchObject({ host: 'host-b-lan' });
     expect(place(reads, { kind: 'tab', memGb: 2 }, [lease('pool:host-b-lan/gate-1', NOW - 5_000, 16)])).toMatchObject({ host: 'host-a' });
     expect(place(reads, { kind: 'tab', memGb: 2 }, [lease('pool:host-b-lan/gate-1', NOW - 5 * 60_000, 16)])).toMatchObject({ host: 'host-b-lan' });
@@ -405,7 +438,7 @@ describe('placement (AC 3)', () => {
   it('totals count a fallback-only host in used and cap, never in free (N2)', () => {
     const totals = buildPoolView(states([md(), viaFallback()], [lease('pool:host-b-lan/gate-1')]), NOW).totals;
     expect(totals.slots.gate).toEqual({ used: 1, cap: 9, free: 3 });
-    expect(totals.slots.tab).toEqual({ used: 0, cap: 36, free: 12 });
+    expect(totals.slots.tab).toEqual({ used: 0, cap: 83, free: 4 });
     expect(buildPoolView(states([md(), ai()]), NOW).totals.slots.gate).toEqual({ used: 0, cap: 9, free: 9 });
   });
 
@@ -450,15 +483,24 @@ describe('pool.mode: shadow, the default, admits and logs; enforce refuses (revi
   it('shadow admits a sustained overload and a measured-memory refusal; the log line carries the tuning figures', () => {
     const reads = [md({ load1: 60, load5: 55, memAvailableBytes: 9 * GIB })];
     const recent = { 'host-a': { worker: 12, controlPlane: 1, recentStarts: [{ at: NOW - 10_000, threads: 2, memBytes: 4 * GIB }] } };
-    const placed = place(reads, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], recent, noConfig);
+    const gates = [1, 2, 3].map((n) => lease(`pool:host-a/gate-${n}`));
+    const placed = place(reads, { kind: 'gate', memGb: 0 }, gates, recent, noConfig);
     expect(placed).toMatchObject({ ok: true, host: 'host-a', wouldRefuse: { refusals: ['no-budget', 'no-memory', 'overloaded'], minLoad: 55, pendingThreads: 2 } });
     const line = wouldRefuseLine((placed as { wouldRefuse: IPoolWouldRefuse }).wouldRefuse);
-    expect(line).toMatch(/^pool would-refuse \(shadow, admitted\): host=host-a kind=tab class=product refusals=no-budget,no-memory,overloaded /);
-    expect(line).toContain('min_load=55 pending_threads=2 envelope_threads=2 envelope_mem_gib=4 max_load=32 mem_free_gib=5');
+    expect(line).toMatch(/^pool would-refuse \(shadow, admitted\): host=host-a kind=gate class=product refusals=no-budget,no-memory,overloaded /);
+    expect(line).toContain('min_load=55 pending_threads=2 envelope_threads=8 envelope_mem_gib=8 max_load=32 mem_free_gib=5');
     expect(line).toContain('worker_threads=24/24');
     expect(line).toContain('agent_tabs=worker:12,control-plane:1');
-    expect(line).toContain('sustained load 57 + 2 threads > max load 32');
-    expect(place(reads, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], recent, enforce)).toMatchObject({ ok: false, refusal: 'no-budget' });
+    expect(line).toContain('sustained load 57 + 8 threads > max load 32');
+    expect(place(reads, { kind: 'gate', memGb: 0 }, gates, recent, enforce)).toMatchObject({ ok: false, refusal: 'no-budget' });
+  });
+
+  it('shadow admits a worker tab with no room and logs it; enforce refuses it (ADR-0045)', () => {
+    const reads = [md({ load1: 60, load5: 55, memAvailableBytes: 9 * GIB })];
+    const placed = place(reads, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], { 'host-a': tabsOf(12, 1) }, noConfig);
+    expect(placed).toMatchObject({ ok: true, host: 'host-a', wouldRefuse: { kind: 'tab', refusals: ['no-room'] } });
+    expect(wouldRefuseLine((placed as { wouldRefuse: IPoolWouldRefuse }).wouldRefuse)).toContain('tab room 0');
+    expect(place(reads, { kind: 'tab', memGb: 0, panelType: 'codex-cli' }, [], { 'host-a': tabsOf(12, 1) }, enforce)).toMatchObject({ ok: false, refusal: 'no-room' });
   });
 
   it('shadow takes a host that passes every check before one that only shadow admits', () => {
@@ -613,8 +655,8 @@ describe('the host pin and the ask token (vel-POOL-ENF)', () => {
   });
 
   it('the view lists the features a client checks before it relies on them', () => {
-    expect(POOL_FEATURES).toEqual(['ask-token', 'host-pin']);
-    expect(buildPoolView(states([ctl()]), NOW).features).toEqual(['ask-token', 'host-pin']);
+    expect(POOL_FEATURES).toEqual(['ask-token', 'host-pin', 'tab-room', 'item']);
+    expect(buildPoolView(states([ctl()]), NOW).features).toEqual(['ask-token', 'host-pin', 'tab-room', 'item']);
   });
 
   it('a cancel mark is not a slot: it holds no budget and no slot number', () => {
@@ -634,5 +676,71 @@ describe('the host pin and the ask token (vel-POOL-ENF)', () => {
     expect(place([ctl(), wk()], term({ hosts: ['worker-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: false, refusal: 'no-pinned-host', queueable: false });
     expect(place([ctl(), wk()], term({ hosts: ['control-host'], local: false, gateHosts: [] }))).toMatchObject({ ok: true, host: 'control-host', envelope: null });
     expect(place([ctl(), wk()], { kind: 'tab', memGb: 0, panelType: 'terminal' })).toMatchObject({ ok: true, host: 'control-host' });
+  });
+});
+
+describe('the live view for the Scrum Master (ADR-0045)', () => {
+  const jobLease = (name: string, ws: string, tabName: string, note: string, epic: string | null = null, acquiredAt = NOW - 5 * 60_000): ILease => ({
+    ...leaseWith(name, note, acquiredAt), holder: { ...holder, workspaceId: ws, tabId: `tab-${tabName}`, tabName }, epic,
+  });
+
+  it('serves per host the tabs by workspace, each job with holder, item, epic and age, the read age and the root disk', () => {
+    const leases = [
+      jobLease('pool:host-b-lan/gate-1', 'ws-a', 'builder', poolLeaseNote({ threads: 8, memBytes: 8 * GIB }, 'product', null, 'PMUX-7#12'), 'epic-x'),
+      jobLease('pool:host-b-lan/build-1', 'ws-b', 'kit', poolLeaseNote({ threads: 8, memBytes: 8 * GIB }, 'harness'), null, NOW - 60_000),
+    ];
+    const tabs = { 'host-b-lan': { worker: 3, controlPlane: 1, byWorkspace: { 'ws-a': { worker: 2, controlPlane: 1 }, 'ws-b': { worker: 1, controlPlane: 0 } } } };
+    const view = buildPoolView(states([md(), known('host-b-lan', false, { threads: 64, memTotalBytes: 373 * GIB, memAvailableBytes: 300 * GIB }, NOW - 20_000)], leases, tabs), NOW);
+    const b = view.hosts[1];
+    // The build leased 40 s after the read's lag window opened is unseen: its 8 GiB come off the measured free memory.
+    expect(b).toMatchObject({ readAgeSeconds: 20, diskRootUsedPct: 50, memFreeBytes: 292 * GIB, tabsByWorkspace: { 'ws-a': { worker: 2, controlPlane: 1 }, 'ws-b': { worker: 1, controlPlane: 0 } } });
+    expect(b.jobs).toEqual([
+      { kind: 'gate', lease: 'pool:host-b-lan/gate-1', class: 'product', holder: { workspaceId: 'ws-a', tabId: 'tab-builder', tabName: 'builder', admin: false }, item: 'PMUX-7#12', epic: 'epic-x', acquiredAt: new Date(NOW - 300_000).toISOString(), ageSeconds: 300, envelope: { threads: 8, memGb: 8 } },
+      expect.objectContaining({ kind: 'build', class: 'harness', item: null, ageSeconds: 60 }),
+    ]);
+    expect(view.hosts[0].tabsByWorkspace).toEqual({});
+  });
+
+  it('redacts what a caller may not read: other workspaces fold into other, their jobs keep kind, class, age and envelope', () => {
+    const leases = [jobLease('pool:host-a/gate-1', 'ws-b', 'kit', poolLeaseNote({ threads: 8, memBytes: 8 * GIB }, 'product', null, 'SECRET-1'), 'epic-b')];
+    const tabs = { 'host-a': { worker: 3, controlPlane: 0, byWorkspace: { 'ws-a': { worker: 1, controlPlane: 0 }, 'ws-b': { worker: 1, controlPlane: 0 }, 'ws-c': { worker: 1, controlPlane: 0 } } } };
+    const view = buildPoolView(states([md()], leases, tabs), NOW, [ticket('gate', 1, {}, NOW - 1_000)]);
+    const redacted = redactPoolView(view, (ws) => ws === 'ws-a');
+    expect(redacted.hosts[0].tabsByWorkspace).toEqual({ 'ws-a': { worker: 1, controlPlane: 0 }, other: { worker: 2, controlPlane: 0 } });
+    expect(redacted.hosts[0].jobs[0]).toMatchObject({ kind: 'gate', class: 'product', ageSeconds: 300, envelope: { threads: 8, memGb: 8 }, holder: { workspaceId: null, tabId: null, tabName: null }, item: null, epic: null });
+    expect(redacted.queue[0].holder).toBe('ws-a/tab-a');
+    expect(redactPoolView(view, () => false).queue[0].holder).toBe('other');
+    expect(redactPoolView(view, () => true)).toEqual(view);
+  });
+
+  it('the room answer names a host only when it passes every check cleanly; else none and why', () => {
+    const roomy = buildPoolView(states([md({ load1: 30, load5: 30 }), ai({ load1: 4, load5: 4, memAvailableBytes: 300 * GIB })]), NOW);
+    expect(roomy.room.tab).toMatchObject({ host: 'host-b-lan', local: false, free: 22, reason: expect.stringContaining('most tab room: 22 more') });
+    expect(roomy.room.gate).toMatchObject({ host: 'host-b-lan', reason: expect.stringContaining('lowest load per thread') });
+    const shadowOnly = buildPoolView(states([md({ load1: 30, load5: 30 })], [], {}, noConfig), NOW);
+    expect(shadowOnly.room.tab).toMatchObject({ host: null, reason: expect.stringContaining('no host passes every check; shadow mode would admit host-a') });
+    const none = buildPoolView(states([unknown('host-a', true)]), NOW);
+    expect(none.room.tab).toMatchObject({ host: null, reason: expect.stringContaining('no host can take the tab') });
+  });
+
+  it('pool.tab-place.<workspace> reads here, advise or place; unset or a bad value is advise', () => {
+    expect(tabPlaceModeOf(noConfig, 'ws-a')).toBe('advise');
+    expect(tabPlaceModeOf(cfg({ 'pool.tab-place.ws-a': 'place' }), 'ws-a')).toBe('place');
+    expect(tabPlaceModeOf(cfg({ 'pool.tab-place.ws-a': ' here ' }), 'ws-a')).toBe('here');
+    expect(tabPlaceModeOf(cfg({ 'pool.tab-place.ws-a': 'auto' }), 'ws-a')).toBe('advise');
+    expect(tabPlaceModeOf(cfg({ 'pool.tab-place.ws-b': 'place' }), 'ws-a')).toBe('advise');
+  });
+
+  it('a slot note carries the item after the ask; an absent item writes nothing', () => {
+    expect(poolLeaseNote({ threads: 8, memBytes: 8 * GIB }, 'product', 'ask-0123456789abcdef', 'ORCH-1027')).toBe('pool mem=8 threads=8 class=product ask=ask-0123456789abcdef item=ORCH-1027');
+    expect(poolLeaseNote({ threads: 8, memBytes: 8 * GIB })).toBe('pool mem=8 threads=8 class=product');
+  });
+
+  it('a host with no read has no tab room and is never read as an empty host', () => {
+    const [s] = states([unknown('host-b-lan')], [], { 'host-b-lan': 4 });
+    expect(s.view).toMatchObject({ tabRoom: null, memFreeBytes: null, diskRootUsedPct: null, slots: { tab: { used: 4, cap: 0, free: 0 } } });
+    const [f] = states([viaFallback()]);
+    expect(f.view.tabRoom).toBeNull();
+    expect(f.view.slots.tab).toMatchObject({ cap: 64, free: 0 });
   });
 });

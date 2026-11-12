@@ -20,18 +20,40 @@ export const currentCoordinator = async (workspaceId: string, tabId: string,
     && (snapshot ? snapshot.liveSessions.has(tab.sessionName) : await hasSession(tab.sessionName));
 };
 
-/** A persisted human selection is effective only for its exact, still-current launch tab. */
-export const selectedScrumMasterScope = async (scope: TCliScope, targetWorkspaceId?: string): Promise<IPortfolioSelection | null> => {
+/** One persisted human selection: who made it, when, and what it names. */
+export interface IScrumMasterSnapshot {
+  actor: string;
+  updatedAt: number;
+  selection: IPortfolioSelection;
+}
+
+/** The current selection, read synchronously (the fleet-config write compares it inside its store lock, ADR-0045). */
+export const currentScrumMasterSelection = (): IScrumMasterSnapshot | null => getPortfolioStore().currentSelection();
+
+/** The same selection: the same actor and time, the same manager, and the same workspaces. */
+export const sameSelection = (a: IScrumMasterSnapshot | null, b: IScrumMasterSnapshot | null): boolean =>
+  !!a && !!b && a.actor === b.actor && a.updatedAt === b.updatedAt
+  && a.selection.managerWorkspaceId === b.selection.managerWorkspaceId && a.selection.managerTabId === b.selection.managerTabId
+  && a.selection.workspaceIds.length === b.selection.workspaceIds.length && a.selection.workspaceIds.every((ws, i) => b.selection.workspaceIds[i] === ws);
+
+/**
+ * The selection that makes this caller the Portfolio Scrum Master, or null: a persisted human selection is effective
+ * only for its exact, still-current launch tab.
+ */
+export const scrumMasterSnapshot = async (scope: TCliScope, targetWorkspaceId?: string): Promise<IScrumMasterSnapshot | null> => {
   if (scope.type !== 'workspace' || !scope.tabVerified || !scope.tabId) return null;
-  const designation = getPortfolioStore().currentSelection();
+  const designation = currentScrumMasterSelection();
   if (!designation || designation.selection.managerWorkspaceId !== scope.workspaceId
     || designation.selection.managerTabId !== scope.tabId
     || (targetWorkspaceId && !designation.selection.workspaceIds.includes(targetWorkspaceId))
     || !(await currentCoordinator(scope.workspaceId, scope.tabId))) return null;
-  const stillCurrent = getPortfolioStore().currentSelection();
-  return stillCurrent?.actor === designation.actor && stillCurrent.updatedAt === designation.updatedAt
-    ? designation.selection : null;
+  const stillCurrent = currentScrumMasterSelection();
+  return stillCurrent?.actor === designation.actor && stillCurrent.updatedAt === designation.updatedAt ? designation : null;
 };
+
+/** A persisted human selection is effective only for its exact, still-current launch tab. */
+export const selectedScrumMasterScope = async (scope: TCliScope, targetWorkspaceId?: string): Promise<IPortfolioSelection | null> =>
+  (await scrumMasterSnapshot(scope, targetWorkspaceId))?.selection ?? null;
 
 export const selectedScrumMasterCanRead = async (scope: TCliScope, workspaceId: string): Promise<boolean> =>
   (await selectedScrumMasterScope(scope, workspaceId)) !== null;

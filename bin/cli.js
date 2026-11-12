@@ -1160,7 +1160,7 @@ const leaseName = (args, what = 'NAME') => {
 
 // Fleet config (ADR-0019): versioned values tools read at call time. A change
 // is audited and sent to nobody.
-const CONFIG_USAGE = 'usage: config get KEY | list [--json] | set KEY VALUE [--expect-version N] | unset KEY [--expect-version N] | history [KEY] [--json]';
+const CONFIG_USAGE = 'usage: config get KEY [--json] | list [--json] | set KEY VALUE [--expect-version N] [--reason TEXT] | unset KEY [--expect-version N] [--reason TEXT] | history [KEY] [--json]';
 const CONFIG_KEY = /^[a-z][A-Za-z0-9._-]{1,63}$/;
 
 const configKey = (key) => {
@@ -1175,17 +1175,27 @@ const expectVersion = (args) => {
   return { expectedVersion: Number(raw) };
 };
 
-const setterText = (by) => (by.admin ? 'admin' : `${by.workspaceId}/${by.tabId}`);
+const setterText = (by) => (by.admin ? 'admin' : `${by.workspaceId}/${by.tabId}${by.role === 'portfolio-scrum-master' ? ' (portfolio scrum master)' : ''}`);
+
+/** `--reason TEXT` (ADR-0045): required of the Portfolio Scrum Master, optional for the admin token. */
+const configReason = (args) => {
+  if (!args.includes('--reason')) return {};
+  const reason = flagValue(args, '--reason');
+  if (!reason) die('--reason needs TEXT');
+  return { reason };
+};
 
 const cmdConfig = async (args) => {
   const sub = args[0];
-  const positional = stripBooleanFlags(stripFlags(args.slice(1), ['--expect-version']), ['--json']);
+  const positional = stripBooleanFlags(stripFlags(args.slice(1), ['--expect-version', '--reason']), ['--json']);
   switch (sub) {
     case 'get': {
       if (positional.length !== 1) die(CONFIG_USAGE);
       const key = configKey(positional[0]);
       requireEnv();
       const { body } = await api('GET', `/api/cli/fleet-config?key=${encodeURIComponent(key)}`);
+      // --json: the value with its version, which a Portfolio Scrum Master write passes back as --expect-version.
+      if (args.includes('--json')) return out(body);
       // The bare value, so a script reads it with $(purplemux config get KEY).
       process.stdout.write(`${body.value}\n`);
       return;
@@ -1208,7 +1218,7 @@ const cmdConfig = async (args) => {
     case 'set': {
       if (positional.length !== 2) die(CONFIG_USAGE);
       const key = configKey(positional[0]);
-      const data = { value: positional[1], ...expectVersion(args) };
+      const data = { value: positional[1], ...expectVersion(args), ...configReason(args) };
       requireEnv();
       const { body } = await api('PUT', `/api/cli/fleet-config/${encodeURIComponent(key)}`, data);
       return out(body);
@@ -1217,7 +1227,7 @@ const cmdConfig = async (args) => {
       if (positional.length !== 1) die(CONFIG_USAGE);
       const key = configKey(positional[0]);
       requireEnv();
-      const { body } = await api('DELETE', `/api/cli/fleet-config/${encodeURIComponent(key)}`, expectVersion(args));
+      const { body } = await api('DELETE', `/api/cli/fleet-config/${encodeURIComponent(key)}`, { ...expectVersion(args), ...configReason(args) });
       return out(body);
     }
     case 'history': {
@@ -1234,7 +1244,7 @@ const cmdConfig = async (args) => {
       for (const c of history) {
         const from = c.oldValue === null ? '(unset)' : c.oldValue;
         const to = c.newValue === null ? '(unset)' : c.newValue;
-        process.stdout.write(`${new Date(c.at).toISOString()}  ${c.key}  ${from} -> ${to}  v${c.version}  by ${setterText(c.by)}\n`);
+        process.stdout.write(`${new Date(c.at).toISOString()}  ${c.key}  ${from} -> ${to}  v${c.version}  by ${setterText(c.by)}${c.reason ? `  reason: ${c.reason}` : ''}\n`);
       }
       return;
     }
@@ -1809,7 +1819,13 @@ const cmdLease = async (args) => {
 
 const POOL_KINDS = ['gate', 'build', 'mutation', 'browser', 'test-service', 'tab'];
 const POOL_CLASSES = ['product', 'harness', 'control-plane'];
-const POOL_USAGE = 'usage: pool show [--json] | acquire --kind gate|build|mutation|browser|test-service|tab [--mem GB] [--threads N] [--class product|harness|control-plane] [--queue [--wait SECONDS] | --ticket TICKET] [--ttl 60m] [--panel-type T] [--role R] [--ask TOKEN] [--pin-host H]... [--pin-local] [--pin-gate-host G]... | release [LEASE|TICKET] [--ask TOKEN]';
+const POOL_USAGE = 'usage: pool show [--json] | room [--json] | acquire --kind gate|build|mutation|browser|test-service|tab [--mem GB] [--threads N] [--class product|harness|control-plane] [--queue [--wait SECONDS] | --ticket TICKET] [--ttl 60m] [--panel-type T] [--role R] [--ask TOKEN] [--item ITEM] [--pin-host H]... [--pin-local] [--pin-gate-host G]... | release [LEASE|TICKET] [--ask TOKEN]';
+const POOL_ITEM = /^[A-Za-z0-9][A-Za-z0-9._:#/@+-]{0,119}$/;
+
+/** One "where is room" answer (ADR-0045): the host, or none and why. */
+const roomText = (kind, a) => (a.host
+  ? `${kind} -> ${a.host}${a.local ? ' (this host)' : ''}${a.free !== undefined ? ` (${a.free} more)` : ''}: ${a.reason}`
+  : `${kind} -> none: ${a.reason}`);
 // vel-POOL-ENF: the server's grammars, so a bad value is a usage error before anything is sent.
 const POOL_ASK_TOKEN = /^[a-z0-9][a-z0-9-]{15,63}$/;
 const POOL_PIN_HOST = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -1928,6 +1944,14 @@ const printPool = (view) => {
     const sweep = m.sccacheSweep ? ` sccache-sweep ${m.sccacheSweep.state}` : '';
     const notPlaceable = h.placeable === false ? `; not placeable: ${h.reason}` : '';
     process.stdout.write(`  ${name}: ${m.threads} threads, load ${m.load1}/${m.load5} (${h.loadPerThread}/thread), ${gib(m.memAvailableBytes)}/${gib(m.memTotalBytes)} GiB free, ${disks}${gpu}${sweep}; gate ${slotText(h.slots.gate)} build ${slotText(h.slots.build)} tab ${slotText(h.slots.tab)}${h.via && h.via !== h.host ? ` via ${h.via}` : ''}${notPlaceable}\n`);
+    const r = h.tabRoom;
+    if (r) process.stdout.write(`    tab room: ${r.free} more (${r.used}/${r.limit}, ceiling ${r.ceiling} ${r.ceilingSource}, ${r.binding}); free ${r.freeThreads} threads, ${gib(r.freeMemBytes)} GiB after the reserve\n`);
+    const tabsBy = Object.entries(h.tabsByWorkspace ?? {}).map(([ws, t]) => `${ws} ${t.worker}${t.controlPlane ? `+${t.controlPlane}` : ''}`).join(', ');
+    if (tabsBy) process.stdout.write(`    tabs: ${tabsBy}\n`);
+    for (const j of h.jobs ?? []) {
+      const who = j.holder.admin ? 'admin' : j.holder.workspaceId ? `${j.holder.workspaceId}/${j.holder.tabName ?? j.holder.tabId ?? 'no-tab'}` : 'other';
+      process.stdout.write(`    ${j.kind} ${j.lease} ${j.class} ${Math.round(j.ageSeconds / 60)}m ${who}${j.item ? ` item ${j.item}` : ''}${j.epic ? ` epic ${j.epic}` : ''}\n`);
+    }
     const b = h.budget;
     if (b) {
       const workers = { threads: b.used.product.threads + b.used.harness.threads, memBytes: b.used.product.memBytes + b.used.harness.memBytes };
@@ -1938,6 +1962,9 @@ const printPool = (view) => {
   for (const q of view.queue ?? []) {
     process.stdout.write(`  queued ${q.position}: ${q.ticket} ${q.class} ${q.envelope.threads} threads ${q.envelope.memGb} GiB, hosts ${q.hosts.join(',') || 'none placeable'}, holder ${q.holder}, since ${q.queuedAt}\n`);
   }
+  if (view.room) process.stdout.write(`room: ${roomText('tab', view.room.tab)}; ${roomText('gate', view.room.gate)}\n`);
+  const tp = view.tabPlace;
+  if (tp) process.stdout.write(`plain creates: ${tp.advised} advised, ${tp.placedRemote} placed remote, ${tp.here} here (${tp.hereAtNoRoom} at no room)\n`);
 };
 
 const cmdPool = async (args) => {
@@ -1949,6 +1976,14 @@ const cmdPool = async (args) => {
       const { body } = await api('GET', '/api/cli/pool');
       if (rest.includes('--json')) return out(body);
       return printPool(body);
+    }
+    case 'room': {
+      requireEnv();
+      const { body } = await api('GET', '/api/cli/pool');
+      if (!body.room) die('this pool server serves no room answer (feature tab-room): upgrade the server');
+      if (rest.includes('--json')) return out(body.room);
+      process.stdout.write(`${roomText('tab', body.room.tab)}\n${roomText('gate', body.room.gate)}\n`);
+      return;
     }
     case 'acquire': {
       const kind = flagValue(rest, '--kind');
@@ -1987,6 +2022,9 @@ const cmdPool = async (args) => {
       if (role !== null) data.role = role;
       const ask = poolAskOf(rest);
       if (ask !== null) data.ask = ask;
+      const item = flagValue(rest, '--item');
+      if (rest.includes('--item') && (item === null || !POOL_ITEM.test(item))) die(`--item must match ${POOL_ITEM.source}, got "${item ?? ''}"`);
+      if (item !== null) data.item = item;
       const pin = poolPinOf(rest);
       if (pin !== null) data.pin = pin;
       requireEnv();
@@ -2051,7 +2089,7 @@ const cmdTabCreate = async (args) => {
   if (args.includes('--preview-url') && !previewUrl) die('--preview-url needs the http(s) URL of the preview the evaluator may browse');
   if (args.includes('--reports-to') && !reportsTo) die('--reports-to needs a tab id');
   if (args.includes('--report-on') && !reportOn) die('--report-on needs a comma-separated list of markers (DONE, BLOCKED, NEEDS-DECISION, READY-TO-MERGE, CHECKPOINTED) or all');
-  if (args.includes('--host') && !host) die('--host needs a host name from fleet config remote.hosts, or auto (the pool places it)');
+  if (args.includes('--host') && !host) die('--host needs a host name from fleet config remote.hosts, auto (the pool places it) or local (this host)');
   if (args.includes('--cwd') && !cwd) die('--cwd needs an absolute directory on the tab\'s host');
   // Past the WIP cap (ADR-0027): only the workspace's enabled orchestrator, with a reason that is audited.
   const overCap = args.includes('--over-cap');
@@ -3535,7 +3573,14 @@ Commands:
                                            is the workspace's enabled orchestrator tab; any other caller runs as
                                            product ("downgrade" says why). Only a first ask the pool does not
                                            answer in 2 s creates the tab here; every other pool error creates
-                                           nothing. The answer's "placement" says where and why
+                                           nothing. The answer's "placement" says where and why.
+                                           --host local: this host, and the pool is not asked (a coordinator).
+                                           No --host (ADR-0045): fleet config pool.tab-place.<workspaceId> says.
+                                           advise (default): created here, the room answer logged. place: a
+                                           claude-code tab with no role goes to the room answer when that host
+                                           passes every check, is in remote.hosts and has the cwd (--cwd, else the
+                                           workspace directory); else here. Never queued or refused by the pool.
+                                           here: created here, nothing asked
              [--cwd DIR]                   Start the tab in DIR, an absolute directory that must exist on the
                                            tab's host (cwd-missing, exit 2). A remote worker works in its own
                                            checkout or worktree on that host
@@ -3803,9 +3848,15 @@ Commands:
                                            names the id, never the text); a tab reads its own workspace's
   pool show [--json]                       The compute pool (ADR-0039): per host threads, load, free memory, disk,
                                            GPU, kind counts, the one budget (workers, harness share, control-plane
-                                           reserve) and the queue; an unknown host shows no figures, never 0
+                                           reserve) and the queue; an unknown host shows no figures, never 0.
+                                           ADR-0045: per host the tab room (measured free threads and memory after
+                                           the reserve, under the ceiling), tabs by workspace and each running job
+                                           with its holder, item, epic and age (a workspace you cannot read shows
+                                           as other); the room answer; the plain creates since the server started
+  pool room [--json]                       Where is room: the host for a claude-code tab and for a gate that passes
+                                           every check now, or none and why (ADR-0045)
   pool acquire --kind K [--mem GB] [--threads N] [--class product|harness] [--queue [--wait S] | --ticket T]
-             [--ttl 60m] [--panel-type T] [--role R] [--ask TOKEN] [--pin-host H]... [--pin-local]
+             [--ttl 60m] [--panel-type T] [--role R] [--ask TOKEN] [--item ITEM] [--pin-host H]... [--pin-local]
              [--pin-gate-host G]...
                                            K: gate, build, mutation, browser, test-service or tab. Admit the work on
                                            the shared host budget (vel-D4) and take a slot lease: prints {host,
@@ -3871,13 +3922,18 @@ Commands:
        [--head SHA] [--gate-log ABS]       The typed end of this turn (F6), before its last line. A builder's DONE and
                                            READY-TO-MERGE need --gate-log (checked: VALID, its tree is head's). No stop
                                            is held; an end line of higher rank wins over the row. Exit 2 names each defect
-  config get KEY                           Print a fleet config value bare (e.g. gate.slots); exit 7 when unset
+  config get KEY [--json]                  Print a fleet config value bare (e.g. gate.slots); exit 7 when unset.
+                                           --json: with its version, for --expect-version
   config list [--json]                     Every fleet config value with its version, time and setter
-  config set KEY VALUE [--expect-version N]
+  config set KEY VALUE [--expect-version N] [--reason TEXT]
                                            Set a value (admin token or the workspace's enabled orchestrator tab;
                                            else exit 3 forbidden). Nobody is messaged: tools read it at call time.
-                                           A stale --expect-version exits 3 config-version-conflict
-  config unset KEY [--expect-version N]    Remove a value (same authority); exit 7 when unset
+                                           A stale --expect-version exits 3 config-version-conflict. The Portfolio
+                                           Scrum Master's tab also writes tabs.cap-per-workspace.<ws> and
+                                           pool.tab-place.<ws> (a workspace in its selection) and
+                                           pool.slots.<host>.tab, with --reason and --expect-version (ADR-0045)
+  config unset KEY [--expect-version N] [--reason TEXT]
+                                           Remove a value (same authority); exit 7 when unset
   config history [KEY] [--json]            The last 200 changes: when, key, old -> new, version, who
   grant list [--json]                      Portfolio read grants held by or targeting your workspace (read-only; a human
                                            creates and revokes them in the web UI with the purplemux password).

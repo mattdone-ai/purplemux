@@ -7,6 +7,8 @@ import { createLogger } from '@/lib/logger';
 import {
   NO_TABS,
   POOL_CANCEL_TTL_SECONDS,
+  POOL_ITEM_RE,
+  ROOM_TAB_REQUEST,
   POOL_LEASE_KIND,
   POOL_QUEUE_LEASE_KIND,
   QUEUE_RETRY_SECONDS,
@@ -26,6 +28,8 @@ import {
   parseTicket,
   pathSlowMsOf,
   placeWork,
+  poolRoomAnswer,
+  redactPoolView,
   askLabel,
   poolCancelName,
   poolGateHostOf,
@@ -43,13 +47,13 @@ import {
   type TConfigValue,
 } from '@/lib/pool';
 import { getPoolReader } from '@/lib/pool-read';
-import { recentTabStarts, recordWouldRefuse, wouldRefuseView } from '@/lib/pool-runtime';
+import { recentTabStarts, recordWouldRefuse, tabPlaceView, wouldRefuseView } from '@/lib/pool-runtime';
 import { isValidRemoteHostName } from '@/lib/remote-host';
 import { pathAlertText, pathView } from '@/lib/tailnet-path';
 import type { ILease, ILeaseHolder } from '@/types/lease';
 import type {
-  IPoolAcquireResult, IPoolEnvelopeView, IPoolHostPath, IPoolPin, IPoolPlacementRequest, IPoolQueuedResult, IPoolView, TPoolHostRead, TPoolPlacement,
-  TPoolRefusalReason,
+  IPoolAcquireResult, IPoolEnvelopeView, IPoolHostPath, IPoolPin, IPoolPlacementRequest, IPoolQueuedResult, IPoolRoomAnswer, IPoolView,
+  IPoolWorkspaceTabs, TPoolHostRead, TPoolPlacement, TPoolRefusalReason,
 } from '@/types/pool';
 
 // The pool's operations (ADR-0039, vel-D4): the view the board and `pool show` read,
@@ -99,9 +103,17 @@ const readAgentTabs = async (localHost: string): Promise<Map<string, IPoolHostTa
     for (const tab of collectAllTabs(layout.root)) {
       if (!isAgentPanelType(tab.panelType)) continue;
       const host = poolHostId(tab.host ?? localHost);
-      const c = counts.get(host) ?? { worker: 0, controlPlane: 0 };
-      if (tab.id === orchestrator) c.controlPlane += 1;
-      else c.worker += 1;
+      const c = counts.get(host) ?? { worker: 0, controlPlane: 0, byWorkspace: {} };
+      const byWorkspace = c.byWorkspace as Record<string, IPoolWorkspaceTabs>;
+      const mine = byWorkspace[ws.id] ?? { worker: 0, controlPlane: 0 };
+      if (tab.id === orchestrator) {
+        c.controlPlane += 1;
+        mine.controlPlane += 1;
+      } else {
+        c.worker += 1;
+        mine.worker += 1;
+      }
+      byWorkspace[ws.id] = mine;
       counts.set(host, c);
     }
   }));
@@ -149,7 +161,39 @@ const ticketsOf = (leases: readonly ILease[]): IPoolTicket[] =>
 /** The pool model: `pool show`, `GET /api/cli/pool`, and the owner board's pool section (story 12). */
 export const readPoolView = async (deps: IPoolServiceDeps = defaultPoolServiceDeps()): Promise<IPoolView> => {
   const [facts, leases] = await Promise.all([gatherFacts(deps), deps.leases()]);
-  return buildPoolView(statesOf(facts, leases), deps.now(), ticketsOf(leases), wouldRefuseView(poolModeOf(facts.config)));
+  return buildPoolView(statesOf(facts, leases), deps.now(), ticketsOf(leases), wouldRefuseView(poolModeOf(facts.config)), tabPlaceView());
+};
+
+/** Every workspace id the view names: its tabs by workspace, its job holders and its queue holders. */
+const workspacesNamed = (view: IPoolView): string[] => {
+  const ids = new Set<string>();
+  for (const h of view.hosts) {
+    for (const ws of Object.keys(h.tabsByWorkspace)) ids.add(ws);
+    for (const j of h.jobs) if (j.holder.workspaceId) ids.add(j.holder.workspaceId);
+  }
+  for (const q of view.queue) if (q.holder !== 'admin' && q.holder.includes('/')) ids.add(q.holder.slice(0, q.holder.indexOf('/')));
+  return [...ids];
+};
+
+/**
+ * The view as one caller may read it (ADR-0045, ruling 13): `canRead` is asked once per workspace the view names; a
+ * workspace it refuses (or whose check fails) folds into `other`, and its jobs keep kind, class, age and envelope only.
+ */
+export const readPoolViewFor = async (
+  canRead: (workspaceId: string) => Promise<boolean>,
+  deps: IPoolServiceDeps = defaultPoolServiceDeps(),
+): Promise<IPoolView> => {
+  const view = await readPoolView(deps);
+  const ids = workspacesNamed(view);
+  const allowed = new Set((await Promise.all(ids.map(async (ws) => ((await canRead(ws).catch(() => false)) ? ws : null)))).filter((ws): ws is string => ws !== null));
+  return redactPoolView(view, (ws) => allowed.has(ws));
+};
+
+/** The tab room answer and this host's tab room, for a plain create's advice (ADR-0045): no lease, no lock. */
+export const readTabAdvice = async (deps: IPoolServiceDeps = defaultPoolServiceDeps()): Promise<{ room: IPoolRoomAnswer; localFree: number | null }> => {
+  const [facts, leases] = await Promise.all([gatherFacts(deps), deps.leases()]);
+  const states = statesOf(facts, leases);
+  return { room: poolRoomAnswer(states, ROOM_TAB_REQUEST, ticketsOf(leases)), localFree: states.find((s) => s.view.local)?.view.tabRoom?.free ?? null };
 };
 
 /**
@@ -221,7 +265,16 @@ export interface IPoolAcquireInput {
   ask?: unknown;
   /** Only these hosts (vel-POOL-ENF): `{hosts, local, gateHosts}`, their union; any kind. */
   pin?: unknown;
+  /** The work item the slot runs for (ADR-0045): `pool show` names it beside the holder. */
+  item?: unknown;
 }
+
+/** `item` (ADR-0045): one word of at most 120 characters, so it fits the lease note and never splits its fields. */
+export const parsePoolItem = (raw: unknown): string | null => {
+  if (absent(raw) || raw === '') return null;
+  if (typeof raw !== 'string' || !POOL_ITEM_RE.test(raw)) throw new PoolError('pool-invalid', `item must match ${POOL_ITEM_RE.source}, got ${JSON.stringify(raw)}`);
+  return raw;
+};
 
 const optionalText = (raw: unknown, field: string): string | undefined => {
   if (raw === undefined || raw === null || raw === '') return undefined;
@@ -354,6 +407,7 @@ export const acquirePoolSlot = async (
   const resolved = await resolvePoolClass(parsePoolRequest(input), holder, authority);
   const asked = resolved.req;
   const askToken = parseAskToken(input.ask);
+  const item = parsePoolItem(input.item);
   // A ticket note holds the pin and the token; one that would pass the lease note limit is refused here, before the lock
   // (review r1 of #64: the limit was unstated, and the failure came later as a lease-policy 400).
   const queueNote = poolQueueNote(asked, askToken);
@@ -390,7 +444,7 @@ export const acquirePoolSlot = async (
       return {
         name: poolLeaseName(placed.host, req.kind, n),
         ttlSeconds,
-        note: poolLeaseNote(envelope, cls, ask),
+        note: poolLeaseNote(envelope, cls, ask, item),
         release: self ? [self.name] : [],
         value: {
           queued: false,
@@ -527,4 +581,38 @@ export const releaseTabStart = async (lease: string | null, holder: ILeaseHolder
   await releasePoolSlot(lease, holder, authority).catch((err: unknown) => {
     log.warn(`pool: tab start lease ${lease} not released, it ends at its TTL: ${err instanceof Error ? err.message : err}`);
   });
+};
+
+export type TPlainTabStart =
+  | { state: 'placed'; host: string; local: boolean; lease: string | null; envelope: IPoolEnvelopeView | null; reason: string }
+  | { state: 'here'; lease: null; reason: string };
+
+/**
+ * The start of a plain `tab create` in `place` mode (ADR-0045, rulings 1 and 11): one admission with no queue. Only an
+ * answer that passes every check cleanly places the tab; a shadow-only admission, a refusal or a full pool means here,
+ * never a 202 or a 409. A caller that cannot hold a lease is placed without one.
+ */
+export const startPlainTab = async (
+  input: { panelType: string; role?: string },
+  holder: ILeaseHolder,
+  authority: ILeaseAuthority,
+  deps: IPoolServiceDeps = defaultPoolServiceDeps(),
+): Promise<TPlainTabStart> => {
+  const req: IPoolAcquireInput = { kind: 'tab', panelType: input.panelType, ...(input.role ? { role: input.role } : {}) };
+  try {
+    const got = await acquirePoolSlot({ ...req, ttlSeconds: TAB_START_TTL_SECONDS }, holder, authority, deps);
+    if ('queued' in got) return { state: 'here', lease: null, reason: got.reason };
+    if (got.wouldRefuse) {
+      await releaseTabStart(got.lease, holder, authority);
+      return { state: 'here', lease: null, reason: `no host passes every check; shadow mode would admit ${got.host}: ${got.wouldRefuse.detail}` };
+    }
+    return { state: 'placed', host: got.host, local: got.local, lease: got.lease, envelope: got.envelope, reason: got.reason };
+  } catch (err) {
+    if (err instanceof PoolError) return { state: 'here', lease: null, reason: err.message };
+    if (!(err instanceof LeaseError) || err.code !== 'caller-unresolved') throw err;
+  }
+  const placed = await placeOnPool(parsePoolRequest(req), deps);
+  if (!placed.ok) return { state: 'here', lease: null, reason: placed.reason };
+  if (placed.wouldRefuse) return { state: 'here', lease: null, reason: `no host passes every check; shadow mode would admit ${placed.host}: ${placed.wouldRefuse.detail}` };
+  return { state: 'placed', host: placed.host, local: placed.local, lease: null, envelope: placed.envelope, reason: placed.reason };
 };

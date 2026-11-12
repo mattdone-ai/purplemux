@@ -1,6 +1,6 @@
 import { createLogger } from '@/lib/logger';
 import { LOAD_LAG_MS, poolHostId, wouldRefuseLine, type IPoolRecentStart } from '@/lib/pool';
-import type { IPoolEnvelopeView, IPoolWouldRefuse, IPoolWouldRefuseView, TPoolMode, TPoolShadowedRefusal } from '@/types/pool';
+import type { IPoolEnvelopeView, IPoolTabPlaceView, IPoolWouldRefuse, IPoolWouldRefuseView, TPoolMode, TPoolShadowedRefusal, TPoolTabPlaceMode } from '@/types/pool';
 
 // The pool's in-process state (vel-D4 review r1): the shadow-mode would-refuse counter and the tab starts the
 // host reads cannot show yet. Both live on globalThis: the pool routes write them and the pool view and the fleet
@@ -21,12 +21,16 @@ interface IPoolRuntime {
   byHost: Map<string, IHostCount>;
   last: { at: number; line: string } | null;
   starts: Map<string, IPoolRecentStart[]>;
+  tabPlace: { advised: number; placedRemote: number; here: number; hereAtNoRoom: number; last: { at: number; line: string } | null };
 }
 
 const g = globalThis as unknown as { __ptPoolRuntime?: IPoolRuntime };
 
+const emptyTabPlaceCounts = (): IPoolRuntime['tabPlace'] => ({ advised: 0, placedRemote: 0, here: 0, hereAtNoRoom: 0, last: null });
+
 const runtime = (): IPoolRuntime => {
-  if (!g.__ptPoolRuntime) g.__ptPoolRuntime = { since: Date.now(), total: 0, byHost: new Map(), last: null, starts: new Map() };
+  if (!g.__ptPoolRuntime) g.__ptPoolRuntime = { since: Date.now(), total: 0, byHost: new Map(), last: null, starts: new Map(), tabPlace: emptyTabPlaceCounts() };
+  g.__ptPoolRuntime.tabPlace ??= emptyTabPlaceCounts();
   return g.__ptPoolRuntime;
 };
 
@@ -73,4 +77,40 @@ export const recentTabStarts = (now: number = Date.now()): Map<string, IPoolRece
     if (kept.length) out.set(host, kept);
   }
   return out;
+};
+
+export interface ITabPlaceRecord {
+  mode: TPoolTabPlaceMode;
+  workspaceId: string;
+  tabId: string;
+  /** Where the tab was created: on this host, or on the remote host the room answer named. */
+  outcome: 'here' | 'placed-remote';
+  /** This host's tab room before the create (`free`), null when it was not read. */
+  localFree: number | null;
+  /** The room answer, or why the create ran here. */
+  detail: string;
+}
+
+/**
+ * One plain `tab create` (ADR-0045): one log line and the counters the pool view serves. A create that ran here while
+ * this host's tab room was 0 is counted apart: the reserve is not protected then, only the WIP cap is (ruling 12).
+ */
+export const recordTabPlace = (r: ITabPlaceRecord, now: number = Date.now()): string => {
+  const noRoom = r.outcome === 'here' && r.localFree === 0;
+  const line = `pool tab-place: mode=${r.mode} workspace=${r.workspaceId} tab=${r.tabId} outcome=${r.outcome} `
+    + `local_free=${r.localFree === null ? 'unknown' : r.localFree}${noRoom ? ' at-no-room' : ''} | ${r.detail}`;
+  if (noRoom) log.warn(line);
+  else log.info(line);
+  const t = runtime().tabPlace;
+  if (r.mode === 'advise') t.advised += 1;
+  if (r.outcome === 'placed-remote') t.placedRemote += 1;
+  else t.here += 1;
+  if (noRoom) t.hereAtNoRoom += 1;
+  t.last = { at: now, line };
+  return line;
+};
+
+export const tabPlaceView = (): IPoolTabPlaceView => {
+  const t = runtime().tabPlace;
+  return { advised: t.advised, placedRemote: t.placedRemote, here: t.here, hereAtNoRoom: t.hereAtNoRoom, last: t.last ? { at: new Date(t.last.at).toISOString(), line: t.last.line } : null };
 };

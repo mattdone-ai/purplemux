@@ -1,5 +1,5 @@
 import { createLogger } from '@/lib/logger';
-import type { ITabStartInput, TTabStart } from '@/lib/pool-service';
+import type { ITabStartInput, TPlainTabStart, TTabStart } from '@/lib/pool-service';
 import type { IPoolEnvelopeView, IPoolQueuedResult, TPoolRefusalReason } from '@/types/pool';
 
 // `tab create --host auto` (ADR-0039 §4, vel-D4). The pool admits a concrete host
@@ -128,4 +128,72 @@ export const resolveAutoHost = async (
     }
   }
   return { kind: 'placed', host: first.host, cwdChecked: !!input.cwd, lease: first.lease, placement: { host: first.host, local: false, reason: first.reason, fallback: false, envelope: first.envelope } };
+};
+
+/** `tab create --host local` (ADR-0045): this host in every mode; the pool is not asked. */
+export const LOCAL_HOST = 'local';
+
+/** The placement a plain create answers with (ADR-0045): where it ran, and whether the room answer was applied. */
+export interface IPlainPlacement {
+  mode: 'place';
+  host: string;
+  local: boolean;
+  /** True when the tab runs where the room answer named; false when it fell back to this host. */
+  applied: boolean;
+  reason: string;
+  envelope: IPoolEnvelopeView | null;
+}
+
+export interface IPlainHostDeps {
+  start: () => Promise<TPlainTabStart>;
+  release: (lease: string | null) => Promise<void>;
+  /** `remote.hosts` as the create reads it. */
+  registered: () => Promise<string[]>;
+  cwdOnHost: (host: string, cwd: string) => Promise<boolean>;
+  localName: () => string;
+  timeoutMs?: number;
+}
+
+/** undefined `host`: create here. `lease`: the start lease the create releases once the tab is in its layout. */
+export interface IPlainHost {
+  host: string | undefined;
+  lease: string | null;
+  placement: IPlainPlacement;
+}
+
+/**
+ * A plain `tab create` in `place` mode (ADR-0045, ruling 11). It asks a start that never queues; a remote answer
+ * runs only when that host is in `remote.hosts` and the effective cwd (`--cwd`, else the workspace's first directory)
+ * is a directory there. Every failure before the create (no answer in 2 s, a refusal, a shadow-only admission, an
+ * unregistered host, a missing cwd, an ssh error) creates the tab here and says why. It never throws.
+ */
+export const resolvePlainHost = async (input: { cwd: string }, deps: IPlainHostDeps): Promise<IPlainHost> => {
+  const here = (reason: string, lease: string | null = null, envelope: IPoolEnvelopeView | null = null): IPlainHost => ({
+    host: undefined, lease, placement: { mode: 'place', host: deps.localName(), local: true, applied: false, reason, envelope },
+  });
+  const pending = deps.start();
+  let started: TPlainTabStart;
+  try {
+    started = await withTimeout(pending, deps.timeoutMs ?? AUTO_PLACE_TIMEOUT_MS);
+  } catch (err) {
+    if (err instanceof PoolTimeoutError) {
+      pending.then((late) => (late.state === 'placed' && late.lease ? deps.release(late.lease) : undefined)).catch(() => {});
+    }
+    return here(`fallback: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (started.state === 'here') return here(`fallback: ${started.reason}`);
+  if (started.local) return { host: undefined, lease: started.lease, placement: { mode: 'place', host: started.host, local: true, applied: true, reason: started.reason, envelope: started.envelope } };
+  let missing: string | null = null;
+  try {
+    if (!(await deps.registered()).includes(started.host)) missing = `${started.host} is not in fleet config remote.hosts`;
+    else if (!(await deps.cwdOnHost(started.host, input.cwd))) missing = `${input.cwd} is not a directory on ${started.host}`;
+  } catch (err) {
+    missing = `${started.host} did not answer: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  if (missing) {
+    await deps.release(started.lease);
+    log.warn(`tab create placed on this host: ${missing} (pool chose it: ${started.reason})`);
+    return here(`fallback: ${missing} (pool chose it: ${started.reason})`);
+  }
+  return { host: started.host, lease: started.lease, placement: { mode: 'place', host: started.host, local: false, applied: true, reason: started.reason, envelope: started.envelope } };
 };

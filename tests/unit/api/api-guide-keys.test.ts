@@ -12,7 +12,7 @@ import { IDLE_NUDGE_CONFIG_KEY, WAIT_BACKSTOP_CONFIG_KEY } from '@/lib/turn-end'
 import { ROTATE_AT_CONFIG_KEY } from '@/lib/context-lifecycle';
 import { CURATOR_KEYS } from '@/lib/curator-service';
 import { STOP_PAYLOAD_CONFIG_KEY, TURN_END_SOURCE_CONFIG_KEY } from '@/lib/turn-end-row';
-import { POOL_BUDGET_FIELDS, POOL_BUDGET_KEY_PREFIX, POOL_ENVELOPE_KEY_PREFIX, POOL_HARNESS_SHARE_KEY, POOL_MODE_KEY } from '@/lib/pool';
+import { POOL_BUDGET_FIELDS, POOL_BUDGET_KEY_PREFIX, POOL_ENVELOPE_KEY_PREFIX, POOL_HARNESS_SHARE_KEY, POOL_MODE_KEY, POOL_TAB_PLACE_KEY_PREFIX } from '@/lib/pool';
 
 vi.mock('@/lib/workspace-token', () => ({ resolveCliScope: () => ({ type: 'admin' }) }));
 
@@ -35,6 +35,7 @@ const SERVER_KEYS = [
   POOL_MODE_KEY,
   'pool.fallback.<alias>',
   'pool.gate-host.<host>',
+  `${POOL_TAB_PLACE_KEY_PREFIX}<workspaceId>`,
   ...Object.values(FLOW_CONFIG_KEYS),
   AUTO_ANSWER_KEY,
   QUESTION_MIN_VERSION_KEY,

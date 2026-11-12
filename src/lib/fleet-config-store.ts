@@ -97,7 +97,7 @@ export interface IFleetConfigResult {
 /** Setting the value a key already holds is not a change: no version, no history, no audit. */
 export const setValue = (
   state: IFleetConfigState,
-  input: { key: string; value: string; expectedVersion?: number },
+  input: { key: string; value: string; expectedVersion?: number; reason?: string },
   by: IFleetConfigSetter,
   now: number,
 ): IFleetConfigResult => {
@@ -105,20 +105,22 @@ export const setValue = (
   const old = valueOf(state, input.key);
   if (old?.value === input.value) return { state, change: null };
   const version = versionOf(state, input.key) + 1;
-  const change: IFleetConfigChange = { key: input.key, oldValue: old?.value ?? null, newValue: input.value, version, at: now, by };
+  const change: IFleetConfigChange = { key: input.key, oldValue: old?.value ?? null, newValue: input.value, version, at: now, by, ...(input.reason ? { reason: input.reason } : {}) };
   return { state: record(state, change, { value: input.value, version, setAt: now, setBy: by }), change };
 };
 
 export const unsetValue = (
   state: IFleetConfigState,
-  input: { key: string; expectedVersion?: number },
+  input: { key: string; expectedVersion?: number; reason?: string },
   by: IFleetConfigSetter,
   now: number,
 ): IFleetConfigResult => {
   const old = valueOf(state, input.key);
   if (!old) throw new FleetConfigError('config-not-found', `${input.key} is not set`);
   requireVersion(state, input.key, input.expectedVersion);
-  const change: IFleetConfigChange = { key: input.key, oldValue: old.value, newValue: null, version: versionOf(state, input.key) + 1, at: now, by };
+  const change: IFleetConfigChange = {
+    key: input.key, oldValue: old.value, newValue: null, version: versionOf(state, input.key) + 1, at: now, by, ...(input.reason ? { reason: input.reason } : {}),
+  };
   return { state: record(state, change, null), change };
 };
 

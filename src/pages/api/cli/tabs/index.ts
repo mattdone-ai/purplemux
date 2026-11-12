@@ -27,8 +27,10 @@ import { remoteHostUnreachableBody, remoteKitBrokenBody } from '@/lib/cli-error'
 import { RemoteCwdMissingError, RemoteKitBrokenError } from '@/lib/remote-kit';
 import { WipCapError, admitAgentCreate, auditOverCap } from '@/lib/tab-cap';
 import { checkEvaluatorBrowser, checkTabRole } from '@/lib/tab-role';
-import { AUTO_HOST, resolveAutoHost, type IAutoPlacement } from '@/lib/pool-tab-placement';
-import { releaseTabStart, startTabOnPool } from '@/lib/pool-service';
+import { AUTO_HOST, LOCAL_HOST, resolveAutoHost, resolvePlainHost, type IAutoPlacement, type IPlainPlacement } from '@/lib/pool-tab-placement';
+import { readTabAdvice, releaseTabStart, startPlainTab, startTabOnPool } from '@/lib/pool-service';
+import { isPlainPlaceable, notePlainCreate, readTabPlaceMode, type ITabAdvice } from '@/lib/tab-place';
+import type { TPoolTabPlaceMode } from '@/types/pool';
 import { sendPoolError } from '@/lib/pool-http';
 import { recordTabStart } from '@/lib/pool-runtime';
 import { resolveCaller } from '@/lib/caller';
@@ -251,8 +253,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         validPanelTypes: VALID_PANEL_TYPES,
       });
     }
-    // `--host auto` (ADR-0039 §4): a role tab is placed here, so its role check sees no host.
-    const roleCheck = checkTabRole(role, panelType as TPanelType | undefined, host === AUTO_HOST ? undefined : host, previewUrl, pgService);
+    // `--host auto` (ADR-0039 §4): a role tab is placed here, so its role check sees no host. `--host local` is this host.
+    const roleCheck = checkTabRole(role, panelType as TPanelType | undefined, host === AUTO_HOST || host === LOCAL_HOST ? undefined : host, previewUrl, pgService);
     if (!roleCheck.ok) return res.status(400).json(roleCheck.body);
     if (roleCheck.role === 'evaluator') {
       const browser = await checkEvaluatorBrowser();
@@ -261,7 +263,9 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     const resolvedType: TPanelType = panelType ? (panelType as TPanelType) : roleCheck.role ? 'claude-code' : 'terminal';
     let remoteHost: string | undefined;
     let autoPlacement: IAutoPlacement | null = null;
-    let requestedHost: unknown = host;
+    let plainPlacement: IPlainPlacement | null = null;
+    let plainMode: TPoolTabPlaceMode = 'here';
+    let requestedHost: unknown = host === LOCAL_HOST ? undefined : host;
     let cwdCheckedOnHost = false;
     let startLease: string | null = null;
     let startHolder: ILeaseHolder | null = null;
@@ -289,6 +293,25 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       requestedHost = auto.host;
       cwdCheckedOnHost = !!auto.cwdChecked;
       startLease = auto.lease;
+    }
+    // ADR-0045: a create without --host asks the pool as its workspace's pool.tab-place says; it never queues or refuses.
+    if (host === undefined && isPlainPlaceable(resolvedType, roleCheck.role, poolClass)) {
+      plainMode = await readTabPlaceMode(workspaceId);
+      if (plainMode === 'place' && (cwd === undefined || isCwdShape(cwd))) {
+        const holder = await tabStartHolder(req, workspaceId);
+        startHolder = holder;
+        const plain = await resolvePlainHost({ cwd: isCwdShape(cwd) ? cwd : ws.directories[0] }, {
+          start: () => startPlainTab({ panelType: resolvedType }, holder, leaseAuthority),
+          release: (lease) => releaseTabStart(lease, holder, leaseAuthority),
+          registered: readRemoteHosts,
+          cwdOnHost: remoteDirExists,
+          localName: originName,
+        });
+        plainPlacement = plain.placement;
+        requestedHost = plain.host;
+        cwdCheckedOnHost = plain.host !== undefined;
+        startLease = plain.lease;
+      }
     }
     try {
       if (requestedHost !== undefined) {
@@ -328,6 +351,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         ? await buildFreshLaunchCommand(workspaceId, { panelType: resolvedType, host: remoteHost, agentLaunchConfig, role: roleCheck.role, previewOrigin: roleCheck.previewOrigin, pgService: roleCheck.pgService, ...(trustCwd ? { trustCwd } : {}) })
         : undefined;
 
+      // Started before the create and never awaited by it (ruling 14): the advice reads the pool as it was.
+      const advice: Promise<ITabAdvice | null> | null = plainMode === 'here' ? null : readTabAdvice().catch(() => null);
       try {
         const tab = await addTabToPane(workspaceId, paneId, name, typeof cwd === 'string' ? cwd : ws.directories[0], resolvedType, command, {
           scope: scope as string[] | undefined,
@@ -345,6 +370,8 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         if (!tab) return res.status(500).json({ error: 'Failed to create tab' });
         // The new tab is in its layout (the ledger) but not yet in the host read (review r1 F6).
         if (autoPlacement?.envelope) recordTabStart(autoPlacement.host, autoPlacement.envelope);
+        if (plainPlacement?.applied && plainPlacement.envelope) recordTabStart(plainPlacement.host, plainPlacement.envelope);
+        if (advice && plainMode !== 'here') notePlainCreate({ mode: plainMode, workspaceId, tabId: tab.id, placement: plainPlacement }, advice);
         const wip = admission?.wip() ?? null;
         if (wip && admission?.passedCap() && wipCheck.overCapReason !== null && wipCheck.caller) {
           await auditOverCap({ workspaceId, tabId: tab.id, wip, reason: wipCheck.overCapReason, caller: wipCheck.caller });
@@ -429,6 +456,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
           ...(tab.rotateAt !== undefined ? { rotateAt: tab.rotateAt } : {}),
           ...(wip ? { wip } : {}),
           ...(autoPlacement ? { placement: autoPlacement } : {}),
+          ...(plainPlacement ? { placement: plainPlacement } : {}),
         });
       } catch (err) {
         if (err instanceof WipCapError) return res.status(409).json(err.body);

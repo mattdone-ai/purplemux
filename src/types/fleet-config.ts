@@ -3,6 +3,8 @@ export interface IFleetConfigSetter {
   workspaceId: string | null;
   tabId: string | null;
   admin: boolean;
+  /** Set for a write by the Portfolio Scrum Master's tab (ADR-0045). */
+  role?: 'portfolio-scrum-master';
 }
 
 export interface IFleetConfigValue {
@@ -21,6 +23,8 @@ export interface IFleetConfigChange {
   version: number;
   at: number;
   by: IFleetConfigSetter;
+  /** Why (ADR-0045): required of the Portfolio Scrum Master, optional for the admin token. */
+  reason?: string;
 }
 
 export interface IFleetConfigState {

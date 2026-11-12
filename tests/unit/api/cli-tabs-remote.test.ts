@@ -7,9 +7,14 @@ const layout = vi.hoisted(() => ({ addTabToPane: vi.fn() }));
 const registry = vi.hoisted(() => ({ hosts: ['host-b'] as string[] | Error }));
 const registerTab = vi.hoisted(() => vi.fn());
 const registerSeat = vi.hoisted(() => vi.fn());
-const pool = vi.hoisted(() => ({ start: vi.fn(), release: vi.fn() }));
+const pool = vi.hoisted(() => ({ start: vi.fn(), release: vi.fn(), plain: vi.fn(), advice: vi.fn() }));
 vi.mock('@/lib/pool-service', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/pool-service')>()), startTabOnPool: pool.start, releaseTabStart: pool.release,
+  startPlainTab: pool.plain, readTabAdvice: pool.advice,
+}));
+const placeMode = vi.hoisted(() => ({ value: 'advise' as 'here' | 'advise' | 'place' }));
+vi.mock('@/lib/tab-place', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/tab-place')>()), readTabPlaceMode: vi.fn(async () => placeMode.value),
 }));
 vi.mock('@/lib/caller', () => ({
   resolveCaller: vi.fn(async () => ({ scope: { type: 'workspace', workspaceId: 'ws-a' }, workspaceId: 'ws-a', tabId: 'tab-o', tabName: 'o', verified: true, identity: 'launch', admin: false })),
@@ -402,9 +407,99 @@ describe('POST /api/cli/tabs with host auto (ADR-0039 §4; consult ruling, story
     expect(pool.release).toHaveBeenCalledWith('pool:host-b-lan/tab-1', expect.anything(), expect.anything());
   });
 
-  it('a create without --host never asks the pool (advisory: a plain create keeps working)', async () => {
+  it('a create without --host in mode here never asks the pool', async () => {
+    placeMode.value = 'here';
     const state = await call('POST', { workspaceId: 'ws-a', panelType: 'claude-code', launch: false });
     expect(state.statusCode).toBe(201);
     expect(pool.start).not.toHaveBeenCalled();
+    expect(pool.plain).not.toHaveBeenCalled();
+    expect(pool.advice).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/cli/tabs without --host: pool.tab-place (ADR-0045)', () => {
+  const remotePlain = { state: 'placed', host: 'host-b-lan', local: false, lease: 'pool:host-b-lan/tab-1', envelope: { threads: 2, memGb: 4 }, reason: 'most tab room: 9 more' };
+  const advice = { room: { host: 'host-b-lan', local: false, free: 9, reason: 'most tab room: 9 more' }, localFree: 0 };
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete (globalThis as Record<string, unknown>).__ptPoolRuntime;
+    registry.hosts = ['host-b-lan'];
+    dirs.remote = true;
+    placeMode.value = 'advise';
+    pool.plain.mockResolvedValue(remotePlain);
+    pool.advice.mockResolvedValue(advice);
+    pool.release.mockResolvedValue(undefined);
+    layout.addTabToPane.mockImplementation(async (_ws, _pane, name, cwd, panelType, _cmd, opts) => ({
+      id: 'tab-new', sessionName: 'pt-ws-a-pane-one-tab-new', name, order: 0, cwd, panelType, ...(opts?.host ? { host: opts.host } : {}),
+    }));
+  });
+
+  it('advise (the default): created here at once; the advice is asked but not waited for, then logged and counted', async () => {
+    let answer: (v: unknown) => void = () => {};
+    pool.advice.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const state = await call('POST', { workspaceId: 'ws-a', panelType: 'claude-code', launch: false });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).not.toHaveProperty('placement');
+    expect(layout.addTabToPane.mock.calls[0][6]).toMatchObject({ host: undefined });
+    expect(pool.plain).not.toHaveBeenCalled();
+    answer(advice);
+    await flush();
+    const { tabPlaceView } = await import('@/lib/pool-runtime');
+    expect(tabPlaceView()).toMatchObject({ advised: 1, here: 1, hereAtNoRoom: 1, last: { line: expect.stringContaining('mode=advise workspace=ws-a tab=tab-new outcome=here local_free=0 at-no-room | room answer host-b-lan') } });
+  });
+
+  it('place: a clean answer on a registered host with the workspace directory there runs the tab there', async () => {
+    placeMode.value = 'place';
+    const state = await call('POST', { workspaceId: 'ws-a', panelType: 'claude-code', launch: false });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).toMatchObject({ host: 'host-b-lan', placement: { mode: 'place', host: 'host-b-lan', local: false, applied: true } });
+    const { remoteDirExists } = await import('@/lib/remote-host');
+    expect(remoteDirExists).toHaveBeenCalledTimes(1);
+    expect(remoteDirExists).toHaveBeenCalledWith('host-b-lan', '/home/user/code/acme');
+    expect(pool.release).toHaveBeenCalledWith('pool:host-b-lan/tab-1', expect.anything(), expect.anything());
+    await flush();
+    const { tabPlaceView } = await import('@/lib/pool-runtime');
+    expect(tabPlaceView()).toMatchObject({ placedRemote: 1, here: 0 });
+  });
+
+  it('place: no --cwd and the workspace directory missing on the chosen host creates the tab here and gives the start back', async () => {
+    placeMode.value = 'place';
+    dirs.remote = false;
+    const state = await call('POST', { workspaceId: 'ws-a', panelType: 'claude-code', launch: false });
+    expect(state.statusCode).toBe(201);
+    expect(state.body).toMatchObject({ placement: { applied: false, local: true, reason: expect.stringContaining('/home/user/code/acme is not a directory on host-b-lan') } });
+    expect(state.body).not.toHaveProperty('host');
+    expect(layout.addTabToPane.mock.calls[0][6]).toMatchObject({ host: undefined });
+    expect(pool.release).toHaveBeenCalledWith('pool:host-b-lan/tab-1', expect.anything(), expect.anything());
+  });
+
+  it('place: an answer that is not clean, or a host not in remote.hosts, creates the tab here: never 202 or 409', async () => {
+    placeMode.value = 'place';
+    pool.plain.mockResolvedValueOnce({ state: 'here', lease: null, reason: 'no host can take the tab' });
+    const refused = await call('POST', { workspaceId: 'ws-a', panelType: 'claude-code', launch: false });
+    expect(refused.statusCode).toBe(201);
+    expect(refused.body).toMatchObject({ placement: { applied: false, reason: 'fallback: no host can take the tab' } });
+    registry.hosts = ['host-c'];
+    const unregistered = await call('POST', { workspaceId: 'ws-a', panelType: 'claude-code', launch: false });
+    expect(unregistered.statusCode).toBe(201);
+    expect(unregistered.body).toMatchObject({ placement: { applied: false, reason: expect.stringContaining('host-b-lan is not in fleet config remote.hosts') } });
+  });
+
+  it('--host local, a codex-cli tab, a role and a pool class are never placed, whatever the mode', async () => {
+    placeMode.value = 'place';
+    for (const body of [
+      { host: 'local', panelType: 'claude-code' },
+      { panelType: 'codex-cli' },
+      { panelType: 'claude-code', poolClass: 'control-plane' },
+    ]) {
+      const state = await call('POST', { workspaceId: 'ws-a', launch: false, ...body });
+      expect(state.statusCode, JSON.stringify(state.body)).toBe(201);
+      expect(state.body).not.toHaveProperty('placement');
+    }
+    expect(pool.plain).not.toHaveBeenCalled();
+    expect(pool.start).not.toHaveBeenCalled();
+    expect(layout.addTabToPane.mock.calls.every((c) => c[6].host === undefined)).toBe(true);
   });
 });

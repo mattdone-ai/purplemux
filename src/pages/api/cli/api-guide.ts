@@ -240,9 +240,27 @@ GET /api/cli/pool   (any valid scope)
   "active"|"stopped"|"failed"|"not-installed", "failed", "timer": { "loadState", "activeState",
   "unitFileState", "result" }, "service": null | { ...the same } } } }] }. "stopped" is an
   installed timer that is stopped or disabled; null is not read. Totals count known hosts only.
-  A kind's "used" counts its leases (and, for tab, the agent tabs on the host); "cap" is how many of
-  its envelopes the worker budget holds alone (or pool.slots.<host>.<kind>); "free" is how many more
-  fit the shared budget now. "queue": [{ "ticket", "kind", "class", "position", "envelope":
+  A job kind's "used" counts its leases; "cap" is how many of its envelopes the worker budget holds
+  alone (or pool.slots.<host>.<kind>); "free" is how many more fit the worker budget left by the job
+  leases now. For tab (ADR-0045) "used" is the worker tabs and live tab-start leases (coordinator tabs
+  run on the reserve and are not counted), "cap" the ceiling, "free" the tab room's "free".
+  "budget.used" holds the job leases and the coordinator tabs; worker tabs reach a job through the
+  measured load and memory, never through this ledger.
+  ADR-0045 per host: "tabRoom": null | { "room", "used", "ceiling", "ceilingSource":
+  "pool.slots"|"default", "limit", "free", "binding": "threads"|"memory"|"ceiling", "freeThreads",
+  "freeMemBytes" } (free threads = min(threads - reserve, max-load) - min(load1, load5) - unseen work;
+  free memory = available - unseen work - reserve; room = tabs of the envelope both hold, 4 GiB floor
+  kept; null for an unknown or fallback-only host), "tabsByWorkspace": { "<ws>"|"other": { "worker",
+  "controlPlane" } }, "jobs": [{ "kind", "lease", "class", "holder": { "workspaceId", "tabId",
+  "tabName", "admin" }, "item", "epic", "acquiredAt", "ageSeconds", "envelope" }] oldest first,
+  "memFreeBytes", "diskRootUsedPct", "readAgeSeconds". A workspace the caller cannot read folds into
+  "other", and its jobs show kind, class, age and envelope only (holder fields, item and epic null).
+  "room": { "tab": { "host", "local", "free", "reason" }, "gate": { "host", "local", "reason" } }: a host
+  only when it passes every check cleanly, else host null and why (\`purplemux pool room\`).
+  "tabPlace": { "advised", "placedRemote", "here", "hereAtNoRoom", "last" }: the plain creates since
+  the server started; hereAtNoRoom counts creates here while this host's tab room was 0 (the reserve
+  is not protected then, only the WIP cap is).
+  "queue": [{ "ticket", "kind", "class", "position", "envelope":
   { "threads", "memGb" }, "hosts", "holder", "queuedAt", "expiresAt" }] in admission order.
   503 pool-unreadable (exit 3) when the fleet config or the lease store cannot be read.
 
@@ -250,7 +268,8 @@ POST /api/cli/pool/acquire   (a tab token, or the admin token)
   Body: { "kind": "gate"|"build"|"mutation"|"browser"|"test-service"|"tab", "memGb"?: 0..1024,
           "threads"?: 1..4096, "ttlSeconds"?: n, "class"?: "product"|"harness"|"control-plane",
           "queue"?: true, "ticket"?: "pool-queue:<kind>-<n>",
-          "panelType"?: "claude-code", "role"?: "evaluator" }   (panelType, role, control-plane: kind tab only)
+          "panelType"?: "claude-code", "role"?: "evaluator", "item"?: "ITEM" }   (panelType, role, control-plane: kind tab only;
+          item: the work item, [A-Za-z0-9][A-Za-z0-9._:#/@+-]{0,119}, shown on pool show)
   \`purplemux pool acquire --kind K [--mem GB] [--threads N] [--class C] [--queue [--wait S] | --ticket T]
   [--ttl 60m] [--panel-type T] [--role R]\`.
   Admission (vel-D4): the envelope is the kind's, raised by memGb and set by threads. Unknown and
@@ -264,7 +283,9 @@ POST /api/cli/pool/acquire   (a tab token, or the admin token)
   harness, its share) waits for that host. Tab starts this server created within 60 s count as
   unseen in the measured checks. In pool.mode shadow (the default) the budget, measured-memory and
   sustained-load checks admit and log instead of refusing; the answer then carries "wouldRefuse". Jobs go to the lowest projected load per thread, then
-  the most free memory; tabs to the most free memory. A tie stays on this host. Only a claude-code
+  the most free memory, a tie staying on this host. A worker tab (ADR-0045) is admitted by its tab room
+  and ceiling instead of the budget and measured checks; tabs go to the most room, then the most free
+  memory, a tie going to a remote host. Only a claude-code
   tab with no role may leave this host (codex-cli and grok-cli cannot run remote, ADR-0022 §13; a
   coordinator is never remote, §20). A control-plane tab runs here on the reserve: never queued or
   refused, and its reason states the reserve use. Class control-plane is honoured only for the
@@ -1062,12 +1083,17 @@ Keys in use:
                fleet value for that workspace (capSource "workspace-config"). Both cap keys must be an
                integer 1..200 when written (else 400 config-invalid). A stored value that is invalid
                anyway serves the fleet cap with capSource "workspace-config-invalid" and "capReason",
-               and is logged. Admin token only, as above.
+               and is logged. Admin token only, except that the Portfolio Scrum Master's verified tab
+               writes it for a workspace in its portfolio selection, with a reason and the version it
+               read (ADR-0045); the fleet value stays with the admin token.
   pool.slots.<host>.<gate|build|mutation|browser|test-service|tab>
                A pool host's count cap for the kind (ADR-0039), a whole number 0..64 (0: none there);
                <host> is the lower-case pool host (this host's name or a remote.hosts alias).
                Unset means no count cap: the shared budget alone admits (vel-D4). Read on every
-               pool read. Admin token only.
+               pool read. For tab it is the host's tab ceiling, a hard refusal in both modes; unset,
+               the ceiling is floor(worker memory / tab memory), refused in enforce only (ADR-0045).
+               Admin token only, except that the Portfolio Scrum Master's verified tab writes the
+               tab form, with a reason and the version it read (ADR-0045).
   pool.budget.<host>.threads
   pool.budget.<host>.mem-gb
   pool.budget.<host>.reserve-threads
@@ -1098,7 +1124,18 @@ Keys in use:
                envelope, max_load, memory and agent_tabs, and count it ("wouldRefuse" on GET
                /api/cli/pool and "pool" on the fleet view). enforce refuses them. Every other
                check refuses in both modes. Go-live runs shadow for a day, tunes
-               pool.budget.<host>.max-load from the log, then sets enforce. Admin token only.
+               pool.budget.<host>.max-load from the log, then sets enforce. Since ADR-0045 a worker
+               tab's room (no-room) and the default tab ceiling (tab-ceiling) are shadowed the same
+               way. Admin token only.
+  pool.tab-place.<workspaceId>
+               What a tab create without --host does in that workspace (ADR-0045): advise (unset,
+               and any stored value that is not one of the three), here or place. advise creates the
+               tab here and logs the room answer after the create started; place sends a claude-code
+               tab with no role to the room answer when that host passes every check cleanly, is in
+               remote.hosts and has the cwd (--cwd, else the workspace's first directory), else here;
+               here asks nothing. A plain create is never queued or refused by the pool. Admin token
+               only, except that the Portfolio Scrum Master's verified tab writes it for a workspace
+               in its portfolio selection, with a reason and the version it read.
   pool.fallback.<alias>
                The ssh alias the pool read tries once when <alias> fails (the tailnet alias
                behind a LAN alias, e.g. host-b behind host-b-lan). Unset means one try. Admin
@@ -1152,13 +1189,22 @@ GET /api/cli/fleet-config
 GET /api/cli/fleet-config?key=KEY
   Response: { "key", "value", "version", "setAt", "setBy" }; 404 { "code": "config-not-found" } (CLI exit 7) when unset.
 GET /api/cli/fleet-config?history=1[&key=KEY]
-  The last 200 changes, oldest first: { "history": [{ "key", "oldValue", "newValue", "version", "at", "by" }] }.
-  An unset shows as newValue null.
-PUT /api/cli/fleet-config/KEY   { "value": "6", "expectedVersion"?: 4 }
+  The last 200 changes, oldest first: { "history": [{ "key", "oldValue", "newValue", "version", "at", "by", "reason"? }] }.
+  An unset shows as newValue null. "by" carries "role": "portfolio-scrum-master" for that writer.
+PUT /api/cli/fleet-config/KEY   { "value": "6", "expectedVersion"?: 4, "reason"?: "1..500 characters" }
+  Writers (ADR-0019, ADR-0045): the admin token writes every key; the workspace's enabled orchestrator tab
+  writes the keys that are not admin-only; the Portfolio Scrum Master's verified tab (the manager tab of
+  the current portfolio selection, a live coordinator) writes tabs.cap-per-workspace.<ws> and
+  pool.tab-place.<ws> for a workspace in its selection, and pool.slots.<host>.tab. Its write needs
+  "reason" and "expectedVersion" (400 config-invalid without), is refused when the selection changed
+  between the check and the write (403), and is audited with the reason and the selection. A refused write by a
+  launch-verified tab, or one naming a Scrum Master key form, is audited as "fleet-config-refused" with the key, the
+  code, the refusal kind and the reason given, never the value; a Scrum Master same-value set (changed false) as
+  "fleet-config-unchanged" with its reason.
   Response: { "key", "version", "value": { "value", "version", "setAt", "setBy" }, "changed" }. Setting the value a key already holds changes
   nothing (no version, no audit line). 400 config-invalid (exit 2); 403 forbidden (exit 3);
   409 config-version-conflict (exit 3) when expectedVersion is not the stored version (0 = never set).
-DELETE /api/cli/fleet-config/KEY   { "expectedVersion"?: 5 }
+DELETE /api/cli/fleet-config/KEY   { "expectedVersion"?: 5, "reason"?: "..." }
   Same authority. Response: { "key", "version", "unset": { change } }. 404 config-not-found (exit 7) when unset. The version keeps counting, so a key
   set again never repeats a version.
 

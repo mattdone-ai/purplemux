@@ -18,7 +18,11 @@ export interface IPoolUse {
   memBytes: number;
 }
 
-/** A host's one budget (vel-D4): the reserve comes off the top; every kind shares the rest. */
+/**
+ * A host's one budget (vel-D4): the reserve comes off the top; the job kinds share the rest. Since ADR-0045 `used`
+ * holds the job leases (`product`, `harness`) and the coordinator tabs on the reserve (`control-plane`): worker tabs
+ * reach admission through the measured load and memory, not through this ledger.
+ */
 export interface IPoolBudgetView {
   threads: number;
   memBytes: number;
@@ -30,8 +34,53 @@ export interface IPoolBudgetView {
   maxLoad: number;
   harnessSharePct: number;
   used: Record<TPoolClass, IPoolUse>;
-  /** Worker budget not reserved by product or harness work. */
+  /** Worker budget not reserved by product or harness job leases: what a job's step 3 admits against. */
   free: IPoolUse;
+}
+
+/**
+ * The tab room of a host at the read (ADR-0045): measured free threads and free memory, less the host's reserve,
+ * in tab envelopes, under a count ceiling. One function computes it for the admission and for this view.
+ */
+export interface IPoolTabRoom {
+  /** Tab envelopes the measured free threads and memory hold now (before the ceiling). */
+  room: number;
+  /** Worker tabs and live tab-start leases on the host. Coordinator tabs run on the reserve and are not counted. */
+  used: number;
+  ceiling: number;
+  /** `pool.slots`: the fleet key, a hard refusal; `default`: floor(worker memory / tab memory), soft in shadow mode. */
+  ceilingSource: 'pool.slots' | 'default';
+  /** min(used + room, ceiling): the tab limit of the host now. */
+  limit: number;
+  /** How many more worker tabs the host takes now: limit - used, never below 0. */
+  free: number;
+  /** What sets `free`: the measured threads, the measured memory, or the ceiling. */
+  binding: 'threads' | 'memory' | 'ceiling';
+  /** min(threads - reserve, max-load) - sustained load (min(load1, load5) + unseen work); below 0 when over. */
+  freeThreads: number;
+  /** Measured available memory less unseen work and the reserve; the 4 GiB floor is kept on top. */
+  freeMemBytes: number;
+}
+
+/** A job lease on a host (ADR-0045): who runs what, and since when. */
+export interface IPoolHostJob {
+  kind: TPoolJobKind;
+  lease: string;
+  class: TPoolClass;
+  /** Null fields: the caller may not read the holder's workspace (the details are redacted, never invented). */
+  holder: { workspaceId: string | null; tabId: string | null; tabName: string | null; admin: boolean };
+  /** `pool acquire --item`; null when the job named none or its workspace is redacted. */
+  item: string | null;
+  epic: string | null;
+  acquiredAt: string;
+  ageSeconds: number;
+  envelope: IPoolEnvelopeView;
+}
+
+/** Agent tabs of one workspace on one host. */
+export interface IPoolWorkspaceTabs {
+  worker: number;
+  controlPlane: number;
 }
 
 export interface IPoolDisk {
@@ -182,6 +231,20 @@ export interface IPoolHostView {
   slots: Record<TPoolKind, IPoolSlotUse>;
   /** Agent tabs whose tmux runs on this host (from the layouts), the orchestrator tabs among them included. */
   agentTabs: number;
+  /**
+   * The same tabs per workspace (ADR-0045). A workspace the caller may not read folds into the key `other`.
+   */
+  tabsByWorkspace: Record<string, IPoolWorkspaceTabs>;
+  /** Job leases (gate, build, mutation, browser, test-service) on the host, oldest first. */
+  jobs: IPoolHostJob[];
+  /** Null for a host that cannot take a tab now: unknown, or answered only through its fallback alias. */
+  tabRoom: IPoolTabRoom | null;
+  /** Measured available memory less the unseen work; null when unknown. */
+  memFreeBytes: number | null;
+  /** `/` used percent; null when not read. */
+  diskRootUsedPct: number | null;
+  /** Seconds since the last successful read; null when never read. */
+  readAgeSeconds: number | null;
   /** Null for an unknown host: its budget is not known, never zero. */
   budget: IPoolBudgetView | null;
   /** The tailnet path (vel-RETRO-R2); null for this host, and for a remote host not measured yet. */
@@ -220,7 +283,7 @@ export interface IPoolQueueEntry {
 export type TPoolMode = 'shadow' | 'enforce';
 
 /** The admission checks that shadow mode logs and admits instead of refusing. */
-export type TPoolShadowedRefusal = 'no-budget' | 'no-memory' | 'overloaded';
+export type TPoolShadowedRefusal = 'no-budget' | 'no-memory' | 'overloaded' | 'no-room' | 'tab-ceiling';
 
 /** One admission that enforce mode would have refused, with the figures `max-load` is tuned from. */
 export interface IPoolWouldRefuse {
@@ -253,17 +316,53 @@ export interface IPoolWouldRefuseView {
   last: { at: string; line: string } | null;
 }
 
+/** One "where is room" answer (ADR-0045): a host only when it passes every check cleanly, in either mode. */
+export interface IPoolRoomAnswer {
+  host: string | null;
+  local: boolean;
+  /** Tabs only: how many more worker tabs that host takes now. */
+  free?: number;
+  /** Why that host, or why none. */
+  reason: string;
+}
+
+export interface IPoolRoomView {
+  /** A claude-code product tab with no role. */
+  tab: IPoolRoomAnswer;
+  /** A gate with the default envelope. */
+  gate: IPoolRoomAnswer;
+}
+
+/**
+ * `pool.tab-place.<workspaceId>` (ADR-0045): what a `tab create` without `--host` does. `advise` (the default):
+ * create here and log where the pool would place it; `place`: create on the room answer when it is clean, else here;
+ * `here`: create here and ask nothing.
+ */
+export type TPoolTabPlaceMode = 'here' | 'advise' | 'place';
+
+/** Plain creates since the server started (ADR-0045): what the SM reads to see creates that land here at room 0. */
+export interface IPoolTabPlaceView {
+  advised: number;
+  placedRemote: number;
+  here: number;
+  /** Of `here`: created on this host while its tab room was 0 (the reserve is not protected then; only the WIP cap is). */
+  hereAtNoRoom: number;
+  last: { at: string; line: string } | null;
+}
+
 export interface IPoolView {
   at: string;
   hosts: IPoolHostView[];
   totals: IPoolTotals;
   queue: IPoolQueueEntry[];
   wouldRefuse: IPoolWouldRefuseView;
+  room: IPoolRoomView;
+  tabPlace: IPoolTabPlaceView;
   /** What this server honours (vel-POOL-ENF): a client relies on `ask-token` and `host-pin` only when listed here. */
   features: readonly TPoolFeature[];
 }
 
-export type TPoolFeature = 'ask-token' | 'host-pin';
+export type TPoolFeature = 'ask-token' | 'host-pin' | 'tab-room' | 'item';
 
 /**
  * The hosts a request may run on (vel-POOL-ENF): their union. `local` is the server's own host; `gateHosts` are the
@@ -283,7 +382,7 @@ export interface IPoolPin {
  */
 export type TPoolRefusalReason =
   | 'no-known-host' | 'no-free-slot' | 'no-memory' | 'disk-full' | 'no-budget' | 'harness-share' | 'overloaded' | 'queued-ahead' | 'too-large'
-  | 'no-pinned-host';
+  | 'no-pinned-host' | 'no-room' | 'tab-ceiling';
 
 export interface IPoolPlacementRequest {
   kind: TPoolKind;
