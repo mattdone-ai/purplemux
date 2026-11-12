@@ -1,9 +1,9 @@
 import type { ICaller } from '@/lib/caller';
 import { createHash } from 'crypto';
 import type { CoordinatorWindow } from '@/lib/coordinator-window';
-import type { IEnqueueRequest } from '@/lib/inbox-store';
+import { isRecoverableHold, type IEnqueueRequest } from '@/lib/inbox-store';
 import { isNoteBounceReason, renderNotePointerLine, type TNoteEvent } from '@/lib/inbox-templates';
-import { NotePointBounds, type INotePointPort } from '@/lib/note-pointer';
+import { NotePointBounds, type INotePointPort, type TPointerTyped } from '@/lib/note-pointer';
 import { createLogger } from '@/lib/logger';
 import {
   NOTE_EXPIRE_MS,
@@ -11,8 +11,8 @@ import {
   NOTE_OPEN_PER_SENDER,
   NOTE_REMIND_MS,
   NOTE_SENDER_NOTICE_MS,
-  NOTE_UNDELIVERED_NOTICE_MS,
   NoteError,
+  OWNER_ITEMS_ARMED_PER_SENDER,
   bounceNotified,
   OPEN_STATES,
   acked,
@@ -31,19 +31,23 @@ import {
   policyBlocked,
   prune,
   reachedComposer,
+  pointerSpent,
+  pointerStamped,
   readNotesState,
   recipientWorkspace,
+  routeKey,
   reminded,
   replaceNote,
   requeued,
   routed,
   senderNotified,
   undeliverable,
+  undeliveredNoticeMs,
   viewOf,
 } from '@/lib/notes-store';
 import type { IGrant } from '@/types/grant';
 import type { IInboxItem } from '@/types/inbox';
-import type { INote, INoteAdmission, INoteReceipt, INotesState, INoteView, TNoteRoutingStatus } from '@/types/note';
+import type { INote, INoteAdmission, INotePointerStamp, INoteReceipt, INotesState, INoteView, TNoteRoutingStatus } from '@/types/note';
 import { WorkerEventError } from '@/lib/worker-event-schema';
 import type { INoteEventRecord } from '@/types/worker-event';
 
@@ -91,9 +95,21 @@ export interface INotesDeps {
    * failure never holds back the bounce or the notice.
    */
   alertBounced?: (note: INote, now: number) => Promise<void>;
+  /**
+   * PMUX-NOTE-DELIVERY: the port the owner-item pointer types through (the inbox dispatcher's target reads). Absent:
+   * owner items keep only their inbox notice.
+   */
+  pointPort?: () => Promise<INotePointPort>;
+  /** An owner-item pointer line that may sit in its recipient's composer: alert its sender and the seat. Best effort. */
+  alertPointerSpent?: (note: INote, outcome: 'stranded' | 'unverified', at: number) => Promise<void>;
+  /** The ack, recorded for the sender as a `log` row in the ledger (never typed). Best effort. */
+  recordAck?: (note: INote) => Promise<void>;
 }
 
-/** The answer to a typed pointer (G7). `notSubmitted` is set when the line still sits in the composer. */
+/**
+ * The answer to a typed pointer (G7). `notSubmitted` is set when the line may sit in the composer: still in the box
+ * after Enter (`typed-not-submitted`), or not confirmed by the screen (`not-verified`, no receipt).
+ */
 export interface INotePointResult {
   status: 'sent';
   submitted: boolean;
@@ -101,8 +117,18 @@ export interface INotePointResult {
   target: { workspaceId: string; tabId: string };
   cliState: string | null;
   line: string;
-  notSubmitted?: 'typed-not-submitted';
+  notSubmitted?: 'typed-not-submitted' | 'not-verified';
 }
+
+/** Whether the server will point at an owner item: `armed`, or `inactive:<why>` (the send's answer). */
+export type TOwnerPointerState = 'armed' | `inactive:${string}`;
+
+/** One owner-item pointer attempt (PMUX-NOTE-DELIVERY). */
+type TOwnerAttempt =
+  | { result: 'disarmed'; reason: string }
+  | { result: 'spacing' }
+  | { result: 'refused'; reason: string }
+  | { result: TPointerTyped; detail?: string; note: INote; at: number };
 
 export interface ILiveTabs {
   tabs: ReadonlyArray<{ workspaceId: string; tabId: string }>;
@@ -119,6 +145,13 @@ const isBounce = (note: INote): boolean =>
 
 /** The note bounced and its sender is not yet told. A note stored before bounce alerts (no field) owes nothing. */
 const owesBounceNotice = (note: INote): boolean => isBounce(note) && note.bounceNotifiedAt === null;
+
+/** The send's answer for an owner item: whether the server will point at it on its current route. */
+const ownerPointerState = (note: INote): TOwnerPointerState => {
+  if (note.state !== 'delivered' || !note.deliveredTo) return `inactive:${note.routingReason ?? note.state}`;
+  if (note.deliveredTo.workspaceId === note.from.workspaceId) return 'inactive:same-workspace';
+  return 'armed';
+};
 
 /**
  * The reads one pass shares: the notes' own inbox and live-tab reads happen once each, and each epic
@@ -145,6 +178,8 @@ export interface ISendInput {
   body?: unknown;
   fromEpic?: unknown;
   externalKey?: string;
+  /** `true` flags an owner item; only the verified current orchestrator of the sender's workspace may set it. */
+  ownerItem?: unknown;
 }
 
 export interface IEventNoteInput {
@@ -276,7 +311,7 @@ export class NotesService {
       dedupeKey: `note:${note.id}:${event}:${to.tabId}`,
       fields: { noteId: note.id, fromWorkspaceId: note.from.workspaceId, fromTabId: note.from.tabId,
         fromHuman: note.admission?.mode === 'human', fromOwner: note.admission?.mode === 'owner', sentAt: note.createdAt, event,
-        ...reason },
+        ...reason, ...(event === 'undelivered' ? { afterMinutes: Math.round(undeliveredNoticeMs(note) / 60_000) } : {}) },
     };
   }
 
@@ -542,9 +577,10 @@ export class NotesService {
     }
     // The sender's notice counts from the first routing, once per note: it is the escalation for a
     // recipient that never reads the line, so it must not wait for the line to be read. G7: when the line has not
-    // reached the recipient's composer it comes at 15 min, and the Scrum Master seat's digest hears it too.
+    // reached the recipient's composer it comes at 15 min (an owner item: 5 min), and the Scrum Master seat's digest
+    // hears it too.
     const undelivered = next.deliveredAt === null;
-    const noticeAfter = undelivered ? NOTE_UNDELIVERED_NOTICE_MS : NOTE_SENDER_NOTICE_MS;
+    const noticeAfter = undelivered ? undeliveredNoticeMs(next) : NOTE_SENDER_NOTICE_MS;
     if (next.senderNotifiedAt === null && next.routedAt !== null && now - next.routedAt >= noticeAfter) {
       let told: TSenderNotice;
       try {
@@ -622,6 +658,9 @@ export class NotesService {
           await this.tickOnce(scope);
           scope = this.again;
         }
+        // The owner-item pointer types, so it runs after the pass released the notes lock (the inbox takes the
+        // dispatch lock first, then the notes lock).
+        await this.pointOwnerItems().catch((err) => log.warn(`owner-item pointer failed: ${err instanceof Error ? err.message : err}`));
       } finally {
         this.ticking = null;
       }
@@ -658,14 +697,18 @@ export class NotesService {
 
   // ─── the CLI operations ─────────────────────────────────────────────────
 
-  async send(caller: ICaller, input: ISendInput): Promise<INoteView> {
+  async send(caller: ICaller, input: ISendInput): Promise<INoteView & { ownerPointer?: TOwnerPointerState }> {
     return this.sendCore(caller, input);
   }
 
-  private async sendCore(caller: ICaller | null, input: ISendInput, humanActor?: string): Promise<INoteView> {
+  private async sendCore(caller: ICaller | null, input: ISendInput, humanActor?: string): Promise<INoteView & { ownerPointer?: TOwnerPointerState }> {
     const to = checkTarget(input.toEpic, input.toWorkspace);
     const subject = cleanSubject(input.subject);
     const body = checkBody(input.body);
+    if (input.ownerItem !== undefined && input.ownerItem !== true) {
+      throw new NoteError('note-invalid', 'ownerItem is true or absent');
+    }
+    const ownerItem = input.ownerItem === true;
     const externalKey = input.externalKey;
     if (externalKey !== undefined && !/^portfolio:(action|checkpoint|resolved):[A-Za-z0-9_-]{1,128}$/.test(externalKey)) {
       throw new NoteError('note-invalid', 'invalid portfolio note key');
@@ -682,6 +725,14 @@ export class NotesService {
     }
     const now = this.deps.now();
     const reads = this.reads();
+    // PMUX-NOTE-DELIVERY: the owner-item class types into a busy orchestrator, so only the verified current
+    // orchestrator of the sender's own workspace sets it: not a worker, the admin token, an owner-granted tab or a human.
+    if (ownerItem && (humanActor || !caller || !(await this.isCoordinator(caller, reads)))) {
+      await this.deps.audit?.({
+        event: 'owner-item-refused', from: { workspaceId: caller?.workspaceId ?? null, tabId: caller?.tabId ?? null }, to,
+      }).catch((err) => log.warn(`owner-item audit failed: ${err instanceof Error ? err.message : err}`));
+      throw new NoteError('forbidden', 'only the verified, current orchestrator of its own workspace sends an owner item');
+    }
     const admission: INoteAdmission = humanActor
       ? { mode: 'human', sender: { workspaceId: null, tabId: null }, humanActor,
         targetWorkspaceId: to.workspaceId!, authorizedAt: now }
@@ -705,6 +756,7 @@ export class NotesService {
       externalKey ? `n-${createHash('sha256').update(externalKey).digest('hex').slice(0, 24)}` : this.deps.newId(),
     );
     if (externalKey) note.externalKey = externalKey;
+    if (ownerItem) note.ownerItem = true;
     let created = false;
     const sent = await this.withOperation(() => this.deps.mutate(async (state) => {
       const existing = externalKey ? state.notes.find((n) => n.id === note.id) : null;
@@ -712,7 +764,7 @@ export class NotesService {
         if (existing.externalKey !== externalKey || existing.from.workspaceId !== note.from.workspaceId
           || existing.from.tabId !== note.from.tabId || JSON.stringify(existing.to) !== JSON.stringify(note.to)
           || existing.from.humanActor !== note.from.humanActor
-          || existing.subject !== subject || existing.body !== body) {
+          || existing.subject !== subject || existing.body !== body || (existing.ownerItem === true) !== ownerItem) {
           throw new NoteError('note-invalid', 'portfolio note key reused with different content');
         }
         return { state, value: existing };
@@ -723,6 +775,15 @@ export class NotesService {
       if (mine >= NOTE_OPEN_PER_SENDER) {
         throw new NoteError('note-cap', `this sender already has ${mine} open notes (the limit is ${NOTE_OPEN_PER_SENDER}); wait for acks or expiry`);
       }
+      if (ownerItem) {
+        // Armed, not open: a note the recipient read but never acked must not block the sender for 14 days.
+        const armed = state.notes.filter((n) => n.ownerItem && OPEN_STATES.has(n.state) && n.deliveredAt === null && !pointerSpent(n)
+          && n.from.workspaceId === note.from.workspaceId && n.from.tabId === note.from.tabId).length;
+        if (armed >= OWNER_ITEMS_ARMED_PER_SENDER) {
+          throw new NoteError('note-cap', `owner-item-cap: this sender already has ${armed} owner items not yet in a composer`
+            + ` (the limit is ${OWNER_ITEMS_ARMED_PER_SENDER}); wait for them to be delivered`);
+        }
+      }
       const bounced = await this.route(note, now, reads);
       // A failed notice never fails the send: the note stays unmarked and the next pass tells the sender.
       const routedNote = owesBounceNotice(bounced) ? await this.tellBounced(bounced, now, reads) : bounced;
@@ -730,7 +791,11 @@ export class NotesService {
       return { state: { notes: [...state.notes, routedNote] }, value: routedNote };
     }));
     if (admission.mode === 'owner' && created) await this.auditOwnerNote(sent);
-    return (await this.views([sent]))[0];
+    const view = (await this.views([sent]))[0];
+    if (!sent.ownerItem) return view;
+    // Not awaited: the first pointer attempt runs after the send's lock is released, and the answer does not wait on it.
+    if (created) void this.pointOwnerItems().catch((err) => log.warn(`owner-item pointer failed: ${err instanceof Error ? err.message : err}`));
+    return { ...view, ownerPointer: ownerPointerState(sent) };
   }
 
   /**
@@ -857,6 +922,7 @@ export class NotesService {
     const snapshot = await this.find(id);
     if (!canAck(snapshot, caller)) throw new NoteError('forbidden', `only the recipient workspace acks note ${snapshot.id}`);
     const targetWorkspaceId = snapshot.deliveredTo!.workspaceId;
+    let newlyAcked = false;
     const done = await this.deps.withMappingRead(targetWorkspaceId, () => this.withOperation(() => this.deps.mutate(async (state) => {
       const note = state.notes.find((n) => n.id === id);
       if (!note) throw new NoteError('note-not-found', `no note ${String(id)}`);
@@ -887,6 +953,7 @@ export class NotesService {
       }
       if (note.state === 'acked') return { state, value: note };
       if (note.state !== 'delivered') throw new NoteError('forbidden', `note ${note.id} is ${note.state}, not delivered`);
+      newlyAcked = true;
       if (note.inboxItemId) await this.deps.withdraw(note.inboxItemId, 'note-terminal:acked');
       if (note.reminderItemId) await this.deps.withdraw(note.reminderItemId, 'note-terminal:acked');
       const received = item?.state === 'delivered' && note.deliveredAt === null
@@ -896,6 +963,10 @@ export class NotesService {
       return { state: replaceNote(state, acknowledged), value: acknowledged };
     })));
     // F6: the ack is the store transition alone; nothing is typed to the sender, who reads it with `note list`.
+    // PMUX-NOTE-DELIVERY: it is also recorded in the sender tab's ledger as a `log` row (`events show`), never typed.
+    if (newlyAcked && this.deps.recordAck) {
+      await this.deps.recordAck(done).catch((err) => log.warn(`note ${done.id} ack record not written: ${err instanceof Error ? err.message : err}`));
+    }
     return (await this.views([done]))[0];
   }
 
@@ -931,6 +1002,13 @@ export class NotesService {
     const item = note.inboxItemId ? await r.inboxItem(note.inboxItemId) : null;
     if (note.deliveredAt !== null || item?.state === 'delivered') {
       throw new NoteError('forbidden', `note ${note.id} already reached its recipient's composer`);
+    }
+    // A notice held stranded or transport-uncertain was typed once already: a pointer would type the note twice.
+    if (item?.state === 'held' && !isRecoverableHold(item, this.deps.now())) {
+      throw new NoteError('forbidden', `note ${note.id}'s notice is held (${item.heldReason ?? 'unknown'}); it is not typed again`);
+    }
+    if (pointerSpent(note)) {
+      throw new NoteError('note-point-spent', `note ${note.id} already took its one pointer line on this route (${note.pointer!.outcome})`);
     }
     const decision = await this.recipientOf(note, r);
     if (decision.status !== 'routed') {
@@ -992,20 +1070,19 @@ export class NotesService {
           const line = renderNotePointerLine({
             noteId: note.id, fromWorkspaceId: note.from.workspaceId, fromTabId: note.from.tabId,
             fromHuman: false, fromOwner: note.admission?.mode === 'owner', sentAt: note.createdAt,
+            ...(note.ownerItem ? { ownerItem: true } : {}),
           });
+          const stamp = await this.stampPointer(id, to, 'point');
+          if (!stamp) return new NoteError('note-point-spent', `note ${id} took its pointer line on this route meanwhile`);
           const typed = await target.type(line);
           const now = this.deps.now();
           this.pointBounds.stamp(id, to, now);
-          if (!typed.submitted) {
+          await this.recordPointer(id, stamp, typed.outcome, now);
+          if (typed.outcome !== 'submitted') {
             return { status: 'sent', submitted: false, noteId: id, target: to, cliState: typed.cliState, line,
-              notSubmitted: 'typed-not-submitted' } satisfies INotePointResult;
+              notSubmitted: typed.outcome === 'stranded' ? 'typed-not-submitted' : 'not-verified' } satisfies INotePointResult;
           }
           this.deps.window?.()?.claim(to.workspaceId, to.tabId);
-          await this.deps.mutate(async (state) => {
-            const current = state.notes.find((n) => n.id === id);
-            if (!current || current.deliveredAt !== null) return { state, value: undefined };
-            return { state: replaceNote(state, reachedComposer(current, now)), value: undefined };
-          });
           if (note.inboxItemId) await this.deps.withdraw(note.inboxItemId, 'note-pointed');
           return { status: 'sent', submitted: true, noteId: id, target: to, cliState: typed.cliState, line } satisfies INotePointResult;
         } finally {
@@ -1021,8 +1098,184 @@ export class NotesService {
       await audit(outcome.code, outcome.message);
       throw outcome;
     }
-    await audit(outcome.submitted ? 'submitted' : 'typed-not-submitted');
+    await audit(outcome.submitted ? 'submitted' : outcome.notSubmitted ?? 'typed-not-submitted');
     return outcome;
+  }
+
+  // ─── pointer stamps (PMUX-NOTE-DELIVERY) ─────────────────────────────────
+
+  /**
+   * Persist the pointer stamp BEFORE typing: a note takes at most one pointer line per route, across `note point`, the
+   * owner-item pointer and a restart. Null when the note is gone, already in a composer, or already stamped on this
+   * route. Runs inside the target's dispatch lock and the notes operation lock.
+   */
+  private async stampPointer(id: string, to: { workspaceId: string; tabId: string }, by: INotePointerStamp['by']): Promise<INotePointerStamp | null> {
+    const stamp: INotePointerStamp = { route: routeKey(to), at: this.deps.now(), outcome: 'typing', by };
+    return this.deps.mutate(async (state) => {
+      const current = state.notes.find((n) => n.id === id);
+      if (!current || current.deliveredAt !== null || pointerSpent(current)
+        || !current.deliveredTo || routeKey(current.deliveredTo) !== stamp.route) return { state, value: null };
+      return { state: replaceNote(state, pointerStamped(current, stamp)), value: stamp };
+    });
+  }
+
+  /** The typing's outcome on the stamp; a submitted line is the note's composer receipt. Returns the note as stored. */
+  private async recordPointer(id: string, stamp: INotePointerStamp, outcome: TPointerTyped, at: number): Promise<INote | null> {
+    return this.deps.mutate(async (state) => {
+      const current = state.notes.find((n) => n.id === id);
+      if (!current) return { state, value: null };
+      let next = pointerStamped(current, { ...stamp, outcome });
+      if (outcome === 'submitted' && next.deliveredAt === null) next = reachedComposer(next, at);
+      return { state: replaceNote(state, next), value: next };
+    });
+  }
+
+  // ─── the owner-item pointer (PMUX-NOTE-DELIVERY) ────────────────────────
+
+  private ownerRunning: Promise<void> | null = null;
+  private ownerAgain = false;
+  /** The last refusal per note, so the audit writes a line only when the reason changes. */
+  private readonly ownerRefusals = new Map<string, string>();
+
+  /**
+   * Point at the oldest armed owner item of each target tab, one line per target per pass and at least
+   * OWNER_POINTER_SPACING_MS after any pointer line there. Runs with no notes lock held; each attempt takes the
+   * target's dispatch lock, then the notes lock, and checks everything again. One run at a time; a run asked for
+   * meanwhile runs once afterwards.
+   */
+  async pointOwnerItems(): Promise<void> {
+    if (!this.deps.pointPort) return;
+    if (this.ownerRunning) {
+      this.ownerAgain = true;
+      return this.ownerRunning;
+    }
+    this.ownerRunning = (async () => {
+      try {
+        do {
+          this.ownerAgain = false;
+          await this.pointOwnerItemsOnce();
+        } while (this.ownerAgain);
+      } finally {
+        this.ownerRunning = null;
+      }
+    })();
+    return this.ownerRunning;
+  }
+
+  private async pointOwnerItemsOnce(): Promise<void> {
+    const now = this.deps.now();
+    const { notes } = await this.deps.read();
+    const items = new Map((await this.deps.inboxItems()).map((item) => [item.id, item]));
+    const heads = new Map<string, INote>();
+    const armedIds = new Set<string>();
+    for (const note of [...notes].sort((a, b) => a.createdAt - b.createdAt)) {
+      if (!note.ownerItem || note.state !== 'delivered' || !note.deliveredTo || note.deliveredAt !== null || pointerSpent(note)) continue;
+      if (note.deliveredTo.workspaceId === note.from.workspaceId) continue;
+      const item = note.inboxItemId ? items.get(note.inboxItemId) : undefined;
+      if (!item || !(item.state === 'queued' || isRecoverableHold(item, now))) continue;
+      armedIds.add(note.id);
+      const key = routeKey(note.deliveredTo);
+      if (!heads.has(key)) heads.set(key, note);
+    }
+    // The refusal memory holds armed notes only, so it stays as small as the armed set.
+    for (const id of this.ownerRefusals.keys()) if (!armedIds.has(id)) this.ownerRefusals.delete(id);
+    if (heads.size === 0) return;
+    const port = await this.deps.pointPort!();
+    for (const note of heads.values()) {
+      const target = note.deliveredTo!;
+      if (this.pointBounds.targetBusy(target, this.deps.now())) continue;
+      try {
+        await this.pointOwnerItem(note.id, target, port);
+      } catch (err) {
+        log.warn(`owner-item pointer for note ${note.id} failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
+  /** Why the server will not point at this owner item now, or its current recipient. The stored flag is the authority. */
+  private async ownerArmed(note: INote | undefined, r: IReads): Promise<string | { workspaceId: string; tabId: string }> {
+    if (!note) return 'note-not-found';
+    if (!note.ownerItem) return 'not-owner-item';
+    if (note.state !== 'delivered' || !note.deliveredTo) return `note-${note.state}`;
+    if (note.deliveredAt !== null) return 'in-composer';
+    if (pointerSpent(note)) return 'pointer-spent';
+    const item = note.inboxItemId ? await r.inboxItem(note.inboxItemId) : null;
+    if (!item || !(item.state === 'queued' || isRecoverableHold(item, this.deps.now()))) {
+      return `notice-${item?.state ?? 'missing'}${item?.heldReason ? `:${item.heldReason}` : ''}`;
+    }
+    const decision = await this.recipientOf(note, r);
+    if (decision.status !== 'routed') return `route-${decision.status}:${decision.reason}`;
+    const { recipient } = decision;
+    if (routeKey(recipient) !== routeKey(note.deliveredTo)) return 'route-moving';
+    if (recipient.workspaceId === note.from.workspaceId) return 'same-workspace';
+    if ((await r.orchestratorOf(recipient.workspaceId)) !== recipient.tabId) return 'recipient-not-orchestrator';
+    return recipient;
+  }
+
+  private async pointOwnerItem(id: string, first: { workspaceId: string; tabId: string }, port: INotePointPort): Promise<void> {
+    const attempt = await port.withTarget(first.workspaceId, first.tabId, async (target): Promise<TOwnerAttempt> => {
+      const release = await this.acquireOperation();
+      try {
+        const note = (await this.deps.read()).notes.find((n) => n.id === id);
+        const armed = await this.ownerArmed(note, this.reads());
+        if (typeof armed === 'string') return { result: 'disarmed', reason: armed };
+        if (routeKey(armed) !== routeKey(first)) return { result: 'disarmed', reason: 'route-moving' };
+        if (this.pointBounds.targetBusy(armed, this.deps.now())) return { result: 'spacing' };
+        const refusal = await target.refusal();
+        if (refusal) return { result: 'refused', reason: refusal.reason };
+        const line = renderNotePointerLine({
+          noteId: note!.id, fromWorkspaceId: note!.from.workspaceId, fromTabId: note!.from.tabId,
+          fromHuman: false, fromOwner: note!.admission?.mode === 'owner', sentAt: note!.createdAt, ownerItem: true,
+        });
+        const stamp = await this.stampPointer(id, armed, 'owner-item');
+        if (!stamp) return { result: 'disarmed', reason: 'pointer-spent' };
+        const typed = await target.type(line);
+        const at = this.deps.now();
+        this.pointBounds.stamp(id, armed, at);
+        const stored = await this.recordPointer(id, stamp, typed.outcome, at);
+        // No window claim: an owner line neither waits for the coordinator window nor delays the digest behind it.
+        if (typed.outcome === 'submitted' && note!.inboxItemId) await this.deps.withdraw(note!.inboxItemId, 'note-pointed');
+        return { result: typed.outcome, detail: typed.detail, note: stored ?? note!, at };
+      } finally {
+        release();
+      }
+    });
+    const outcome: TOwnerAttempt = attempt ?? { result: 'refused', reason: 'target-tab-gone' };
+    if (outcome.result === 'spacing') return;
+    const reason = outcome.result === 'refused' || outcome.result === 'disarmed' ? outcome.reason : outcome.result;
+    if (outcome.result === 'refused' || outcome.result === 'disarmed') {
+      if (this.ownerRefusals.get(id) === reason) return;
+      this.ownerRefusals.set(id, reason);
+    } else {
+      this.ownerRefusals.delete(id);
+    }
+    await this.deps.audit?.({
+      event: 'note-pointer', by: 'owner-item', noteId: id, to: first, result: outcome.result,
+      ...(outcome.result === 'refused' || outcome.result === 'disarmed' ? { detail: outcome.reason } : {}),
+      ...('detail' in outcome && outcome.detail ? { detail: outcome.detail } : {}),
+    }).catch((err) => log.warn(`note-pointer audit failed: ${err instanceof Error ? err.message : err}`));
+    if ((outcome.result === 'stranded' || outcome.result === 'unverified') && this.deps.alertPointerSpent) {
+      const { note, at } = outcome;
+      void Promise.resolve().then(() => this.deps.alertPointerSpent!(note, outcome.result as 'stranded' | 'unverified', at)).catch((err) => {
+        log.warn(`note ${id} pointer alert not sent: ${err instanceof Error ? err.message : err}`);
+      });
+    }
+  }
+
+  // ─── retired ack notices (PMUX-NOTE-DELIVERY change 2) ──────────────────
+
+  /**
+   * Boot only: withdraw every `acked` notice (F6 retired the event) still queued or held. A held one was typed before
+   * F6 and stranded; it is never typed again, but it stays in `inbox list` for 7 days. Returns how many were withdrawn.
+   */
+  async sweepRetiredAckNotices(): Promise<number> {
+    let withdrawn = 0;
+    for (const item of await this.deps.inboxItems()) {
+      if (item.kind !== 'note' || (item.state !== 'queued' && item.state !== 'held')) continue;
+      if (!/^note:n-[A-Za-z0-9_-]{4,32}:acked:/.test(item.dedupeKey)) continue;
+      if (await this.deps.withdraw(item.id, 'note-ack-notice-retired')) withdrawn += 1;
+    }
+    return withdrawn;
   }
 
   async list(caller: ICaller, filter: IListFilter): Promise<INoteView[]> {
@@ -1112,6 +1365,25 @@ const defaultDeps = async (): Promise<INotesDeps> => {
       if (same(note.from) || same(note.deliveredTo)) return;
       await getStatusManager().routeTabEvent(undeliveredDigestEvent(note, at, senderTold));
     },
+    pointPort: async () => (await import('@/lib/note-pointer')).defaultNotePointPort(),
+    alertPointerSpent: async (note, outcome, at) => {
+      const [{ getPortfolioStore }, { getStatusManager }, { pointerSpentEvents }] = await Promise.all([
+        import('@/lib/portfolio-store'),
+        import('@/lib/status-manager'),
+        import('@/lib/note-pending'),
+      ]);
+      const seat = getPortfolioStore().currentSelection()?.selection;
+      const at2 = seat?.managerWorkspaceId && seat.managerTabId ? { workspaceId: seat.managerWorkspaceId, tabId: seat.managerTabId } : null;
+      for (const event of pointerSpentEvents(note, outcome, at, at2)) await getStatusManager().routeTabEvent(event);
+    },
+    recordAck: async (note) => {
+      const [{ getStatusManager }, { ackedLogEvent }] = await Promise.all([
+        import('@/lib/status-manager'),
+        import('@/lib/note-pending'),
+      ]);
+      const event = ackedLogEvent(note);
+      if (event) await getStatusManager().routeTabEvent(event);
+    },
     alertBounced: async (note) => {
       const [{ getStatusManager }, { bouncedDigestEvent }] = await Promise.all([
         import('@/lib/status-manager'),
@@ -1153,6 +1425,9 @@ export const startNotes = async (): Promise<void> => {
   const tick = (onlyEpic?: string) => {
     service.tick(onlyEpic).catch((err) => log.warn(`notes tick failed: ${err instanceof Error ? err.message : err}`));
   };
+  await service.sweepRetiredAckNotices()
+    .then((n) => { if (n) log.info(`withdrew ${n} retired ack notice(s)`); })
+    .catch((err) => log.warn(`retired ack sweep failed: ${err instanceof Error ? err.message : err}`));
   await service.reconcileInitial().catch((err) => log.warn(`initial notes tick failed: ${err instanceof Error ? err.message : err}`));
   if (g.__ptNotesRuntime !== runtime) return;
   // Claiming an epic routes the notes that waited for its owner now, not on the next tick.

@@ -63,6 +63,9 @@ export const paneShowsEmptyComposer = (panelType: TPanelType | undefined, conten
   return hasEmptyAgentComposer(panelType, plain);
 };
 
+/** An interactive option list (a permission or trust prompt, a picker) at the bottom of a pane already read as seen. */
+export const plainPaneShowsOptionList = (plain: string): boolean => parsePermissionOptions(tail(plain)).options.length > 0;
+
 /**
  * The Claude Code startup dialogs that stop a tab before any hook runs (D14). Texts measured on Claude Code
  * 2.1.318 (the pane fixtures in tests/fixtures/panes/: `claude-trust-prompt*.ansi`,

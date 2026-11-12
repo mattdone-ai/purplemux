@@ -82,6 +82,28 @@ export interface INote {
   bounceNotifiedAt?: number | null;
   expiredAt: number | null;
   transitionAt: number;
+  /**
+   * An owner item (PMUX-NOTE-DELIVERY): set at send only by the verified current orchestrator of the sender's
+   * workspace. The server then points at the note in its recipient orchestrator, busy included. Absent: an ordinary note.
+   */
+  ownerItem?: true;
+  /**
+   * The pointer stamp, per note and route: written before a pointer line is typed (by `note point` or the owner-item
+   * pointer), so a note is typed at most once per route, a restart included. A re-queue clears it.
+   */
+  pointer?: INotePointerStamp | null;
+}
+
+/** What became of the one pointer line on a route. `typing` is the stamp written before typing. */
+export type TNotePointerOutcome = 'typing' | 'submitted' | 'stranded' | 'unverified';
+
+export interface INotePointerStamp {
+  /** `<workspaceId>/<tabId>`: the route the line went to. */
+  route: string;
+  at: number;
+  outcome: TNotePointerOutcome;
+  /** Who typed it: the sender's `note point`, or the server's owner-item pointer. */
+  by: 'point' | 'owner-item';
 }
 
 export interface INotesState {
@@ -122,4 +144,6 @@ export type INoteView = Omit<INote, 'body' | 'state'> & {
 
 export type TNoteErrorCode = 'note-not-found' | 'note-too-large' | 'note-target-missing' | 'forbidden' | 'note-invalid' | 'note-cap'
   // `note point` (G7): the target tab is gone, its session is dead, it cannot take a line now, or a bound holds.
-  | 'tab-not-found' | 'session-not-running' | 'note-point-not-ready' | 'note-point-too-soon';
+  | 'tab-not-found' | 'session-not-running' | 'note-point-not-ready' | 'note-point-too-soon'
+  // PMUX-NOTE-DELIVERY: the note already took its one pointer line on this route.
+  | 'note-point-spent';

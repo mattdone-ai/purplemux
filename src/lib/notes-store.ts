@@ -7,7 +7,7 @@ import { NOTE_BODY_MAX_BYTES, NOTE_SUBJECT_MAX } from '@/lib/human-actions';
 import { EPIC_SLUG } from '@/lib/lease-policy';
 import { noteFromWords } from '@/lib/inbox-templates';
 import type { IInboxItem } from '@/types/inbox';
-import type { INote, INoteAdmission, INoteParty, INoteTarget, INotesState, INoteView, TNoteErrorCode, TNoteViewState } from '@/types/note';
+import type { INote, INoteAdmission, INoteParty, INotePointerStamp, INoteTarget, INotesState, INoteView, TNoteErrorCode, TNoteViewState } from '@/types/note';
 
 // Notes with acknowledgement (ADR-0013). Pure state transitions first, then the
 // one file store. Routing and delivery live in notes-service.ts.
@@ -33,6 +33,13 @@ export const NOTE_SENDER_NOTICE_MS = 60 * MIN;
  * decision cannot wait the 60 min (nor the inbox's 30 refusals, about 2.4 h). A line in a composer keeps the 60 min.
  */
 export const NOTE_UNDELIVERED_NOTICE_MS = 15 * MIN;
+/**
+ * PMUX-NOTE-DELIVERY: an owner item's sender hears at 5 min that its line has not reached the recipient's composer.
+ * Ordinary notes keep 15 min: the coordinator window holds an ordinary note back up to 10 min by design.
+ */
+export const OWNER_ITEM_UNDELIVERED_NOTICE_MS = 5 * MIN;
+/** Owner items one sender may have armed at a time (routed, not yet in a composer, pointer not spent). */
+export const OWNER_ITEMS_ARMED_PER_SENDER = 5;
 /** A note unacked (or undeliverable) this long after creation expires. */
 export const NOTE_EXPIRE_MS = 14 * DAY;
 /** How long expiry waits for a sender tab whose liveness is unknown, so its one notice is not lost. */
@@ -160,6 +167,7 @@ export const requeued = (note: INote, now: number): INote => ({
   remindedAt: null,
   reminderItemId: null,
   bounceNotifiedAt: null,
+  pointer: null,
   transitionAt: now,
 });
 
@@ -168,6 +176,19 @@ export const reminded = (note: INote, now: number, reminderItemId: string): INot
 export const senderNotified = (note: INote, now: number): INote => ({ ...note, senderNotifiedAt: now });
 export const bounceNotified = (note: INote, now: number): INote => ({ ...note, bounceNotifiedAt: now });
 export const expired = (note: INote, now: number): INote => ({ ...note, state: 'expired', expiredAt: now, transitionAt: now });
+
+/** `<workspaceId>/<tabId>`: the key a pointer stamp names its route by. */
+export const routeKey = (to: { workspaceId: string; tabId: string }): string => `${to.workspaceId}/${to.tabId}`;
+
+/** The note already took its one pointer line on its current route (any outcome, `typing` included). */
+export const pointerSpent = (note: INote): boolean =>
+  !!note.pointer && !!note.deliveredTo && note.pointer.route === routeKey(note.deliveredTo);
+
+export const pointerStamped = (note: INote, stamp: INotePointerStamp): INote => ({ ...note, pointer: stamp });
+
+/** The minutes after the first routing at which the sender hears that the line has not reached a composer. */
+export const undeliveredNoticeMs = (note: INote): number =>
+  (note.ownerItem ? OWNER_ITEM_UNDELIVERED_NOTICE_MS : NOTE_UNDELIVERED_NOTICE_MS);
 
 export const acked = (note: INote, by: { workspaceId: string; tabId: string | null }, comment: string | null, now: number): INote => ({
   ...note,

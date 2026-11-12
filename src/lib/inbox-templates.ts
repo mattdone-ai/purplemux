@@ -53,7 +53,8 @@ const count = (name: string, value: unknown): string => {
 
 /** Which note notice this is (ADR-0013). A server enum, never caller text. */
 // No `acked` event (F6): an ack types nothing into the sender, who reads the state with `purplemux note list`.
-// `undelivered` (G7) goes to the sender at 15 min when the line has not reached the recipient's composer.
+// `undelivered` (G7) goes to the sender at 15 min (an owner item: 5 min) when the line has not reached the recipient's
+// composer; the line states its own minutes (`afterMinutes`).
 // `bounced` goes to the sender at once when the note has no live recipient.
 export type TNoteEvent = 'delivered' | 'reminder' | 'unacked' | 'undelivered' | 'expired' | 'bounced';
 const NOTE_EVENTS: readonly TNoteEvent[] = ['delivered', 'reminder', 'unacked', 'undelivered', 'expired', 'bounced'];
@@ -90,10 +91,12 @@ export const noteFromWords = (from: {
  * `fromOwner` marks a note sent under an owner grant (ADR-0029); it needs a sender workspace.
  * `fromTabId: null` is a workspace token with no tab.
  * `event` defaults to `delivered`; `reminder` goes to the recipient, `unacked`, `undelivered`, `expired` and `bounced`
- * to the sender. `reason` is required on `bounced` alone.
+ * to the sender. `reason` is required on `bounced` alone. `afterMinutes` is the `undelivered` notice's own delay (15
+ * when absent). `ownerItem` marks a pointer line for a note its sender flagged as an owner item.
  */
 export interface INoteFields { noteId: string; fromWorkspaceId: string | null; fromTabId: string | null;
-  fromHuman?: boolean; fromOwner?: boolean; sentAt: number; event?: TNoteEvent; reason?: TNoteBounceReason }
+  fromHuman?: boolean; fromOwner?: boolean; sentAt: number; event?: TNoteEvent; reason?: TNoteBounceReason;
+  afterMinutes?: number; ownerItem?: boolean }
 /** What a watch notice reports (ADR-0015). Every value is a server enum or a grammar-checked id. */
 export type TWatchNotice = 'merged' | 'closed' | 'head-moved' | 'checks-settled' | 'moved' | 'free' | 'signed-in' | 'failing' | 'expired';
 const WATCH_NOTICES: readonly TWatchNotice[] = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'signed-in', 'failing', 'expired'];
@@ -178,7 +181,8 @@ const TEMPLATES: { [K in TInboxKind]: TRenderer<K> } = {
       delivered: `[purplemux note ${id}] from ${from} at ${at} — ${read}, then purplemux note ack ${id}`,
       reminder: `[purplemux note ${id}] from ${from} at ${at} is still unacked — ${read}, then purplemux note ack ${id}`,
       unacked: `[purplemux note ${id}] you sent it at ${at}; it is still unacked after 60 min — ${read}`,
-      undelivered: `[purplemux note ${id}] you sent it at ${at}; it has not reached its recipient's composer after 15 min — ${read}`,
+      undelivered: `[purplemux note ${id}] you sent it at ${at}; it has not reached its recipient's composer after`
+        + ` ${f.afterMinutes === undefined ? 15 : count('afterMinutes', f.afterMinutes)} min — ${read}`,
       expired: `[purplemux note ${id}] you sent it at ${at}; it expired unacked — ${read}`,
     }[event];
     return { recordId: id, line };
@@ -237,14 +241,16 @@ export const renderInboxLine = <K extends TInboxKind>(kind: K, fields: IInboxFie
 };
 
 /**
- * The one line `note point` types (G7): the note grammar, server fields only, and "owner decision" only for a note
- * sent under an owner grant, since a coordinator's admission says nothing about who decided.
+ * The one line a pointer types (G7): the note grammar, server fields only, and "owner decision" only for a note
+ * sent under an owner grant, since a coordinator's admission says nothing about who decided. An owner item says that
+ * its sender flagged it (PMUX-NOTE-DELIVERY): the server verified the sender, not who decided.
  */
 export const renderNotePointerLine = (f: INoteFields): string => {
   const { id, from, owner } = noteHead(f);
+  if (f.ownerItem !== undefined && typeof f.ownerItem !== 'boolean') throw new InboxFieldError('inbox field ownerItem must be boolean');
   const at = time('sentAt', f.sentAt);
-  const what = owner ? 'carries an owner decision' : 'needs action now';
-  return `[purplemux note ${id}] from ${from} at ${at} ${what}: run purplemux note show ${id} now, then purplemux note ack ${id}`;
+  const what = owner ? ' carries an owner decision' : f.ownerItem ? ', flagged owner item, needs action now' : ' needs action now';
+  return `[purplemux note ${id}] from ${from} at ${at}${what}: run purplemux note show ${id} now, then purplemux note ack ${id}`;
 };
 
 export const INBOX_KINDS = Object.keys(TEMPLATES) as TInboxKind[];

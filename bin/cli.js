@@ -155,6 +155,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'lease-held': EXIT.CONFLICT,
   'note-cap': EXIT.CONFLICT,
   'note-point-too-soon': EXIT.CONFLICT,
+  'note-point-spent': EXIT.CONFLICT,
   'note-point-not-ready': EXIT.NOT_READY,
   'lease-held-by-other': EXIT.CONFLICT,
   'watch-cap': EXIT.CONFLICT,
@@ -172,6 +173,7 @@ const CODE_EXIT = Object.freeze(Object.assign(Object.create(null), {
   'readiness-timeout': EXIT.NOT_READY,
   'startup-prompt': EXIT.NOT_READY,
   'typed-not-submitted': EXIT.UNEXPECTED,
+  'not-verified': EXIT.UNEXPECTED,
   'submit-unconfirmed': EXIT.UNEXPECTED,
   'server-unreachable': EXIT.UNREACHABLE,
   'routes-absent': EXIT.UNREACHABLE,
@@ -243,6 +245,7 @@ const CODE_HINT = Object.freeze(Object.assign(Object.create(null), {
   'wip-cap': "refused by state — close an agent tab first; only the workspace's orchestrator may pass --over-cap --reason",
   'tab-busy': 'the tab is mid-turn — retry when it is idle, or restart with --interrupt to abandon the turn',
   'typed-not-submitted': 'the text is in the composer; do not resend; inspect the tab',
+  'not-verified': 'the line may be in the composer; it is not typed again; inspect the tab',
   'submit-unconfirmed': 'the text was typed and no turn was seen; do not resend; inspect the tab',
   'restart-not-confirmed': 'a process or the session outlived the reap; nothing was relaunched — inspect the tab before a retry',
   'pool-timeout': 'the pool did not answer in 2 s — do what you do without the pool and log it (a repository in gate.no-local-fallback queues on the gate host or is REFUSED-REMOTE, never runs here); a lease the late answer took expires at its TTL',
@@ -1536,13 +1539,14 @@ const cmdGrant = async (args) => {
 const cmdInbox = async (args) => {
   requireEnv();
   const sub = args[0];
-  const rest = stripBooleanFlags(stripFlags(args.slice(1), ['--workspace', '-w']), ['--all']);
+  const rest = stripBooleanFlags(stripFlags(args.slice(1), ['--workspace', '-w']), ['--all', '--counts']);
   switch (sub) {
     case 'list': {
       const wsId = flagValue(args, '--workspace') || flagValue(args, '-w');
-      if (!wsId) die('usage: inbox list -w WS [--all]');
+      if (!wsId) die('usage: inbox list -w WS [--all] [--counts]');
       const all = args.includes('--all') ? '&all=1' : '';
       const { body } = await api('GET', `/api/cli/inbox?workspaceId=${encodeURIComponent(wsId)}${all}`);
+      if (args.includes('--counts')) return process.stdout.write(inboxCountLines(body.counts));
       return out(body);
     }
     case 'retry': {
@@ -1552,16 +1556,28 @@ const cmdInbox = async (args) => {
       return out(body);
     }
     default:
-      die('usage: inbox list -w WS [--all] | inbox retry ID');
+      die('usage: inbox list -w WS [--all] [--counts] | inbox retry ID');
   }
+};
+
+/** One line per state (held with its reasons), then one line per tab: what `inbox list --counts` prints. */
+const inboxCountLines = (counts) => {
+  if (!counts || !counts.total) die('the server sent no inbox counts (it predates them)');
+  const states = ['queued', 'held', 'delivered', 'dropped'];
+  const heldBy = Object.entries(counts.heldBy || {}).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(', ');
+  const lines = states.map((s) => (s === 'held' && heldBy ? `held ${counts.total.held} (${heldBy})` : `${s} ${counts.total[s]}`));
+  for (const [tab, c] of Object.entries(counts.tabs || {}).sort()) {
+    lines.push(`${tab} ${states.map((s) => `${s} ${c[s]}`).join(' ')}`);
+  }
+  return `${lines.join('\n')}\n`;
 };
 
 // Notes (ADR-0013): a body the recipient pulls; only the inbox's fixed line is typed.
 const NOTE_BODY_MAX_BYTES = 16 * 1024;
-const NOTE_USAGE = 'usage: note send (--to-epic SLUG | --to-workspace WS) --subject TEXT (-f FILE | -f -) [--from-epic SLUG]'
+const NOTE_USAGE = 'usage: note send (--to-epic SLUG | --to-workspace WS) --subject TEXT (-f FILE | -f -) [--from-epic SLUG] [--owner-item]'
   + ' | note list [--open] [--to-me] [--from-me] [--epic SLUG] | note show ID | note ack ID [--comment TEXT] | note point ID';
 const NOTE_VALUE_FLAGS = ['--to-epic', '--to-workspace', '--subject', '--file', '-f', '--from-epic', '--epic', '--comment'];
-const NOTE_BOOL_FLAGS = ['--open', '--to-me', '--from-me'];
+const NOTE_BOOL_FLAGS = ['--open', '--to-me', '--from-me', '--owner-item'];
 const NOTE_ID = /^n-[A-Za-z0-9_-]{4,32}$/;
 
 const noteId = (rest) => {
@@ -1590,6 +1606,7 @@ const cmdNote = async (args) => {
       if (toWorkspace !== null) data.toWorkspace = toWorkspace;
       const fromEpic = flagValue(rest, '--from-epic');
       if (fromEpic !== null) data.fromEpic = fromEpic;
+      if (rest.includes('--owner-item')) data.ownerItem = true;
       requireEnv();
       const { body: resp } = await api('POST', '/api/cli/notes', data);
       return out(resp);
@@ -3883,15 +3900,21 @@ Commands:
                                            ask took it (else exit 3 pool-ask-mismatch); --ask alone cancels the ask:
                                            its slots and tickets go, and an acquire with it that lands later is
                                            refused (exit 3 pool-ask-cancelled) for 10 minutes
-  inbox list -w WS [--all]                 Server notices (notes, watches, deploys, Mission Control) queued or held
-                                           for WS's tabs; --all adds delivered and dropped (kept 7 days)
+  inbox list -w WS [--all] [--counts]      Server notices (notes, watches, deploys, Mission Control) queued or held
+                                           for WS's tabs; --all adds delivered and dropped (kept 7 days). The JSON
+                                           carries counts (per state, held by reason, per tab) of every retained item;
+                                           --counts prints them alone, one line per state, then one per tab
   inbox retry ID                           Re-queue a held notice once (the target workspace, the note's sender, or admin).
                                            Exit 3 inbox-not-held, 7 inbox-not-found
-  note send (--to-epic SLUG | --to-workspace WS) --subject TEXT (-f FILE | -f -) [--from-epic SLUG]
+  note send (--to-epic SLUG | --to-workspace WS) --subject TEXT (-f FILE | -f -) [--from-epic SLUG] [--owner-item]
                                            A local note to the live epic holder, or a cross-workspace note between
                                            verified current orchestrators; body <= 16 KiB (exit 2). Only a fixed line is typed
                                            into the recipient; it pulls the body. --from-epic needs that epic lease (3).
-                                           The owner-granted tab sends to any workspace as owner (to its orchestrator)
+                                           The owner-granted tab sends to any workspace as owner (to its orchestrator).
+                                           --owner-item (the verified current orchestrator only, else exit 3): the server
+                                           types one pointer line into the recipient orchestrator at once, busy included,
+                                           retried each pass until it is in that composer; at most 5 not yet delivered
+                                           per sender (exit 3 note-cap); the sender hears at 5 min if it is not there
   note list [--open] [--to-me] [--from-me] [--epic SLUG]
                                            Notes your workspace sent or receives (no bodies; fromLabel names the sender,
                                            e.g. "owner (WS/TAB)"). Run --open --to-me at turn start
@@ -3900,9 +3923,11 @@ Commands:
                                            its verified currently routed coordinator (else exit 3)
   note point ID                            The verified current orchestrator types one fixed line for its own routed,
                                            undelivered note into the recipient orchestrator, busy included: the note id
-                                           and "run note show". No text, no target choice. Exit 3 forbidden or too soon
-                                           (one per note and per target in 10 min), 4 target gone, 5 not ready
-                                           (a prompt, a halt or text in its composer), 7 unknown note
+                                           and "run note show". No text, no target choice. Exit 3 forbidden, too soon
+                                           (one per note and per target in 10 min) or spent (one line per note per
+                                           route, ever), 4 target gone, 5 not ready (a prompt, a halt or text in its
+                                           composer), 7 unknown note. Enter is pressed only when the screen shows the
+                                           line whole in the box; else exit 1 not-verified (no receipt)
   event send --type review-ready|landed|blocked-on --to-epic SLUG (--json PAYLOAD | -f FILE | -f -)
                                            A verified worker tab announces a result inside its scope (ADR-0043). The
                                            server checks the evidence, then delivers it as a note to the epic's

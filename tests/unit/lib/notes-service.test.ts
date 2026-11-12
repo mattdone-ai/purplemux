@@ -905,8 +905,10 @@ describe('notes runtime startup', () => {
     const reconcileInitial = vi.fn(async () => bootGate);
     const tick = vi.fn(async () => {});
     runtimeGlobal.__ptNotesRuntime = undefined;
+    const sweepRetiredAckNotices = vi.fn(async () => 0);
     runtimeGlobal.__ptNotesService = {
       reconcileInitial,
+      sweepRetiredAckNotices,
       tick,
       preflight: async () => ({ ok: false as const, reason: 'test' }),
     } as unknown as NotesService;
@@ -914,6 +916,8 @@ describe('notes runtime startup', () => {
     try {
       const starting = startNotes();
       await vi.waitFor(() => expect(reconcileInitial).toHaveBeenCalledOnce());
+      // The retired-ack sweep runs once, before the boot reconciliation.
+      expect(sweepRetiredAckNotices).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(4 * NOTES_TICK_MS);
       expect(tick).not.toHaveBeenCalled();
 

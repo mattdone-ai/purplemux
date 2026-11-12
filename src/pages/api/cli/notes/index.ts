@@ -26,6 +26,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
         subject: body.subject,
         body: body.body,
         fromEpic: body.fromEpic,
+        ownerItem: body.ownerItem,
       });
       return res.status(200).json({ note });
     }

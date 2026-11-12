@@ -81,3 +81,48 @@ export const bouncedDigestEvent = (note: INote): ITabEventRoute | null => {
   if (!workspaceId || !tabId) return null;
   return { workspaceId, tabId, kind: 'note-bounced', class: 'digest', text: renderBouncedAlert(note) };
 };
+
+/**
+ * The ack, recorded for the sender (PMUX-NOTE-DELIVERY change 2): a `log` row in the sender tab's `tab_events`, never
+ * typed and never in a digest. Ids and the time only; the ack comment is read with `note show`. Null when the note has
+ * no sender tab or no acker.
+ */
+export const ackedLogEvent = (note: INote): ITabEventRoute | null => {
+  const { workspaceId, tabId } = note.from;
+  if (!workspaceId || !tabId || !note.ackedBy || note.ackedAt === null) return null;
+  const id = checkedId(note);
+  return {
+    workspaceId, tabId, kind: 'note-acked', class: 'log',
+    text: `note ${id} acked by ${party(note.ackedBy.workspaceId, note.ackedBy.tabId)} at ${iso(note.ackedAt)}`
+      + `${note.ackComment ? ' with a comment' : ''} — purplemux note show ${id}`,
+  };
+};
+
+/**
+ * A pointer line that may sit in its recipient's composer (PMUX-NOTE-DELIVERY): it was typed, and either an Enter did
+ * not take it out of the box (`stranded`) or the screen could not confirm it (`unverified`). Ids and times only.
+ */
+export const renderPointerSpentAlert = (note: INote, outcome: 'stranded' | 'unverified', at: number): string => {
+  const id = checkedId(note);
+  const to = note.deliveredTo ? party(note.deliveredTo.workspaceId, note.deliveredTo.tabId) : 'unrouted';
+  const what = outcome === 'stranded' ? 'stayed in the composer after Enter' : 'could not be confirmed as submitted';
+  return `note ${id}: its owner-item pointer line to ${to} at ${iso(at)} ${what}; it is not typed again, and its inbox`
+    + ` notice still waits — purplemux note show ${id}`;
+};
+
+/** The sender's own alert (urgent), and one digest line for the Scrum Master seat when that seat is another tab. */
+export const pointerSpentEvents = (
+  note: INote,
+  outcome: 'stranded' | 'unverified',
+  at: number,
+  seat: { workspaceId: string; tabId: string } | null,
+): ITabEventRoute[] => {
+  const text = renderPointerSpentAlert(note, outcome, at);
+  const events: ITabEventRoute[] = [];
+  const { workspaceId, tabId } = note.from;
+  if (workspaceId && tabId) events.push({ workspaceId, tabId, kind: 'note-pointer-spent', class: 'urgent', text });
+  const same = (t: { workspaceId: string | null; tabId: string | null } | null) =>
+    !!t && !!seat && t.workspaceId === seat.workspaceId && t.tabId === seat.tabId;
+  if (seat && !same(note.from) && !same(note.deliveredTo)) events.push({ ...seat, kind: 'note-pointer-spent', class: 'digest', text });
+  return events;
+};
