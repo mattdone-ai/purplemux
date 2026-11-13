@@ -50,7 +50,7 @@ purplemux's built-in watchdog sends you '${NUDGE_PREFIX} ...' messages when a wo
 - IDLE WITHOUT AN END LINE: the worker stopped with no marker and nothing it waits on, and stayed quiet for the idle window (default 15 min). Read its output, then accept it, send follow-up work, or ask it for its end line.
 - WAITING (long wait): the worker has waited hours (default 4) on a registered job or watch with no end line. The work is still live; check it is still expected to finish, else stop it or tell the worker to end its turn.
 - API ERROR: the worker's turn failed at the provider and its one automatic resume failed too (or could not be delivered). Re-prompt it when the provider recovers, or park its task.
-- HALTED by a usage limit: never type into that tab — typing cancels its auto-continue; wait for the reset or move its task.
+- HALTED by a usage limit: never type into that tab before the reset — for Codex, typing cancels its auto-continue; re-prompt a Claude tab after the reset, or move its task.
 - AUTH FAILURE: the provider refused the worker's account or credentials (401/403, "Please run /login"). A re-prompt fails the same way, so do not send one: get the account signed in again; purplemux resumes the worker once when its provider answers on that host again.
 - RATE LIMITED: the worker was resumed with backoff and is still refused. Hold its re-prompts, or move its task to another engine.
 - turn ended: read the output, check for DONE:/BLOCKED:, run the verification commands, then accept or send concrete fix-up instructions. On accept: immediately assign the next task to that tab, or CLOSE it (purplemux tab close). Never leave a finished or abandoned worker tab open — the tab strip is the human's dashboard, and stale tabs hide real state.
@@ -130,7 +130,7 @@ export const buildNudgeMessage = (
     case 'rate-limit':
       return `${NUDGE_PREFIX} ${who} is RATE LIMITED after its backoff resumes: ${detail ?? 'the provider keeps refusing the turn'}. ${capture} — hold its re-prompts, or move its task to another engine.`;
     case 'usage-limit':
-      return `${NUDGE_PREFIX} ${who} is HALTED by a usage limit: ${detail ?? 'the provider refused the turn'}. Do NOT type into it — typing cancels its auto-continue. ${capture} — wait for the reset, or move its task to another engine.`;
+      return `${NUDGE_PREFIX} ${who} is HALTED by a usage limit: ${detail ?? 'the provider refused the turn'}. Do NOT type into it before the reset — for Codex, typing cancels its auto-continue. ${capture} — wait for the reset, or move its task to another engine.`;
     case 'turn-ended':
       return `${NUDGE_PREFIX} ${who} finished its turn. ${capture} — verify, then accept or send follow-up work.`;
     case 'inactive':

@@ -9,8 +9,10 @@ const log = createLogger('status');
  * The automatic resumes a turn-error episode is owed but that live only in memory (PMUX-REMOTE-RESILIENCE review
  * r1): a tab held by a provider outage, an auth failure waiting for its provider, a rate limit waiting out its
  * backoff. A queued resume survives a restart in the inbox; these would not, and the tab would wait for a resume
- * that never comes. The file is the whole set, replaced by one rename after each change; the next server escalates
- * every entry its tab still has, once, and starts empty.
+ * that never comes. Only what is still owed is written: a resume (a hold the outage alert or the auth nudge promised
+ * one, a pending backoff) or a notice (a tab held again after its recovery resume, not yet told). The file is the
+ * whole set, replaced by one rename after each change; the next server escalates every entry its tab still has,
+ * once, and starts empty (review r2).
  */
 export type THoldReason = 'outage' | 'auth-wait' | 'backoff';
 
@@ -20,8 +22,7 @@ export interface ITurnErrorHold {
   code: string;
   text: string;
   reason: THoldReason;
-  /** The target was already told about this episode. */
-  escalated: boolean;
+  owed: 'resume' | 'notice';
 }
 
 export const turnErrorHoldsFile = (): string => path.join(os.homedir(), '.purplemux', 'turn-error-holds.json');
@@ -67,7 +68,8 @@ export class TurnErrorHoldStore {
       if (!v || typeof v.workspaceId !== 'string' || typeof v.code !== 'string' || typeof v.text !== 'string') continue;
       if (v.class !== 'api-error' && v.class !== 'auth-failure' && v.class !== 'rate-limit') continue;
       if (v.reason !== 'outage' && v.reason !== 'auth-wait' && v.reason !== 'backoff') continue;
-      holds[tabId] = { workspaceId: v.workspaceId, class: v.class, code: v.code, text: v.text, reason: v.reason, escalated: v.escalated === true };
+      if (v.owed !== 'resume' && v.owed !== 'notice') continue;
+      holds[tabId] = { workspaceId: v.workspaceId, class: v.class, code: v.code, text: v.text, reason: v.reason, owed: v.owed };
     }
     return holds;
   }

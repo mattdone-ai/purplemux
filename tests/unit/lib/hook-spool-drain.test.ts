@@ -677,6 +677,24 @@ describe('the status manager replays the hook spool (ADR-0020)', () => {
   });
 });
 
+describe('turn-error holds at boot (PMUX-REMOTE-RESILIENCE review r2)', () => {
+  it('init escalates each hold the previous server saved, once its scan built the tabs, and leaves the file empty', async () => {
+    state.tabs = [tab('w'), tab('gone-elsewhere')];
+    const file = path.join(state.home, '.purplemux', 'turn-error-holds.json');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify({
+      w: { workspaceId: 'ws-1', class: 'auth-failure', code: 'authentication_failed', text: 'Please run /login', reason: 'auth-wait', owed: 'resume' },
+      closed: { workspaceId: 'ws-1', class: 'api-error', code: 'server_error', text: 'x', reason: 'outage', owed: 'resume' },
+    }));
+    const { manager } = await managerWithPaste();
+    const escalate = vi.spyOn(manager as unknown as { escalateTurnError: (...a: unknown[]) => void }, 'escalateTurnError').mockImplementation(() => {});
+    await manager.init();
+    expect(escalate).toHaveBeenCalledTimes(1);
+    expect(escalate).toHaveBeenCalledWith('w', expect.anything(), 'auth-failure', expect.stringContaining('the resume purplemux promised will not come'));
+    await waitFor(async () => expect(JSON.parse(await fs.readFile(file, 'utf-8'))).toEqual({}));
+  });
+});
+
 describe('HookFloorStore (ADR-0020)', () => {
   const store = async (saveMs = 60_000) => {
     const { HookFloorStore } = await import('@/lib/hook-floors');

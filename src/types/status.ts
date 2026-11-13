@@ -109,8 +109,10 @@ export interface ITurnErrorEpisode {
   heldBy?: string | null;
   /** The one resume after a recovery (an auth recovery or an outage's end) went out. */
   recoveryResumed?: boolean;
-  /** `auth-failure`: that resume failed too, and the target was told once more. */
+  /** The failure after that resume was told to the target (once, whatever the class). */
   escalatedAfterRecovery?: boolean;
+  /** `usage-limit`: whether nothing automated may type into the tab (a provider that continues by itself). */
+  halts?: boolean;
 }
 
 export interface ITurnEndRecord {

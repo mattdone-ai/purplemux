@@ -656,30 +656,29 @@ describe('auth failures, rate limits and fleet outage mode', () => {
     const a = await workerTab(first.manager, 'tab-a', failedTurn('server_error', 'API Error: Server error', 'a-1'));
     await workerTab(first.manager, 'tab-b', failedTurn('server_error', 'API Error: Server error', 'b-1'));
     const r = await workerTab(first.manager, 'tab-r', failedTurn('rate_limit', 'API Error: rate limit', 'r-1'));
+    // Review r2: an auth wait is escalated at once, and its nudge promised a resume: it is owed one all the same.
+    const w = await workerTab(first.manager, 'tab-w', failedTurn('authentication_failed', 'Please run /login', 'w-1'), { host: 'remote-a' });
     stop(first.manager, 'tab-a');
     stop(first.manager, 'tab-b');
     stop(first.manager, 'tab-r');
-    await waitFor(() => expect([a.turnError?.heldBy, r.turnError?.attempts]).toEqual(['api-error|claude|server_error', 1]));
+    stop(first.manager, 'tab-w');
+    await waitFor(() => expect([a.turnError?.heldBy, r.turnError?.attempts, w.turnError?.escalated]).toEqual(['api-error|claude|server_error', 1, true]));
     const { turnErrorHoldsFile } = await import('@/lib/turn-error-holds');
-    await waitFor(async () => expect(Object.keys(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))).sort()).toEqual(['tab-a', 'tab-b', 'tab-r']));
+    await waitFor(async () => expect(Object.keys(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))).sort()).toEqual(['tab-a', 'tab-b', 'tab-r', 'tab-w']));
+    expect(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))['tab-w']).toMatchObject({ reason: 'auth-wait', owed: 'resume', class: 'auth-failure' });
 
     // The next server: the same tabs, nothing in memory.
     const next = await setup();
-    for (const id of ['tab-a', 'tab-b', 'tab-r']) await workerTab(next.manager, id, cleanTurn(`n-${id}`));
+    for (const id of ['tab-a', 'tab-b', 'tab-r', 'tab-w']) await workerTab(next.manager, id, cleanTurn(`n-${id}`));
     await (next.manager as unknown as { escalateRestoredHolds: () => Promise<void> }).escalateRestoredHolds();
-    await waitFor(() => expect(next.nudges()).toHaveLength(3));
+    await waitFor(() => expect(next.nudges()).toHaveLength(4));
     const byTab = (id: string) => next.nudges().find((n) => n.includes(`worker ${id} (${id})`)) ?? '';
-    expect(byTab('tab-a')).toContain('it was held by a provider outage when the server restarted; no automatic resume will follow');
+    expect(byTab('tab-a')).toContain('it was held by a provider outage when the server restarted: the resume the outage alert promised will not come');
     expect(byTab('tab-r')).toContain('RATE LIMITED');
-    expect(byTab('tab-r')).toContain('it waited out a rate-limit backoff when the server restarted');
+    expect(byTab('tab-r')).toContain('it waited out a rate-limit backoff when the server restarted: no automatic resume will follow');
+    expect(byTab('tab-w')).toContain('AUTH FAILURE');
+    expect(byTab('tab-w')).toContain('the resume purplemux promised will not come; re-prompt it once its account is signed in again');
     await waitFor(async () => expect(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))).toEqual({}));
-  });
-
-  it('init escalates the restored holds once its scan built the tabs', async () => {
-    const source = await fs.readFile(path.join(__dirname, '../../../src/lib/status-manager.ts'), 'utf-8');
-    const scan = source.indexOf('    await this.scanAll();\n    // Floors of tabs closed');
-    expect(scan).toBeGreaterThan(0);
-    expect(source.indexOf('await this.escalateRestoredHolds();', scan)).toBeGreaterThan(scan);
   });
 
   it('a held canary resume frees the slot with no per-tab escalation; the next canary goes to another tab', async () => {
@@ -764,5 +763,70 @@ describe('auth failures, rate limits and fleet outage mode', () => {
     await workerTab(manager, 'tab-x', cleanTurn('ok-x'), remote);
     stop(manager, 'tab-x');
     await waitFor(async () => expect((await resumes()).map((x) => x.targetTabId).sort()).toEqual(ids));
+  });
+
+  it('an auth tab whose post-recovery failure a second outage held is told once when it ends, never stranded (review r2)', async () => {
+    const { manager, nudges, resumes, clearDebounce } = await setup();
+    await smallOutages(manager);
+    const w = await workerTab(manager, 'tab-w', failedTurn('authentication_failed', 'Please run /login', 'w-1'));
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(nudges()).toHaveLength(1));
+    expect(nudges()[0]).toContain('AUTH FAILURE');
+    // The account works again: a clean turn on this host resumes w once.
+    await workerTab(manager, 'tab-x', cleanTurn('ok-x1'));
+    stop(manager, 'tab-x');
+    await waitFor(() => expect(w.turnError?.recoveryResumed).toBe(true));
+    // An auth outage on this host starts (two other tabs), then w's resumed turn is refused too: held, not told.
+    await workerTab(manager, 'tab-u', failedTurn('authentication_failed', 'Please run /login', 'u-1'));
+    await workerTab(manager, 'tab-v', failedTurn('authentication_failed', 'Please run /login', 'v-1'));
+    clearDebounce();
+    stop(manager, 'tab-u');
+    stop(manager, 'tab-v');
+    await waitFor(() => expect(alerts.dispatch).toHaveBeenCalledTimes(1));
+    await failAgain(w, 'tab-w', 'w-2', 'authentication_failed', 'Please run /login');
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(w.turnError?.heldBy).toBe('auth-failure|claude|local'));
+    const { turnErrorHoldsFile } = await import('@/lib/turn-error-holds');
+    await waitFor(async () => expect(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))['tab-w']).toMatchObject({ reason: 'outage', owed: 'notice' }));
+    const beforeEnd = nudges().length;
+    // The outage ends: u and v get their resume; w already had its own, so it is told once.
+    clearDebounce();
+    stop(manager, 'tab-x');
+    await waitFor(() => expect(nudges().length).toBe(beforeEnd + 1));
+    expect(nudges().at(-1)).toContain('worker tab-w (tab-w) AUTH FAILURE');
+    expect(nudges().at(-1)).toContain('held it again; no further automatic resume');
+    expect(w.turnError).toMatchObject({ heldBy: null, escalatedAfterRecovery: true });
+    expect(await forTab(resumes, 'tab-w')).toHaveLength(1);
+    await waitFor(async () => expect((await resumes()).filter((x) => x.targetTabId !== 'tab-w').map((x) => x.targetTabId).sort()).toEqual(['tab-u', 'tab-v']));
+    // Nothing is owed any more: the file is empty.
+    await waitFor(async () => expect(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))).toEqual({}));
+  });
+
+  it('a Claude plan limit tells the target once but does not halt the tab: Claude Code does not continue by itself (review r2)', async () => {
+    const { manager, nudges } = await setup();
+    const c = await workerTab(manager, 'tab-c', failedTurn('rate_limit', "You've hit your 5-hour limit · resets 3pm (UTC)", 'c-1'));
+    stop(manager, 'tab-c');
+    await waitFor(() => expect(nudges()).toHaveLength(1));
+    expect(nudges()[0]).toContain('HALTED by a usage limit');
+    expect(nudges()[0]).toContain('this provider does not continue by itself: re-prompt it after the reset');
+    expect(c.turnError).toMatchObject({ class: 'usage-limit', halts: false });
+    expect(manager.isHaltedByUsageLimit('tab-c')).toBe(false);
+  });
+
+  it('writes the holds file only when what is owed changed, and the shutdown writes the last set at once', async () => {
+    const { manager } = await setup();
+    const { TurnErrorHoldStore, turnErrorHoldsFile } = await import('@/lib/turn-error-holds');
+    const save = vi.spyOn(TurnErrorHoldStore.prototype, 'save');
+    await workerTab(manager, 'tab-x', cleanTurn('ok-1'));
+    for (let i = 0; i < 3; i += 1) stop(manager, 'tab-x');
+    await settle();
+    expect(save).not.toHaveBeenCalled();
+    const w = await workerTab(manager, 'tab-w', failedTurn('authentication_failed', 'Please run /login', 'w-1'), { host: 'remote-a' });
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(w.turnError?.waitingFor).toBeTruthy());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    await manager.shutdown();
+    expect(Object.keys(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8')))).toEqual(['tab-w']);
+    save.mockRestore();
   });
 });

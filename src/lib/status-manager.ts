@@ -224,6 +224,17 @@ const STOP_SETTLE_MS = 500;
 export const RATE_LIMIT_MAX_RESUMES = 3;
 /** 1, 2, then 4 minutes; never more than 15. */
 export const rateLimitBackoffMs = (attempts: number): number => Math.min(60_000 * 2 ** attempts, 15 * 60_000);
+/** What a restored hold tells the target: the resume or notice it was owed is gone with the previous server. */
+const restoredHoldDetail = (hold: ITurnErrorHold): string => {
+  if (hold.owed === 'notice') {
+    return 'it failed again after the resume its provider\'s recovery owed it, and a provider outage held it when the server restarted; no further automatic resume';
+  }
+  if (hold.reason === 'auth-wait') {
+    return 'it waited for its provider to answer on its host again when the server restarted: the resume purplemux promised will not come; re-prompt it once its account is signed in again';
+  }
+  if (hold.reason === 'backoff') return 'it waited out a rate-limit backoff when the server restarted: no automatic resume will follow; re-prompt it once the limit clears';
+  return 'it was held by a provider outage when the server restarted: the resume the outage alert promised will not come; re-prompt it when the provider answers';
+};
 const TURN_ERROR_ALERT_LEAD: Readonly<Record<'api-error' | 'usage-limit' | 'auth-failure' | 'rate-limit', string>> = {
   'api-error': 'API error after its one automatic resume',
   'usage-limit': 'halted by a usage limit',
@@ -432,6 +443,7 @@ export class StatusManager {
   /** The resumes owed only in memory, persisted so a restart escalates them (review r1). */
   private readonly turnErrorHolds = new TurnErrorHoldStore();
   private holdsSaveQueued = false;
+  private holdsSaved = '{}';
   private processStartCache = new Map<string, { startedAt: number | null; checkedAt: number; stamp: number | null }>();
   private pendingKickoffs = new Map<string, { prompt: string; timer: ReturnType<typeof setTimeout> }>();
   private codexLifecycleEpoch = new Map<string, { generation: string; phase: 'pending' | 'active'; epoch: number }>();
@@ -2545,8 +2557,11 @@ export class StatusManager {
     if (!episode) this.closeTurnErrorEpisode(tabId, entry, `episode-closed:${error.class}`);
     if (error.class === 'usage-limit') {
       if (episode) return;
-      entry.turnError = { class: 'usage-limit', code: error.code, text: error.text, startedAt: at, resumeItemId: null, escalated: true, turnId: error.turnId };
-      this.escalateTurnError(tabId, entry, 'usage-limit', error.text || error.code);
+      // Only a provider that continues by itself after the reset is halted (review r2): typing would cancel that.
+      // Claude Code does not, so its tab stays open to a re-prompt after the reset.
+      const halts = (entry.agentProviderId ?? getProviderByPanelType(entry.panelType)?.id) === 'codex';
+      entry.turnError = { class: 'usage-limit', code: error.code, text: error.text, startedAt: at, resumeItemId: null, escalated: true, turnId: error.turnId, halts };
+      this.escalateTurnError(tabId, entry, 'usage-limit', `${error.text || error.code}${halts ? '' : ' (this provider does not continue by itself: re-prompt it after the reset)'}`);
       return;
     }
     if (error.class !== 'api-error' && error.class !== 'auth-failure' && error.class !== 'rate-limit') return;
@@ -2569,17 +2584,18 @@ export class StatusManager {
         current.waitingFor = failureKeyId(key);
         this.saveHolds();
         this.escalateTurnError(tabId, entry, 'auth-failure', error.text || error.code);
-      } else if (current.recoveryResumed && !current.escalatedAfterRecovery) {
+      } else if (current.recoveryResumed) {
         // The one resume after the recovery failed too: the account is still refused, said once more.
-        current.escalatedAfterRecovery = true;
-        this.escalateTurnError(tabId, entry, 'auth-failure', `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
+        this.reportAfterRecovery(tabId, entry, current, `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
       }
       return;
     }
     if (cls === 'rate-limit') {
       const attempts = current.attempts ?? 0;
       if (attempts >= RATE_LIMIT_MAX_RESUMES) {
-        if (!current.escalated) {
+        if (current.recoveryResumed) {
+          this.reportAfterRecovery(tabId, entry, current, `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
+        } else if (!current.escalated) {
           current.escalated = true;
           this.escalateTurnError(tabId, entry, 'rate-limit', `${error.text || error.code} (after ${attempts} backoff resume(s))`);
         }
@@ -2590,7 +2606,9 @@ export class StatusManager {
       return;
     }
     if (episode) {
-      if (!episode.escalated) {
+      if (episode.recoveryResumed) {
+        this.reportAfterRecovery(tabId, entry, episode, `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
+      } else if (!episode.escalated) {
         episode.escalated = true;
         this.withdrawResume(episode, 'episode-escalated');
         this.escalateTurnError(tabId, entry, 'api-error', error.text || error.code);
@@ -2674,8 +2692,11 @@ export class StatusManager {
     }
     const first = held[0] ? this.tabs.get(held[0]) : undefined;
     const where = key.cls === 'auth-failure' ? ` on ${key.host ?? 'this host'}` : '';
+    const when = key.cls === 'auth-failure'
+      ? `each held tab is resumed once after a turn on ${key.host ?? 'this host'} succeeds again: sign the account in, then prompt any tab there`
+      : 'each held tab is resumed once when the provider answers again';
     const detail = `provider outage: ${held.length} tabs failed with ${key.provider} ${key.cls} "${key.code}"${where} within ${Math.round(OUTAGE_WINDOW_MS / 60_000)} min (${error.text || error.code}). `
-      + 'Automatic resumes are held fleet-wide and no per-tab alert follows; each held tab is resumed once when the provider answers again.';
+      + `Automatic resumes are held fleet-wide and no per-tab alert follows; ${when}.`;
     log.warn({ outage: id, held }, detail);
     void appendCoordinationAudit({ event: 'provider-outage-started', outage: id, held: [...held] }).catch(() => {});
     void getWorkspaceByIdCached(first?.workspaceId ?? '').then((ws) => this.dispatchAlert({
@@ -2734,30 +2755,51 @@ export class StatusManager {
     episode.waitingFor = null;
     this.saveHolds();
     if (episode.recoveryResumed) {
-      if (episode.escalated) return;
-      episode.escalated = true;
-      log.info({ tabId, outage: reason }, 'turn error released by a second recovery: already resumed once, escalated');
-      this.escalateTurnError(tabId, entry, episode.class, `${episode.text || episode.code} (it failed again after the resume its provider's recovery owed it, and ${reason} held it again; no further automatic resume)`);
+      log.info({ tabId, outage: reason }, 'turn error released by a second recovery: already resumed once');
+      this.reportAfterRecovery(tabId, entry, episode, `${episode.text || episode.code} (it failed again after the resume its provider's recovery owed it, and ${reason} held it again; no further automatic resume)`);
       return;
     }
     episode.recoveryResumed = true;
     this.queueResume(tabId, entry, episode, `recovered-${episode.turnId || episode.startedAt}`, `turn error: resumed once after ${reason} recovered`, { kind: 'recovery' });
   }
 
-  /** Persist the in-memory owed resumes; coalesced to one write per tick. */
+  /**
+   * The failure after a recovery resume is told to the target once, whatever the class and whatever was said
+   * before the recovery (review r2): the nudge or alert that came before promised that resume.
+   */
+  private reportAfterRecovery(tabId: string, entry: ITabStatusEntry, episode: ITurnErrorEpisode, detail: string): void {
+    if (episode.class === 'usage-limit' || episode.escalatedAfterRecovery) return;
+    episode.escalatedAfterRecovery = true;
+    episode.escalated = true;
+    this.saveHolds();
+    this.escalateTurnError(tabId, entry, episode.class, detail);
+  }
+
+  /** What each tab is still owed only in memory (see `turn-error-holds.ts`). */
+  private collectHolds(): Record<string, ITurnErrorHold> {
+    const holds: Record<string, ITurnErrorHold> = {};
+    for (const [tabId, entry] of this.tabs) {
+      const episode = entry.turnError;
+      if (!episode || episode.class === 'usage-limit') continue;
+      const reason = episode.heldBy ? 'outage' : episode.waitingFor ? 'auth-wait' : this.backoffResumes.has(tabId) ? 'backoff' : null;
+      if (!reason) continue;
+      const owed = reason === 'backoff' || !episode.recoveryResumed ? 'resume' : episode.escalatedAfterRecovery ? null : 'notice';
+      if (!owed) continue;
+      holds[tabId] = { workspaceId: entry.workspaceId, class: episode.class, code: episode.code, text: episode.text, reason, owed };
+    }
+    return holds;
+  }
+
+  /** Persist what is owed; coalesced to one write per tick, and none when the set did not change. */
   private saveHolds(): void {
     if (this.holdsSaveQueued) return;
     this.holdsSaveQueued = true;
     queueMicrotask(() => {
       this.holdsSaveQueued = false;
-      const holds: Record<string, ITurnErrorHold> = {};
-      for (const [tabId, entry] of this.tabs) {
-        const episode = entry.turnError;
-        if (!episode || episode.class === 'usage-limit') continue;
-        const reason = episode.heldBy ? 'outage' : episode.waitingFor ? 'auth-wait' : this.backoffResumes.has(tabId) ? 'backoff' : null;
-        if (!reason) continue;
-        holds[tabId] = { workspaceId: entry.workspaceId, class: episode.class, code: episode.code, text: episode.text, reason, escalated: episode.escalated };
-      }
+      const holds = this.collectHolds();
+      const text = JSON.stringify(holds);
+      if (text === this.holdsSaved) return;
+      this.holdsSaved = text;
       void this.turnErrorHolds.save(holds);
     });
   }
@@ -2768,12 +2810,12 @@ export class StatusManager {
    */
   private async escalateRestoredHolds(): Promise<void> {
     const restored = await this.turnErrorHolds.load();
+    this.holdsSaved = JSON.stringify(restored);
     for (const [tabId, hold] of Object.entries(restored)) {
       const entry = this.tabs.get(tabId);
-      if (!entry || entry.workspaceId !== hold.workspaceId || hold.escalated) continue;
-      const why = hold.reason === 'outage' ? 'it was held by a provider outage' : hold.reason === 'backoff' ? 'it waited out a rate-limit backoff' : 'it waited for its provider to answer';
+      if (!entry || entry.workspaceId !== hold.workspaceId) continue;
       log.info({ tabId, hold }, 'turn-error hold lost at a server restart: escalated');
-      this.escalateTurnError(tabId, entry, hold.class, `${hold.text || hold.code} (${why} when the server restarted; no automatic resume will follow)`);
+      this.escalateTurnError(tabId, entry, hold.class, `${hold.text || hold.code} (${restoredHoldDetail(hold)})`);
     }
     this.saveHolds();
   }
@@ -2835,7 +2877,8 @@ export class StatusManager {
 
   /** True while the tab's last stop was a usage-limit halt: nothing automated types into it. */
   isHaltedByUsageLimit(tabId: string): boolean {
-    return this.tabs.get(tabId)?.turnError?.class === 'usage-limit';
+    const episode = this.tabs.get(tabId)?.turnError;
+    return episode?.class === 'usage-limit' && episode.halts !== false;
   }
 
   /**
@@ -4469,9 +4512,13 @@ export class StatusManager {
     }
   }
 
-  /** Stops at once; the returned promise settles when the hook floors are saved (the graceful shutdown awaits it). */
+  /** Stops at once; the returned promise settles when the hook floors and the turn-error holds are saved. */
   shutdown(): Promise<void> {
     const floorsSaved = this.hookFloors.flush();
+    // The last owed-resume set, written now: a pending coalesced write would run after the process exits.
+    const holds = this.collectHolds();
+    this.holdsSaved = JSON.stringify(holds);
+    const holdsSaved = this.turnErrorHolds.save(holds);
     this.stopPolling();
     this.tabEvents.stop();
     if (this.contextTimer) clearInterval(this.contextTimer);
@@ -4487,7 +4534,7 @@ export class StatusManager {
       }
     }
     this.clients.clear();
-    return floorsSaved;
+    return Promise.all([floorsSaved, holdsSaved]).then(() => {});
   }
 
   /** A closed tab stops receiving nudges at once; the layout copy is cleared too. */
