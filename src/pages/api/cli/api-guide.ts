@@ -10,8 +10,10 @@ else \`PMUX_TOKEN\`.
 
 Agent tokens may mutate tabs and workspace configuration only in their own workspace. Peer
 entries and legacy drive grants allow authorized reads only. A human-saved Scrum Master
-selection also gives its exact current launch-verified manager tab reads in the selected
-workspaces. The global CLI token
+selection gives its exact current launch-verified manager tab reads AND mutations (send,
+steer, close, restart, create, configuration) in the selected workspaces (ADR-0046); each
+foreign mutation is audited as "scrum-master-mutation", and Mission Control writes stay
+own-workspace. The global CLI token
 is not human identity and cannot mutate these surfaces. Foreign requests go through
 coordinator notes; use authenticated local human controls for human actions. Creating a
 workspace is the one exception: only the global token may (POST /api/cli/workspaces, ADR-0024).

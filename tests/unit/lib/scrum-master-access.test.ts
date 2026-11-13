@@ -40,6 +40,11 @@ vi.mock('@/lib/layout-store', () => ({
 vi.mock('@/lib/tab-token', () => ({ tabIdentityOf: () => state.identity,
   getTabTokenRecord: () => ({ workspaceId: state.tokenWorkspaceId, sessionName: state.tokenSessionName }) }));
 vi.mock('@/lib/tmux', () => ({ hasSession: async () => state.live }));
+const audit = vi.hoisted(() => ({ entries: [] as Record<string, unknown>[] }));
+vi.mock('@/lib/coordination-audit', () => ({ appendCoordinationAudit: async (entry: Record<string, unknown>) => {
+  audit.entries.push(entry);
+  return true;
+} }));
 vi.mock('@/lib/grant-store', () => ({ grantsSnapshot: () => ({ grants: [] }),
   findActiveDriveGrant: (_grants: unknown, grantee: { tabId: string }, target: string) =>
     state.grantTarget === target && grantee.tabId === 'tab-grantee' ? { id: 'g-legacy' } : null,
@@ -73,6 +78,7 @@ describe('human-selected Scrum Master read scope', () => {
     state.tokenWorkspaceId = 'ws-root';
     state.grantTarget = null;
     state.portfolioError = false;
+    audit.entries.length = 0;
     store.select('human-a', { managerWorkspaceId: 'ws-root', managerTabId: 'tab-root', workspaceIds: ['ws-a'] });
   });
   afterEach(() => {
@@ -80,15 +86,64 @@ describe('human-selected Scrum Master read scope', () => {
     delete (globalThis as { __ptPortfolioStore?: PortfolioStore }).__ptPortfolioStore;
   });
 
-  it('permits selected workspace and tab reads with zero grants, but no foreign writes', async () => {
+  it('permits selected workspace reads and writes with zero grants, and nothing outside the selection', async () => {
     const { accessDecision, authorizeWorkspace } = await import('@/lib/cli-utils');
     expect((await accessDecision(manager, 'ws-a')).ok).toBe(true);
     expect((await accessDecision(manager, 'ws-b')).ok).toBe(false);
     const get = response();
     expect(await authorizeWorkspace({ method: 'GET', headers: {} } as NextApiRequest, get.res, 'ws-a')).toEqual(manager);
     const post = response();
-    expect(await authorizeWorkspace({ method: 'POST', headers: {} } as NextApiRequest, post.res, 'ws-a')).toBeNull();
-    expect(post.out.status).toBe(403);
+    expect(await authorizeWorkspace({ method: 'POST', headers: {}, url: '/api/cli/tabs/tab-x/send?workspaceId=ws-a' } as NextApiRequest,
+      post.res, 'ws-a')).toEqual(manager);
+    expect(post.out.status).toBe(0);
+    expect(audit.entries).toEqual([{ event: 'scrum-master-mutation', managerWorkspaceId: 'ws-root', managerTabId: 'tab-root',
+      workspaceId: 'ws-a', route: '/api/cli/tabs/tab-x/send' }]);
+    const outside = response();
+    expect(await authorizeWorkspace({ method: 'DELETE', headers: {} } as NextApiRequest, outside.res, 'ws-b')).toBeNull();
+    expect(outside.out.status).toBe(403);
+    expect(audit.entries).toHaveLength(1);
+  });
+
+  it('refuses a foreign write by any tab that is not the exact, live, launch-verified selected manager', async () => {
+    const { authorizeWorkspaceMutation } = await import('@/lib/cli-utils');
+    const refused = async (scope: TCliScope): Promise<void> => {
+      state.scope = scope;
+      const out = response();
+      expect(await authorizeWorkspaceMutation({ method: 'POST', headers: {} } as NextApiRequest, out.res, 'ws-a')).toBeNull();
+      expect(out.out.status).toBe(403);
+      state.scope = manager;
+    };
+    await refused({ ...manager, tabId: 'tab-other' });
+    await refused({ ...manager, tabVerified: undefined });
+    await refused({ ...manager, workspaceId: 'ws-other' });
+    await refused({ type: 'admin' });
+    state.identity = 'hook';
+    await refused(manager);
+    state.identity = 'launch';
+    state.live = false;
+    await refused(manager);
+    state.live = true;
+    state.currentTab = 'tab-reassigned';
+    await refused(manager);
+    state.currentTab = 'tab-root';
+    store.select('human-b', { managerWorkspaceId: 'ws-root', managerTabId: 'tab-root', workspaceIds: ['ws-b'] });
+    await refused(manager);
+    expect(audit.entries).toEqual([]);
+  });
+
+  it('fails closed when the selection store cannot be read', async () => {
+    const { authorizeWorkspaceMutation } = await import('@/lib/cli-utils');
+    state.portfolioError = true;
+    const out = response();
+    expect(await authorizeWorkspaceMutation({ method: 'POST', headers: {} } as NextApiRequest, out.res, 'ws-a')).toBeNull();
+    expect(out.out.status).toBe(403);
+    expect(audit.entries).toEqual([]);
+  });
+
+  it('keeps the write when the audit line cannot be written', async () => {
+    const { selectedScrumMasterMayMutate } = await import('@/lib/cli-utils');
+    expect(await selectedScrumMasterMayMutate(manager, 'ws-a', undefined, async () => { throw new Error('disk full'); })).toBe(true);
+    expect(await selectedScrumMasterMayMutate(manager, 'ws-b', undefined, async () => true)).toBe(false);
   });
 
   it('rejects other, unverified, reassigned and closed manager tabs immediately', async () => {

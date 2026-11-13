@@ -9,7 +9,8 @@ import type { ITab } from '@/types/terminal';
 import { FOREIGN_MUTATION_HINT, TAB_NOT_FOUND_BODY } from '@/lib/cli-error';
 import { auditOwnerRead } from '@/lib/grant-service';
 import { findActiveDriveGrant, findActiveOwnerGrant, grantsSnapshot } from '@/lib/grant-store';
-import { selectedScrumMasterCanRead } from '@/lib/scrum-master-access';
+import { selectedScrumMasterCanRead, selectedScrumMasterScope } from '@/lib/scrum-master-access';
+import { appendCoordinationAudit } from '@/lib/coordination-audit';
 import type { IGrant } from '@/types/grant';
 
 export interface ITabLocation {
@@ -52,6 +53,30 @@ export const driveDecision = (scope: TCliScope, workspaceId: string): { ok: bool
 export const canDriveWorkspace = (scope: TCliScope, workspaceId: string): boolean =>
   driveDecision(scope, workspaceId).ok;
 
+/**
+ * ADR-0046: the human-saved Scrum Master selection is the one route to a foreign mutation. It holds only for the
+ * selection's exact, still-current, launch-verified manager tab, and only in a workspace the selection names. Each
+ * use is audited as "scrum-master-mutation". A selection store that cannot be read refuses (fails closed).
+ */
+export const selectedScrumMasterMayMutate = async (
+  scope: TCliScope,
+  workspaceId: string,
+  route: string | undefined,
+  audit: (entry: Record<string, unknown>) => Promise<boolean> = appendCoordinationAudit,
+): Promise<boolean> => {
+  if (scope.type !== 'workspace') return false;
+  let selected: boolean;
+  try {
+    selected = (await selectedScrumMasterScope(scope, workspaceId)) !== null;
+  } catch {
+    return false;
+  }
+  if (!selected) return false;
+  await audit({ event: 'scrum-master-mutation', managerWorkspaceId: scope.workspaceId, managerTabId: scope.tabId ?? null,
+    workspaceId, route: (route ?? '').split('?')[0] }).catch(() => false);
+  return true;
+};
+
 export const authorizeWorkspaceMutation = async (
   req: NextApiRequest,
   res: NextApiResponse,
@@ -62,7 +87,7 @@ export const authorizeWorkspaceMutation = async (
     res.status(403).json({ error: 'Forbidden', code: 'forbidden' });
     return null;
   }
-  if (!isOwnWorkspace(scope, workspaceId)) {
+  if (!isOwnWorkspace(scope, workspaceId) && !(await selectedScrumMasterMayMutate(scope, workspaceId, req.url))) {
     res.status(403).json({
       error: `Agent mutations are confined to the caller workspace. ${FOREIGN_MUTATION_HINT}`,
       code: 'forbidden',
