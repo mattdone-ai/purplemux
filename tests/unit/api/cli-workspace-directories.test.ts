@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import handler from '@/pages/api/cli/workspaces/[workspaceId]/directories';
-import { authorizeWorkspace } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceWrite } from '@/lib/cli-utils';
 import {
   getWorkspaceById,
   updateWorkspaceDirectories,
   validateDirectory,
 } from '@/lib/workspace-store';
 
-vi.mock('@/lib/cli-utils', () => ({ authorizeWorkspace: vi.fn() }));
+vi.mock('@/lib/cli-utils', () => ({ authorizeOwnWorkspaceWrite: vi.fn() }));
 
 vi.mock('@/lib/workspace-store', () => ({
   getWorkspaceById: vi.fn(),
@@ -52,15 +52,15 @@ const run = async (method: string, body?: unknown): Promise<IFakeResponse> => {
 describe('/api/cli/workspaces/[workspaceId]/directories', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(authorizeWorkspace).mockResolvedValue({ type: 'admin' });
+    vi.mocked(authorizeOwnWorkspaceWrite).mockResolvedValue({ type: 'admin' });
     vi.mocked(validateDirectory).mockResolvedValue({ valid: true, exists: true, isDirectory: true, canCreate: true });
     vi.mocked(updateWorkspaceDirectories).mockResolvedValue(true);
     vi.mocked(getWorkspaceById).mockResolvedValue({ id: 'ws-test', name: 'test', directories: ['/a', '/b'] });
   });
 
   it('rejects an out-of-scope caller before touching the store', async () => {
-    // authorizeWorkspace writes the 403 itself and returns null
-    vi.mocked(authorizeWorkspace).mockImplementation(async (_req, res) => {
+    // authorizeOwnWorkspaceWrite writes the 403 itself and returns null
+    vi.mocked(authorizeOwnWorkspaceWrite).mockImplementation(async (_req, res) => {
       (res as unknown as { status: (n: number) => { json: (b: unknown) => void } })
         .status(403).json({ error: 'out of scope' });
       return null;

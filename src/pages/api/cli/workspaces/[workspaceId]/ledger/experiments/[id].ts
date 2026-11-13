@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { authorizeWorkspaceMutation } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceMutation } from '@/lib/cli-utils';
 import { LedgerRefusal } from '@/lib/ledger';
 import { answerLedgerError, methodNotAllowed } from '@/lib/ledger-http';
 import { getLedgerStore } from '@/lib/ledger-store';
@@ -31,7 +31,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') return methodNotAllowed(res, 'POST');
   const workspaceId = req.query.workspaceId as string;
-  if (!(await authorizeWorkspaceMutation(req, res, workspaceId))) return;
+  if (!(await authorizeOwnWorkspaceMutation(req, res, workspaceId, 'An experiment verdict'))) return;
   if (!(await getWorkspaceById(workspaceId))) return res.status(404).json({ error: 'Workspace not found', code: 'not-found' });
   try {
     const { verdict, evidence } = parseClose(req.body);

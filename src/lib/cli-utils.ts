@@ -56,7 +56,8 @@ export const canDriveWorkspace = (scope: TCliScope, workspaceId: string): boolea
 /**
  * ADR-0046: the human-saved Scrum Master selection is the one route to a foreign mutation. It holds only for the
  * selection's exact, still-current, launch-verified manager tab, and only in a workspace the selection names. Each
- * use is audited as "scrum-master-mutation". A selection store that cannot be read refuses (fails closed).
+ * admission is audited as "scrum-master-mutation-admitted": the line records the authorization, not the route's
+ * outcome. A selection store that cannot be read refuses (fails closed).
  */
 export const selectedScrumMasterMayMutate = async (
   scope: TCliScope,
@@ -72,22 +73,26 @@ export const selectedScrumMasterMayMutate = async (
     return false;
   }
   if (!selected) return false;
-  await audit({ event: 'scrum-master-mutation', managerWorkspaceId: scope.workspaceId, managerTabId: scope.tabId ?? null,
+  await audit({ event: 'scrum-master-mutation-admitted', managerWorkspaceId: scope.workspaceId, managerTabId: scope.tabId ?? null,
     workspaceId, route: (route ?? '').split('?')[0] }).catch(() => false);
   return true;
 };
+
+/** A mutation is only ever admitted for a workspace token; the global token mutates no workspace (ADR-0021). */
+type TWorkspaceScope = Extract<TCliScope, { type: 'workspace' }>;
 
 export const authorizeWorkspaceMutation = async (
   req: NextApiRequest,
   res: NextApiResponse,
   workspaceId: string,
-): Promise<TCliScope | null> => {
+): Promise<TWorkspaceScope | null> => {
   const scope = resolveCliScope(req, { response: res });
   if (!scope) {
     res.status(403).json({ error: 'Forbidden', code: 'forbidden' });
     return null;
   }
-  if (!isOwnWorkspace(scope, workspaceId) && !(await selectedScrumMasterMayMutate(scope, workspaceId, req.url))) {
+  if (scope.type !== 'workspace'
+    || (!isOwnWorkspace(scope, workspaceId) && !(await selectedScrumMasterMayMutate(scope, workspaceId, req.url)))) {
     res.status(403).json({
       error: `Agent mutations are confined to the caller workspace. ${FOREIGN_MUTATION_HINT}`,
       code: 'forbidden',
@@ -97,14 +102,54 @@ export const authorizeWorkspaceMutation = async (
   return scope;
 };
 
-/** All non-read calls share the same boundary, including browser and configuration routes. */
+/**
+ * ADR-0046 "What does not change": a workspace's own reports, settings and ledger credentials are written only by
+ * that workspace's tabs. The Scrum Master selection does not reach them, and no audit line is written for a refusal.
+ * `surface` names what the route writes, so the refusal names the rule.
+ */
+export const authorizeOwnWorkspaceMutation = async (
+  req: NextApiRequest,
+  res: NextApiResponse,
+  workspaceId: string,
+  surface: string,
+): Promise<TWorkspaceScope | null> => {
+  const scope = resolveCliScope(req, { response: res });
+  if (!scope) {
+    res.status(403).json({ error: 'Forbidden', code: 'forbidden' });
+    return null;
+  }
+  if (scope.type !== 'workspace' || !isOwnWorkspace(scope, workspaceId)) {
+    res.status(403).json({
+      error: `${surface} is written only by the workspace's own tabs (ADR-0046: own-workspace only; `
+        + `the Scrum Master selection does not reach it). ${FOREIGN_MUTATION_HINT}`,
+      code: 'forbidden',
+      rule: 'own-workspace-only',
+    });
+    return null;
+  }
+  return scope;
+};
+
+const READ_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+
+/** Reads keep the read authority of `authorizeWorkspace`; every other method is own-workspace only (ADR-0046). */
+export const authorizeOwnWorkspaceWrite = async (
+  req: NextApiRequest,
+  res: NextApiResponse,
+  workspaceId: string,
+  surface: string,
+): Promise<TCliScope | null> => (READ_METHODS.includes(req.method ?? 'GET')
+  ? authorizeWorkspace(req, res, workspaceId)
+  : authorizeOwnWorkspaceMutation(req, res, workspaceId, surface));
+
+/** All non-read calls share the same boundary, including browser and tab configuration routes. */
 export const authorizeWorkspace = async (
   req: NextApiRequest,
   res: NextApiResponse,
   workspaceId: string,
   _opts: { grant?: 'allow' | 'refuse' } = {},
 ): Promise<TCliScope | null> => {
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method ?? 'GET')) {
+  if (!READ_METHODS.includes(req.method ?? 'GET')) {
     return authorizeWorkspaceMutation(req, res, workspaceId);
   }
   const scope = resolveCliScope(req, { response: res });

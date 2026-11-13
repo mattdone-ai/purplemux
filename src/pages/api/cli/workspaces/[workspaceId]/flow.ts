@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { authorizeWorkspace } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceWrite } from '@/lib/cli-utils';
 import { getWorkspaceById } from '@/lib/workspace-store';
 import { MAX_FLOW_BYTES, parseFlowHistoryMode, parseFlowSnapshot } from '@/lib/flow';
 import { FlowStoreError, publishFlow } from '@/lib/flow-store';
@@ -15,7 +15,7 @@ const storeFailure = (res: NextApiResponse, error: FlowStoreError) =>
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   res.setHeader('Cache-Control', 'no-store');
   const workspaceId = req.query.workspaceId as string;
-  if (!(await authorizeWorkspace(req, res, workspaceId, { grant: 'refuse' }))) return;
+  if (!(await authorizeOwnWorkspaceWrite(req, res, workspaceId, 'The flow report'))) return;
   const ws = await getWorkspaceById(workspaceId);
   if (!ws) return res.status(404).json({ error: 'Workspace not found', code: 'not-found' });
 

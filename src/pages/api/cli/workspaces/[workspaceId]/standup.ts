@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { authorizeWorkspace } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceWrite } from '@/lib/cli-utils';
 import { getWorkspaceById } from '@/lib/workspace-store';
 import { getStatusManager } from '@/lib/status-manager';
 import { parseStandupReport } from '@/lib/standup';
@@ -7,8 +7,8 @@ import { readStandups } from '@/lib/standup-store';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const workspaceId = req.query.workspaceId as string;
-  // A drive grant never changes a workspace's settings (ADR-0014).
-  if (!(await authorizeWorkspace(req, res, workspaceId, { grant: 'refuse' }))) return;
+  // The workspace's own report: a foreign tab, the Scrum Master included, never writes it (ADR-0014, ADR-0046).
+  if (!(await authorizeOwnWorkspaceWrite(req, res, workspaceId, 'The standup'))) return;
   const ws = await getWorkspaceById(workspaceId);
   if (!ws) return res.status(404).json({ error: 'Workspace not found' });
 

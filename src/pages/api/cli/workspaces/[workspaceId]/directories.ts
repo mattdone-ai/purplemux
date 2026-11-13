@@ -1,12 +1,12 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { authorizeWorkspace } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceWrite } from '@/lib/cli-utils';
 import { getWorkspaceById } from '@/lib/workspace-store';
 import { applyDirectoriesPatch } from '@/lib/workspace-patch';
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const workspaceId = req.query.workspaceId as string;
-  // A drive grant never changes a workspace's settings (ADR-0014).
-  if (!(await authorizeWorkspace(req, res, workspaceId, { grant: 'refuse' }))) return;
+  // A drive grant or the Scrum Master selection never changes a workspace's settings (ADR-0014, ADR-0046).
+  if (!(await authorizeOwnWorkspaceWrite(req, res, workspaceId, 'The workspace directories'))) return;
 
   if (req.method === 'GET') {
     const ws = await getWorkspaceById(workspaceId);

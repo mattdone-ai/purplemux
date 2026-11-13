@@ -47,12 +47,14 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       return res.status(400).json({ error: 'notify must be self or orchestrator' });
     }
 
-    // The pid was taken where the caller runs (D63): the verified caller tab's host, else the target tab's.
-    const callerTabId = scope.type === 'workspace' && scope.tabVerified && scope.tabId && scope.tabId !== tabId ? scope.tabId : null;
-    const caller = callerTabId ? await findTab(workspaceId, callerTabId) : null;
-    if (callerTabId && !caller) {
+    // The pid was taken where the caller runs (D63): the verified caller tab's host, else the target tab's. The
+    // caller tab lives in the caller's own workspace, which differs from the target's for the Scrum Master (ADR-0046).
+    const callerTab = scope.type === 'workspace' && scope.tabVerified && scope.tabId
+      && !(scope.workspaceId === workspaceId && scope.tabId === tabId) ? { workspaceId: scope.workspaceId, tabId: scope.tabId } : null;
+    const caller = callerTab ? await findTab(callerTab.workspaceId, callerTab.tabId) : null;
+    if (callerTab && !caller) {
       return res.status(409).json({
-        error: `the calling tab ${callerTabId} no longer exists, so no host can be proven for pid ${pid}; register it from a live tab`,
+        error: `the calling tab ${callerTab.tabId} no longer exists, so no host can be proven for pid ${pid}; register it from a live tab`,
         code: 'caller-tab-gone',
       });
     }

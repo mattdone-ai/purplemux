@@ -1,13 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { readBoard } from '@/lib/board';
 import { clearBoardGoal, goalInputDefects, readBoardGoal, writeBoardGoal } from '@/lib/board-goal-store';
-import { authorizeWorkspace, findTab } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceWrite, findTab } from '@/lib/cli-utils';
 import { forgetFinderResult } from '@/lib/constraint-tick';
 import { getWorkspaceById } from '@/lib/workspace-store';
 
 /**
  * The workspace's goal (ADR-0034 §10): `GET` reads it, `PUT {label, items}` sets it, `DELETE` clears
- * it (`purplemux board goal set|show|clear`). Writes are confined to the caller's own workspace.
+ * it (`purplemux board goal set|show|clear`). Writes are confined to the caller's own workspace; the Scrum Master
+ * selection does not reach them (ADR-0046).
  * A write answers the board's on-track line derived with the new goal.
  */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
@@ -17,7 +18,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     return res.status(405).json({ error: 'Method not allowed' });
   }
   const workspaceId = req.query.workspaceId as string;
-  const scope = await authorizeWorkspace(req, res, workspaceId);
+  const scope = await authorizeOwnWorkspaceWrite(req, res, workspaceId, 'The board goal');
   if (!scope) return;
   if (!(await getWorkspaceById(workspaceId))) return res.status(404).json({ error: 'Workspace not found', code: 'not-found' });
   if (req.method === 'GET') return res.status(200).json({ workspaceId, goal: await readBoardGoal(workspaceId) });

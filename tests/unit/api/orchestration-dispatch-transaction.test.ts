@@ -23,6 +23,7 @@ vi.mock('@/lib/cli-utils', () => ({
   },
   authorizeWorkspace: vi.fn(async () => true),
   authorizeWorkspaceInput: vi.fn(async () => true),
+  authorizeOwnWorkspaceWrite: vi.fn(async () => true),
 }));
 vi.mock('@/lib/agent-prompt-delivery', () => ({ deliverPrompt: mocks.paste }));
 vi.mock('@/lib/tmux', () => ({

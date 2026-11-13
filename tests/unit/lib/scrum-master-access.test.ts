@@ -96,7 +96,7 @@ describe('human-selected Scrum Master read scope', () => {
     expect(await authorizeWorkspace({ method: 'POST', headers: {}, url: '/api/cli/tabs/tab-x/send?workspaceId=ws-a' } as NextApiRequest,
       post.res, 'ws-a')).toEqual(manager);
     expect(post.out.status).toBe(0);
-    expect(audit.entries).toEqual([{ event: 'scrum-master-mutation', managerWorkspaceId: 'ws-root', managerTabId: 'tab-root',
+    expect(audit.entries).toEqual([{ event: 'scrum-master-mutation-admitted', managerWorkspaceId: 'ws-root', managerTabId: 'tab-root',
       workspaceId: 'ws-a', route: '/api/cli/tabs/tab-x/send' }]);
     const outside = response();
     expect(await authorizeWorkspace({ method: 'DELETE', headers: {} } as NextApiRequest, outside.res, 'ws-b')).toBeNull();

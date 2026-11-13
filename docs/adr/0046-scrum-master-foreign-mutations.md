@@ -27,15 +27,32 @@ admits a foreign mutation when, and only when, `selectedScrumMasterScope(scope, 
 
 The human saves the selection in the UI. That save is the consent: no agent can make itself the Scrum Master.
 
-Each admitted foreign mutation writes one coordination-audit line, `event: "scrum-master-mutation"`, with the manager
-workspace and tab, the target workspace and the route path (no query, no body). An audit write that fails does not
-refuse the mutation. A selection store that cannot be read refuses it: the rule fails closed.
+Each admitted foreign mutation writes one coordination-audit line, `event: "scrum-master-mutation-admitted"`, with the
+manager workspace and tab, the target workspace and the route path (no query, no body). The line records the
+authorization, not the outcome: the route can still refuse the request afterwards (400, 404, 409), and the line stays.
+A route that excludes the Scrum Master (below) refuses before the check, so a refusal there writes no line. An audit
+write that fails does not refuse the mutation. A selection store that cannot be read refuses it: the rule fails closed.
+
+The routes the selection reaches are the tab routes: `tab send`, `steer`, `close` (DELETE), tab settings (PATCH),
+`restart`, `probe`, `bg`, `tab create` and the agent launch routes. An audit `by` on a restart names the caller's own
+workspace and tab, never the target workspace (follow-up review F2). A `bg` registration looks up the caller tab in the
+caller's own workspace (F4).
 
 ## What does not change
 
 - Peer entries, legacy drive grants, the owner grant and the global CLI token still authorize no foreign mutation.
 - Mission Control writes (`mission events`, `mc ask`, question checks) stay own-workspace: a run binds to its own
   workspace's orchestrator. The Scrum Master reaches another workspace's owner questions by note, as before.
+- A workspace's own reports stay own-workspace (follow-up review F3): `POST .../standup`, `POST .../flow`,
+  `POST .../burndown`, `PUT` and `DELETE .../board-goal`, and experiment open, close and extend
+  (`POST .../ledger/experiments`, `POST .../ledger/experiments/<id>`, `POST .../ledger/experiments/<id>/extend`). A
+  foreign standup would replace the workspace's own, which drives phone alerts and the awaiting-human pause.
+- Ledger producer tokens stay own-workspace (`POST .../ledger/tokens`, ADR-0033 §5, F1): an issue rotates the
+  workspace's live token, and the token outlives the selection.
+- Workspace settings stay own-workspace: `PATCH .../orchestration` and `PATCH .../directories` (ADR-0014).
+- Each of these routes calls `authorizeOwnWorkspaceMutation` (through `authorizeOwnWorkspaceWrite` where the route also
+  reads). A foreign caller, the selected Scrum Master included, gets 403 `forbidden` with `rule: "own-workspace-only"`
+  and an error that names the surface. Reads of the same routes keep the read authority above.
 - `canDriveWorkspace` / `driveDecision` stay token-only and synchronous.
 
 ## Consequences
@@ -43,5 +60,7 @@ refuse the mutation. A selection store that cannot be read refuses it: the rule 
 - The Scrum Master can drain, wake, restart and close tabs in the workspaces it manages, without the owner.
 - Text that the Scrum Master types into a worker is indistinguishable, inside that worker, from its own operator's
   text. ADR-0021 named this risk. The audit line, and the human's choice of exactly one manager tab, are the controls.
+- Any tab in the manager workspace can `tab send` into the Scrum Master tab, and so steer mutations in every selected
+  workspace (F6). The manager workspace holds only the Scrum Master seat, and that risk is accepted.
 - Removing a workspace from the selection, or saving a selection with another manager, ends the authority at the next
   request.

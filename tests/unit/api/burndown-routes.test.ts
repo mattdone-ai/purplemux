@@ -18,7 +18,7 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, default: { ...actual, homedir: () => mockHome.value }, homedir: () => mockHome.value };
 });
 vi.mock('@/lib/cli-utils', () => ({
-  authorizeWorkspace: async (_req: unknown, res: NextApiResponse) => {
+  authorizeOwnWorkspaceWrite: async (_req: unknown, res: NextApiResponse) => {
     if (auth.allow) return { type: 'workspace', workspaceId: 'ws-sm' };
     res.status(403).json({ error: 'Forbidden', code: 'forbidden' });
     return null;

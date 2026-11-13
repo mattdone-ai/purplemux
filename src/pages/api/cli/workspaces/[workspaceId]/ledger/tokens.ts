@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { authorizeWorkspaceMutation } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceMutation } from '@/lib/cli-utils';
 import { LEDGER_PRODUCER_PATTERN, LEDGER_SERVER_PRODUCER, isLedgerProducer, isReservedProducer } from '@/lib/ledger';
 import { methodNotAllowed } from '@/lib/ledger-http';
 import { issueLedgerToken } from '@/lib/ledger-token';
@@ -7,12 +7,15 @@ import { getWorkspaceById } from '@/lib/workspace-store';
 import { show } from '@/lib/flow';
 import type { ILedgerTokenIssued } from '@/types/ledger';
 
-/** Issue a producer token (purplemux ledger token issue). Own workspace only, like every mutation. */
+/**
+ * Issue a producer token (purplemux ledger token issue). Own workspace only (ADR-0033 §5, ADR-0046): an issue rotates
+ * the workspace's live token and outlives any Scrum Master selection, so the selection does not reach this route.
+ */
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') return methodNotAllowed(res, 'POST');
   const workspaceId = req.query.workspaceId as string;
-  if (!(await authorizeWorkspaceMutation(req, res, workspaceId))) return;
+  if (!(await authorizeOwnWorkspaceMutation(req, res, workspaceId, 'A ledger producer token'))) return;
   if (!(await getWorkspaceById(workspaceId))) return res.status(404).json({ error: 'Workspace not found', code: 'not-found' });
   const producer = (req.body as { producer?: unknown } | undefined)?.producer;
   if (!isLedgerProducer(producer)) {

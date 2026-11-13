@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { authorizeWorkspace } from '@/lib/cli-utils';
+import { authorizeOwnWorkspaceWrite } from '@/lib/cli-utils';
 import { getWorkspaceById } from '@/lib/workspace-store';
 import { MAX_BURNDOWN_BYTES, parseBurndownSnapshot } from '@/lib/burndown';
 import { BurndownStoreError, readBurndown, writeBurndown } from '@/lib/burndown-store';
@@ -9,7 +9,7 @@ export const config = { api: { bodyParser: { sizeLimit: '2mb' } } };
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const workspaceId = req.query.workspaceId as string;
-  if (!(await authorizeWorkspace(req, res, workspaceId, { grant: 'refuse' }))) return;
+  if (!(await authorizeOwnWorkspaceWrite(req, res, workspaceId, 'The burndown'))) return;
   const ws = await getWorkspaceById(workspaceId);
   if (!ws) return res.status(404).json({ error: 'Workspace not found' });
 
