@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import { INTERRUPT_PREFIX, summarizeToolCall } from '@/lib/session-parser';
 import type { IAgentRuntimeSnapshot, IRuntimeSnapshotOptions, ITurnError } from '@/lib/providers/types';
+import { classifyTurnErrorText } from '@/lib/providers/turn-error-class';
 import { TURN_TAIL_CHARS } from '@/lib/turn-end';
 import {
   latestBackgroundActivityAt,
@@ -78,10 +79,11 @@ const toCurrentAction = (block: { name?: string; input?: Record<string, unknown>
 
 // Claude Code writes a provider failure as a synthetic assistant entry flagged
 // `isApiErrorMessage` with an `error` code (measured 2026-09-26: `server_error`
-// "API Error: Server error mid-response…", `authentication_failed`). Only a code
-// measured as transient is resumed; every other code is `other` (today's
-// READY nudge, nothing typed). No usage-limit entry has been observed, so none
-// is classified as one: the halt stays with the human-facing READY nudge.
+// "API Error: Server error mid-response…", `authentication_failed`). A code
+// measured as transient is resumed once; an auth or rate-limit failure takes its
+// own class (PMUX-REMOTE-RESILIENCE fix 1, `classifyTurnErrorText`); every other
+// code is `other` (today's READY nudge, nothing typed). No usage-limit entry has
+// been observed, so none is classified as one.
 const CLAUDE_RESUMABLE_ERRORS: ReadonlySet<string> = new Set(['server_error']);
 const MAX_TURN_ERROR_TEXT = 300;
 
@@ -91,7 +93,7 @@ const turnErrorOf = (entry: { isApiErrorMessage?: unknown; error?: unknown; uuid
   const content = Array.isArray(entry.message?.content) ? entry.message!.content as Array<{ text?: unknown }> : [];
   const text = content.map((b) => (typeof b.text === 'string' ? b.text : '')).join(' ').trim().slice(0, MAX_TURN_ERROR_TEXT);
   return {
-    class: CLAUDE_RESUMABLE_ERRORS.has(code) ? 'api-error' : 'other',
+    class: CLAUDE_RESUMABLE_ERRORS.has(code) ? 'api-error' : classifyTurnErrorText(code, text),
     code,
     text,
     turnId: typeof entry.uuid === 'string' ? entry.uuid : '',

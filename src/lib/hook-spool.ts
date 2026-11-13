@@ -29,6 +29,20 @@ export const HOOK_SPOOL_TMP_MAX_AGE_MS = 10 * 60 * 1000;
  * N times this.
  */
 export const HOOK_REPLAY_EVENT_TIMEOUT_MS = 5_000;
+/**
+ * The bound for a REMOTE tab's replayed event (PMUX-REMOTE-RESILIENCE fix 4). Its replay first brings the
+ * tab's transcript copy up to date over ssh (ADR-0022): one bounded read of 10 s, more for a large backlog.
+ * At 5 s a slow host timed events out, and the drain went on to their session's later events, so the late
+ * apply landed under the tab's floor: history only, as if dropped.
+ */
+export const HOOK_REPLAY_REMOTE_EVENT_TIMEOUT_MS = 30_000;
+/**
+ * How long a session's later events wait for its abandoned replay (review r1): past this, a replay that never
+ * settles no longer holds them, and one log line says so.
+ */
+export const HOOK_REPLAY_INFLIGHT_MAX_MS = 10 * 60_000;
+/** Session → when its abandoned replay timed out; cleared when that replay settles. Shared by every drain. */
+const abandonedReplays = new Map<string, number>();
 /** Files replayed between two yields to the event loop. */
 const DRAIN_BATCH = 50;
 
@@ -41,6 +55,8 @@ export interface ISpooledHook {
   /** The hook kept only the metadata: the body was over the spool's size limit. */
   bodyDropped: boolean;
   bodyLength: number | null;
+  /** A remote hook's event: when this server pulled it from the host's spool (`remote-spool.ts`). */
+  pulledAt: number | null;
 }
 
 export interface IHookSpoolDrainResult {
@@ -48,6 +64,8 @@ export interface IHookSpoolDrainResult {
   bad: number;
   /** Dispatched, but not finished within the per-event bound: moved to `bad/`, and counted in `bad` too. */
   timedOut: number;
+  /** Left in the spool for the next drain: a later event of a session whose replay timed out in this drain. */
+  deferred: number;
   /** Past the replay window or over the file bound: deleted, never dispatched. */
   dropped: number;
   /** Written without its body (too large): deleted, never dispatched. */
@@ -62,9 +80,10 @@ export interface IHookSpoolDrainOptions {
   maxFiles?: number;
   maxAgeMs?: number;
   eventTimeoutMs?: number;
+  remoteEventTimeoutMs?: number;
 }
 
-const SPOOL_FILE = /^(\d{1,16})-[^/]*\.json$/;
+const SPOOL_FILE = /^(\d{1,16})-(r?)[^/]*\.json$/;
 
 export const parseSpooledHook = (text: string): ISpooledHook | null => {
   let raw: unknown;
@@ -74,7 +93,7 @@ export const parseSpooledHook = (text: string): ISpooledHook | null => {
     return null;
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const { at, session, query, body, bodyDropped, bodyLength } = raw as Record<string, unknown>;
+  const { at, session, query, body, bodyDropped, bodyLength, pulledAt } = raw as Record<string, unknown>;
   if (typeof at !== 'number' || !Number.isSafeInteger(at) || at <= 0) return null;
   if (typeof session !== 'string' || typeof query !== 'string' || !('body' in raw)) return null;
   return {
@@ -84,6 +103,7 @@ export const parseSpooledHook = (text: string): ISpooledHook | null => {
     body,
     bodyDropped: bodyDropped === true,
     bodyLength: typeof bodyLength === 'number' ? bodyLength : null,
+    pulledAt: typeof pulledAt === 'number' && Number.isSafeInteger(pulledAt) && pulledAt > 0 ? pulledAt : null,
   };
 };
 
@@ -93,6 +113,8 @@ export const spooledHookQuery = (query: string): Record<string, string> =>
 interface ISpoolEntry {
   name: string;
   at: number;
+  /** Pulled from a remote host's spool (`<at>-r<pid>-<rand>.json`): its age is judged from the pull, after parse. */
+  remote: boolean;
 }
 
 interface ISpoolListing {
@@ -122,7 +144,7 @@ const listSpool = async (dir: string): Promise<ISpoolListing> => {
       continue;
     }
     const match = SPOOL_FILE.exec(dirent.name);
-    if (match) listing.entries.push({ name: dirent.name, at: Number(match[1]) });
+    if (match) listing.entries.push({ name: dirent.name, at: Number(match[1]), remote: match[2] === 'r' });
     else listing.unnamed.push(dirent.name);
   }
   listing.entries.sort((a, b) => a.at - b.at || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -167,37 +189,51 @@ const pruneBad = async (dir: string, now: number): Promise<number> => {
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-type TReplayOutcome = { kind: 'applied' } | { kind: 'threw'; err: unknown } | { kind: 'timed-out' };
+const replayStillRunning = (session: string, now: number): boolean => {
+  const since = abandonedReplays.get(session);
+  if (since === undefined) return false;
+  if (now - since <= HOOK_REPLAY_INFLIGHT_MAX_MS) return true;
+  abandonedReplays.delete(session);
+  log.warn({ session, sinceMs: now - since }, 'an abandoned replay never settled: its session\'s later events replay again');
+  return false;
+};
+
+type TReplayOutcome = { kind: 'applied' } | { kind: 'threw'; err: unknown } | { kind: 'timed-out'; late: (quarantined: Promise<unknown>, onSettled: () => void) => void };
 
 /**
  * Run one replay, bounded. A replay that has not settled within `timeoutMs` is
- * abandoned, never cancelled. Its file is in `bad/` by then, so when it settles
- * later one log line says how, and when, with the file's name: an operator
- * who re-injects a `bad/` file must know whether it already applied. A late
- * state change is ordered against the tab's floor like any replay.
+ * abandoned, never cancelled. Its file moves to `bad/`; when it settles later
+ * one log line says how, and when, with the file's name. One that applied
+ * leaves `bad/` again (PMUX-REMOTE-RESILIENCE fix 4): it is no bad event, and
+ * an operator who re-injects a `bad/` file would apply it twice. One that
+ * failed stays there. A late state change is ordered against the tab's floor
+ * like any replay.
  */
-const replayBounded = async (run: () => Promise<unknown>, timeoutMs: number, file: string): Promise<TReplayOutcome> => {
+const replayBounded = async (run: () => Promise<unknown>, timeoutMs: number, file: string, badPath: string): Promise<TReplayOutcome> => {
   let timer: NodeJS.Timeout | undefined;
   const startedAt = Date.now();
   const replay = Promise.resolve().then(run);
+  const late = (quarantined: Promise<unknown>, onSettled: () => void) => {
+    void replay.then(() => {}, () => {}).then(onSettled);
+    replay.then(async () => {
+      const afterMs = Date.now() - startedAt;
+      // The move to bad/ ends first, so the removal never races it.
+      await quarantined.catch(() => {});
+      const removed = await fs.rm(badPath).then(() => true, () => false);
+      log.warn({ file, afterMs, removedFromBad: removed }, `abandoned replay of ${file} applied at +${afterMs} ms; ${removed ? `its file is removed from ${HOOK_SPOOL_BAD_DIRNAME}/` : `its file was not in ${HOOK_SPOOL_BAD_DIRNAME}/`}`);
+    }, (err: unknown) => {
+      const afterMs = Date.now() - startedAt;
+      log.warn({ file, afterMs, err }, `abandoned replay of ${file} failed at +${afterMs} ms; its file stays in ${HOOK_SPOOL_BAD_DIRNAME}/`);
+    });
+  };
   const timeout = new Promise<TReplayOutcome>((resolve) => {
-    timer = setTimeout(() => resolve({ kind: 'timed-out' }), timeoutMs);
+    timer = setTimeout(() => resolve({ kind: 'timed-out', late }), timeoutMs);
   });
   try {
-    const outcome = await Promise.race([
+    return await Promise.race([
       replay.then((): TReplayOutcome => ({ kind: 'applied' }), (err: unknown): TReplayOutcome => ({ kind: 'threw', err })),
       timeout,
     ]);
-    if (outcome.kind === 'timed-out') {
-      replay.then(() => {
-        const afterMs = Date.now() - startedAt;
-        log.warn({ file, afterMs }, `abandoned replay of ${file} applied at +${afterMs} ms; its file is in ${HOOK_SPOOL_BAD_DIRNAME}/`);
-      }, (err: unknown) => {
-        const afterMs = Date.now() - startedAt;
-        log.warn({ file, afterMs, err }, `abandoned replay of ${file} failed at +${afterMs} ms`);
-      });
-    }
-    return outcome;
   } finally {
     clearTimeout(timer);
   }
@@ -209,8 +245,10 @@ const replayBounded = async (run: () => Promise<unknown>, timeoutMs: number, fil
  * Oldest first, each through `apply` — the hook route's own dispatcher — with
  * its original time, and deleted once applied. A file that does not parse, or
  * whose replay throws, moves to `bad/` once and is never retried; so does one
- * whose replay has not finished within `eventTimeoutMs` (5 s), and the drain
- * goes on with the next file. Files past
+ * whose replay has not finished within `eventTimeoutMs` (5 s; a remote tab's
+ * `remoteEventTimeoutMs`, 30 s), and the drain goes on with the next file
+ * of another session: that session's later files wait in the spool until the
+ * abandoned replay settles (at most HOOK_REPLAY_INFLIGHT_MAX_MS), across drains. Files past
  * the replay window, then the oldest beyond `maxFiles`, are deleted without
  * dispatch, with one log line; so is a file whose body the hook dropped for
  * size. `bad/` entries older than 7 days and orphaned temporaries older than
@@ -226,9 +264,11 @@ export const drainHookSpool = async (
   const maxFiles = options.maxFiles ?? HOOK_SPOOL_MAX_FILES;
   const maxAgeMs = options.maxAgeMs ?? HOOK_REPLAY_WINDOW_MS;
   const eventTimeoutMs = options.eventTimeoutMs ?? HOOK_REPLAY_EVENT_TIMEOUT_MS;
+  const remoteEventTimeoutMs = options.remoteEventTimeoutMs ?? HOOK_REPLAY_REMOTE_EVENT_TIMEOUT_MS;
   const result: IHookSpoolDrainResult = {
-    applied: 0, bad: 0, timedOut: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0,
+    applied: 0, bad: 0, timedOut: 0, deferred: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0,
   };
+  const deferredSessions = new Set<string>();
 
   const { entries, unnamed, temporaries } = await listSpool(dir);
   result.prunedTmp = await pruneOlderThan(dir, temporaries, now, HOOK_SPOOL_TMP_MAX_AGE_MS);
@@ -242,7 +282,9 @@ export const drainHookSpool = async (
   }
   if (entries.length === 0) return result;
 
-  const fresh = entries.filter((entry) => now - entry.at <= maxAgeMs);
+  // A remote event reaches this spool only when a pull takes it, however late (an unreachable host backs off):
+  // its age is judged from that pull, once the file is read, never from the remote hook's own clock.
+  const fresh = entries.filter((entry) => entry.remote || now - entry.at <= maxAgeMs);
   const kept = fresh.slice(Math.max(0, fresh.length - maxFiles));
   const keptNames = new Set(kept.map((entry) => entry.name));
   const dropped = entries.filter((entry) => !keptNames.has(entry.name));
@@ -273,15 +315,32 @@ export const drainHookSpool = async (
       result.bad += 1;
       continue;
     }
+    if (entry.remote && now - (spooled.pulledAt ?? spooled.at) > maxAgeMs) {
+      await fs.rm(file, { force: true });
+      result.dropped += 1;
+      log.warn({ file: entry.name, at: spooled.at, pulledAt: spooled.pulledAt, maxAgeMs }, 'hook spool: dropped a remote event pulled longer ago than the replay window, unreplayed');
+      continue;
+    }
     if (spooled.bodyDropped) {
       await fs.rm(file, { force: true });
       result.metadataOnly += 1;
       droppedBodyLength += spooled.bodyLength ?? 0;
       continue;
     }
+    // The session's earlier event is still being applied, in this drain or since an earlier one: this one waits for
+    // a later drain, so it does not land before it (and the late one does not land under this one's floor). The
+    // wait ends at HOOK_REPLAY_INFLIGHT_MAX_MS: a replay that never settles holds the session no longer.
+    if (deferredSessions.has(spooled.session) || replayStillRunning(spooled.session, now)) {
+      deferredSessions.add(spooled.session);
+      result.deferred += 1;
+      continue;
+    }
     // A hook clock ahead of the server's must not date an event in the future.
-    const delivery = { query: spooledHookQuery(spooled.query), body: spooled.body, replayedAt: Math.min(spooled.at, now) };
-    const outcome = await replayBounded(() => apply(delivery), eventTimeoutMs, entry.name);
+    const query = spooledHookQuery(spooled.query);
+    const delivery = { query, body: spooled.body, replayedAt: Math.min(spooled.at, now) };
+    const timeoutMs = query.remote ? remoteEventTimeoutMs : eventTimeoutMs;
+    const badPath = path.join(dir, HOOK_SPOOL_BAD_DIRNAME, entry.name);
+    const outcome = await replayBounded(() => apply(delivery), timeoutMs, entry.name, badPath);
     if (outcome.kind === 'threw') {
       const { err } = outcome;
       await quarantine(dir, entry.name, `replay threw: ${err instanceof Error ? err.message : String(err)}`);
@@ -289,9 +348,17 @@ export const drainHookSpool = async (
       continue;
     }
     if (outcome.kind === 'timed-out') {
-      await quarantine(dir, entry.name, `replay did not finish within ${eventTimeoutMs} ms`);
+      const quarantined = quarantine(dir, entry.name, `replay did not finish within ${timeoutMs} ms`);
+      const session = spooled.session;
+      const marker = Date.now();
+      abandonedReplays.set(session, marker);
+      outcome.late(quarantined, () => {
+        if (abandonedReplays.get(session) === marker) abandonedReplays.delete(session);
+      });
+      await quarantined;
       result.bad += 1;
       result.timedOut += 1;
+      deferredSessions.add(spooled.session);
       continue;
     }
     await fs.rm(file, { force: true });

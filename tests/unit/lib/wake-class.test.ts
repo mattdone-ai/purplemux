@@ -9,6 +9,8 @@ describe('the wake-class table (AC 1)', () => {
     ['thrash', 'urgent'],
     ['api-error', 'urgent'],
     ['usage-limit', 'urgent'],
+    ['auth-failure', 'urgent'],
+    ['rate-limit', 'urgent'],
     ['inactive', 'urgent'],
     ['stalled', 'urgent'],
     ['model-drift', 'urgent'],
@@ -109,7 +111,7 @@ describe('the wake-class table (AC 1)', () => {
   });
 
   it('every kind of the table has a pinned class, and a kind outside it is urgent, never held', () => {
-    const pinned = new Set(['needs-input', 'off-scope', 'thrash', 'api-error', 'usage-limit', 'inactive', 'stalled', 'model-drift',
+    const pinned = new Set(['needs-input', 'off-scope', 'thrash', 'api-error', 'usage-limit', 'auth-failure', 'rate-limit', 'inactive', 'stalled', 'model-drift',
       'ready-for-review', 'turn-ended', 'idle-no-end-line', 'long-wait', 'stuck', 'probe-failed', 'mission', 'resume', 'watch',
       'deploy', 'note', 'red-main', 'rotate', 'turn-marker', 'bg-completed', 'bg-failed', 'bg-exited-unknown', 'bg-died',
       'bg-host-unreachable', 'heartbeat', 'flag', 'alarm', 'tab-send', 'standing-order', 'curator-candidate',

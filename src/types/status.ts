@@ -91,7 +91,7 @@ export interface IStartupPromptReading {
 }
 
 export interface ITurnErrorEpisode {
-  class: 'api-error' | 'usage-limit';
+  class: 'api-error' | 'usage-limit' | 'auth-failure' | 'rate-limit';
   code: string;
   text: string;
   startedAt: number;
@@ -101,6 +101,16 @@ export interface ITurnErrorEpisode {
   escalated: boolean;
   /** The failed turn this episode last saw; a repeated stop of the same turn is no second failure (review r2 nit 1). */
   turnId?: string;
+  /** `rate-limit`: the backoff resumes queued so far this episode. */
+  attempts?: number;
+  /** `auth-failure`: the failure key (provider and host) whose next clean turn owes this tab its one resume. */
+  waitingFor?: string | null;
+  /** The provider outage (fleet outage mode) that holds this tab: no resume, no escalation until it ends. */
+  heldBy?: string | null;
+  /** The one resume after a recovery (an auth recovery or an outage's end) went out. */
+  recoveryResumed?: boolean;
+  /** `auth-failure`: that resume failed too, and the target was told once more. */
+  escalatedAfterRecovery?: boolean;
 }
 
 export interface ITurnEndRecord {
@@ -243,7 +253,7 @@ export interface IStandupUpdateMessage {
   standup: IWorkspaceStandup;
 }
 
-export type TOrchestrationNudgeKind = 'needs-input' | 'ready-for-review' | 'turn-marker' | 'idle-no-end-line' | 'long-wait' | 'api-error' | 'usage-limit' | 'turn-ended' | 'inactive' | 'stuck' | 'heartbeat' | 'off-scope' | 'thrash' | 'stalled' | 'probe-failed' | 'bg-completed' | 'bg-failed' | 'bg-exited-unknown' | 'bg-host-unreachable' | 'bg-died' | 'model-drift';
+export type TOrchestrationNudgeKind = 'needs-input' | 'ready-for-review' | 'turn-marker' | 'idle-no-end-line' | 'long-wait' | 'api-error' | 'usage-limit' | 'auth-failure' | 'rate-limit' | 'turn-ended' | 'inactive' | 'stuck' | 'heartbeat' | 'off-scope' | 'thrash' | 'stalled' | 'probe-failed' | 'bg-completed' | 'bg-failed' | 'bg-exited-unknown' | 'bg-host-unreachable' | 'bg-died' | 'model-drift';
 
 export interface IOrchestrationNudge {
   id: string;

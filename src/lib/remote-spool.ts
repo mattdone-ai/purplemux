@@ -6,6 +6,7 @@ import { HOOK_SPOOL_DIR, HOOK_SPOOL_BAD_DIRNAME, drainHookSpool, parseSpooledHoo
 import type { IHookDelivery } from '@/lib/hook-dispatch';
 import { describeRemoteFailure, runSsh, shQuote } from '@/lib/remote-host';
 import { remoteKitPath } from '@/lib/remote-kit';
+import { syncRemoteTranscript } from '@/lib/remote-transcript';
 import { remoteHostsInUse, sessionHostOf } from '@/lib/session-host';
 
 /**
@@ -73,6 +74,8 @@ export interface IRemoteSpoolPull {
 const pullHost = async (host: string, spoolDir: string): Promise<IRemoteSpoolPull> => {
   const result: IRemoteSpoolPull = { host, taken: 0, dropped: 0, quarantined: 0 };
   const { stdout } = await runSsh(host, 'sh -s', { timeoutMs: REMOTE_SPOOL_TIMEOUT_MS, input: remoteSpoolListScript() });
+  // The replay window starts here, not at the remote hook's own time: a late pull never ages an event out.
+  const pulledAt = Date.now();
   const done: string[] = [];
   for (const line of stdout.split('\n')) {
     const [kind, name, value] = line.split('\t');
@@ -95,7 +98,7 @@ const pullHost = async (host: string, spoolDir: string): Promise<IRemoteSpoolPul
     await fs.mkdir(spoolDir, { recursive: true, mode: 0o700 });
     const local = path.join(spoolDir, `${match[1]}-r${match[2]}-${match[3] || '0'}.json`);
     const tmp = path.join(spoolDir, `.${path.basename(local)}.tmp`);
-    await fs.writeFile(tmp, JSON.stringify({ v: 1, at: hook.at, session: hook.session, query: hook.query, body: hook.body, ...(hook.bodyDropped ? { bodyDropped: true, bodyLength: hook.bodyLength } : {}) }), { mode: 0o600 });
+    await fs.writeFile(tmp, JSON.stringify({ v: 1, at: hook.at, pulledAt, session: hook.session, query: hook.query, body: hook.body, ...(hook.bodyDropped ? { bodyDropped: true, bodyLength: hook.bodyLength } : {}) }), { mode: 0o600 });
     await fs.rename(tmp, local);
     result.taken += 1;
   }
@@ -132,14 +135,41 @@ export const pullRemoteHookSpools = async (spoolDir = HOOK_SPOOL_DIR, now = Date
 };
 
 /**
+ * One drain's apply, batched for remote events (PMUX-REMOTE-RESILIENCE fix 5). A replayed remote event first
+ * brings its tab's transcript copy up to date, and each did so with its own ssh read: ~2.2 s per event on a
+ * real host, 45 queued on a remote host. Every replayed event is in the past, so the first sync of a session's
+ * transcript in this drain copies everything any later one of them needs: the rest share it. A live event
+ * never shares one, and the next drain syncs again.
+ *
+ * A sync that fails is shared too, for the rest of this drain only (review r1 finding 7): a host that did not answer
+ * one bounded read would make each of the drain's events wait out its own, up to 10 s each. Those events still
+ * apply from their hook bodies; the stop's own read, the next live event and the next drain read again.
+ */
+export const batchRemoteReplays = (apply: (delivery: IHookDelivery) => Promise<unknown>): (delivery: IHookDelivery) => Promise<unknown> => {
+  const synced = new Map<string, Promise<boolean>>();
+  const syncOnce = (session: string, remotePath: string): Promise<boolean> => {
+    const key = `${session}\0${remotePath}`;
+    let sync = synced.get(key);
+    if (!sync) {
+      sync = syncRemoteTranscript(session).catch(() => false);
+      synced.set(key, sync);
+    }
+    return sync;
+  };
+  return (delivery) => (delivery.replayedAt !== undefined && delivery.query.remote === 'claude'
+    ? apply({ ...delivery, remoteTranscriptSync: syncOnce })
+    : apply(delivery));
+};
+
+/**
  * The status manager's drain. The remote pull runs beside it, one at a time,
  * and is never awaited: a slow host cannot hold the local replay. What a pull
  * moves here replays at the next drain (the boot's second drain comes 5 s after
- * the first; then every poll).
+ * the first; then every poll), batched per session (`batchRemoteReplays`).
  */
 export const drainHookSpoolsWithRemotePull = async (apply: (delivery: IHookDelivery) => Promise<unknown>): Promise<IHookSpoolDrainResult> => {
   if (!g.__ptRemoteSpoolPull) {
     g.__ptRemoteSpoolPull = pullRemoteHookSpools().finally(() => { g.__ptRemoteSpoolPull = null; });
   }
-  return drainHookSpool(apply);
+  return drainHookSpool(batchRemoteReplays(apply));
 };

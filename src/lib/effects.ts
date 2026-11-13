@@ -37,7 +37,7 @@ export const EFFECTS_SOURCE = 'fired: tab_events rows recorded in the window, an
 // Records keyed by each union: the compiler refuses a kind added to the union and left out here.
 const NUDGE_KINDS: Readonly<Record<TOrchestrationNudgeKind, TEffectFamily>> = {
   'needs-input': 'nudge', 'ready-for-review': 'nudge', 'turn-marker': 'nudge', 'idle-no-end-line': 'nudge', 'long-wait': 'nudge',
-  'api-error': 'nudge', 'usage-limit': 'nudge', 'turn-ended': 'nudge', inactive: 'nudge', stuck: 'nudge', heartbeat: 'nudge',
+  'api-error': 'nudge', 'usage-limit': 'nudge', 'auth-failure': 'nudge', 'rate-limit': 'nudge', 'turn-ended': 'nudge', inactive: 'nudge', stuck: 'nudge', heartbeat: 'nudge',
   'off-scope': 'nudge', thrash: 'nudge', 'model-drift': 'nudge', 'bg-completed': 'nudge', 'bg-failed': 'nudge',
   'bg-exited-unknown': 'nudge', 'bg-host-unreachable': 'nudge', 'bg-died': 'nudge',
   // A registered liveness probe's two firings (`tab probe set`).

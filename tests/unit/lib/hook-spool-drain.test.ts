@@ -368,7 +368,7 @@ describe('the status manager replays the hook spool (ADR-0020)', () => {
     // 28 Sep: a drain stuck on its replays held every poll for 7 minutes.
     let releaseDrain!: () => void;
     const drain = vi.fn(() => new Promise<IHookSpoolDrainResult>((resolve) => {
-      releaseDrain = () => resolve({ applied: 0, bad: 0, timedOut: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0 });
+      releaseDrain = () => resolve({ applied: 0, bad: 0, timedOut: 0, deferred: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0 });
     }));
     manager.setHookSpoolDrain(drain);
     const readLayout = vi.mocked((await import('@/lib/layout-store')).readLayoutFile);
@@ -659,6 +659,22 @@ describe('the status manager replays the hook spool (ADR-0020)', () => {
     expect(manager.getHookHistory('w')).toEqual([{ event: 'prompt-submit', at: old, replayed: true, stale: true }]);
     expect(record).not.toHaveBeenCalled();
   });
+
+  it('a remote tab\'s replayed event past the window still applies when it is above the floor: its pull was late, not the event (PMUX-REMOTE-RESILIENCE fix 4)', async () => {
+    const { manager } = await managerWithPaste();
+    await manager.init();
+    const { HOOK_REPLAY_WINDOW_MS } = await import('@/lib/hook-spool');
+    const entry: ITabStatusEntry = { cliState: 'idle', workspaceId: 'ws-1', tabName: 'r', tmuxSession: 'tmux-r', panelType: 'claude-code', host: 'remote-a', lastEvent: null, eventSeq: 0 };
+    manager.registerTab('r', entry);
+    const old = Date.now() - HOOK_REPLAY_WINDOW_MS - 60_000;
+    manager.handleProviderEvent('claude', 'tmux-r', { kind: 'prompt-submit' }, old, { replayed: true });
+    expect(entry.cliState).toBe('busy');
+    expect(manager.getHookHistory('r')).toEqual([{ event: 'prompt-submit', at: old, replayed: true, stale: false }]);
+    // The floor still orders it: an older replay after it is history only.
+    manager.handleProviderEvent('claude', 'tmux-r', { kind: 'session-start' } as never, old - 1, { replayed: true });
+    expect(manager.getHookHistory('r')[0]).toMatchObject({ at: old - 1, stale: true });
+    expect(entry.cliState).toBe('busy');
+  });
 });
 
 describe('HookFloorStore (ADR-0020)', () => {
@@ -721,7 +737,7 @@ describe('HookFloorStore (ADR-0020)', () => {
 describe('drainHookSpool (ADR-0020)', () => {
   const drain = async (
     apply: (d: IHookDelivery) => Promise<unknown>,
-    options: { now?: number; maxFiles?: number; maxAgeMs?: number; eventTimeoutMs?: number } = {},
+    options: { now?: number; maxFiles?: number; maxAgeMs?: number; eventTimeoutMs?: number; remoteEventTimeoutMs?: number } = {},
   ) => {
     const { drainHookSpool } = await import('@/lib/hook-spool');
     return drainHookSpool(apply, { dir: spoolDir(), ...options });
@@ -761,10 +777,11 @@ describe('drainHookSpool (ADR-0020)', () => {
 
   it('bounds each replay: N replays that never settle finish within N x the bound, each moves to bad/ once, and the rest still apply', async () => {
     const now = Date.now();
+    // One session each: a timed-out session's later events wait for the next drain (pinned below).
     const hung = [
-      await spoolEvent(now - 4_000, claudePrompt()),
-      await spoolEvent(now - 3_000, claudeStop()),
-      await spoolEvent(now - 2_000, claudePrompt()),
+      await spoolEvent(now - 4_000, claudePrompt('tmux-1'), '', 'tmux-1'),
+      await spoolEvent(now - 3_000, claudeStop('tmux-2'), '', 'tmux-2'),
+      await spoolEvent(now - 2_000, claudePrompt('tmux-3'), '', 'tmux-3'),
     ];
     await spoolEvent(now - 1_000, claudeStop());
     const seen: number[] = [];
@@ -790,21 +807,104 @@ describe('drainHookSpool (ADR-0020)', () => {
     expect(apply).toHaveBeenCalledTimes(4);
   });
 
-  it('an abandoned replay that settles later logs how and when, with its file name', async () => {
+  it('an abandoned replay that settles later logs how and when, with its file name; one that applied leaves bad/, one that failed stays', async () => {
     const now = Date.now();
-    const late = await spoolEvent(now - 2_000, claudePrompt());
-    const failing = await spoolEvent(now - 1_000, claudeStop());
+    const late = await spoolEvent(now - 2_000, claudePrompt('tmux-1'), '', 'tmux-1');
+    const failing = await spoolEvent(now - 1_000, claudeStop('tmux-2'), '', 'tmux-2');
     const apply = vi.fn((d: IHookDelivery) => new Promise<void>((resolve, reject) => {
       setTimeout(() => (d.replayedAt === now - 2_000 ? resolve() : reject(new Error('late 5xx'))), 150);
     }));
     expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ applied: 0, timedOut: 2, bad: 2 });
+    expect((await fs.readdir(path.join(spoolDir(), 'bad'))).sort()).toEqual([late, failing].sort());
     await waitFor(() => {
       const applied = logs.lines.find((line) => line.msg.startsWith(`abandoned replay of ${late} applied at +`));
-      expect(applied).toMatchObject({ level: 'warn', fields: { file: late } });
+      expect(applied).toMatchObject({ level: 'warn', fields: { file: late, removedFromBad: true } });
+      expect(applied!.msg).toContain('its file is removed from bad/');
       expect((applied!.fields as { afterMs: number }).afterMs).toBeGreaterThanOrEqual(140);
       expect(logs.lines.find((line) => line.msg.startsWith(`abandoned replay of ${failing} failed at +`)))
         .toMatchObject({ level: 'warn', fields: { file: failing } });
     });
+    expect(await fs.readdir(path.join(spoolDir(), 'bad'))).toEqual([failing]);
+  });
+
+  it('after a timeout, the drain leaves that session\'s later events for the next drain, in order; other sessions go on (PMUX-REMOTE-RESILIENCE fix 4)', async () => {
+    const now = Date.now();
+    await spoolEvent(now - 4_000, claudePrompt(), '', 'tmux-w');
+    const later = await spoolEvent(now - 3_000, claudeStop(), '', 'tmux-w');
+    await spoolEvent(now - 2_000, claudeStop('tmux-x'), '', 'tmux-x');
+    let release!: () => void;
+    const seen: Array<[string, number]> = [];
+    const apply = vi.fn((d: IHookDelivery) => {
+      const body = d.body as { session: string };
+      seen.push([body.session, d.replayedAt!]);
+      return d.replayedAt === now - 4_000 ? new Promise<void>((resolve) => { release = resolve; }) : Promise.resolve();
+    });
+    expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ applied: 1, timedOut: 1, deferred: 1, bad: 1 });
+    expect(seen).toEqual([['tmux-w', now - 4_000], ['tmux-x', now - 2_000]]);
+    expect((await fs.readdir(spoolDir())).filter((n) => n !== 'bad')).toEqual([later]);
+    release();
+    await waitFor(async () => expect(await fs.readdir(path.join(spoolDir(), 'bad'))).toEqual([]));
+    expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ applied: 1, deferred: 0 });
+    expect(seen.at(-1)).toEqual(['tmux-w', now - 3_000]);
+  });
+
+  it('a later drain that starts while the abandoned replay still runs defers the session again; it applies once that replay settles (review r1)', async () => {
+    const now = Date.now();
+    await spoolEvent(now - 4_000, claudePrompt(), '', 'tmux-w');
+    const later = await spoolEvent(now - 3_000, claudeStop(), '', 'tmux-w');
+    let release!: () => void;
+    const seen: number[] = [];
+    const apply = vi.fn((d: IHookDelivery) => {
+      seen.push(d.replayedAt!);
+      return d.replayedAt === now - 4_000 ? new Promise<void>((resolve) => { release = resolve; }) : Promise.resolve();
+    });
+    expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ applied: 0, timedOut: 1, deferred: 1 });
+    // The next poll's drain: the first replay is still running, so the later event waits again.
+    expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ applied: 0, deferred: 1 });
+    expect(seen).toEqual([now - 4_000]);
+    expect((await fs.readdir(spoolDir())).filter((n) => n !== 'bad')).toEqual([later]);
+    release();
+    await waitFor(async () => expect(await fs.readdir(path.join(spoolDir(), 'bad'))).toEqual([]));
+    expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ applied: 1, deferred: 0 });
+    expect(seen).toEqual([now - 4_000, now - 3_000]);
+  });
+
+  it('a replay that never settles holds its session\'s later events at most HOOK_REPLAY_INFLIGHT_MAX_MS', async () => {
+    const { HOOK_REPLAY_INFLIGHT_MAX_MS } = await import('@/lib/hook-spool');
+    expect(HOOK_REPLAY_INFLIGHT_MAX_MS).toBe(600_000);
+    const now = Date.now();
+    await spoolEvent(now - 4_000, claudePrompt(), '', 'tmux-w');
+    await spoolEvent(now - 3_000, claudeStop(), '', 'tmux-w');
+    const apply = vi.fn((d: IHookDelivery) => (d.replayedAt === now - 4_000 ? new Promise<never>(() => {}) : Promise.resolve()));
+    expect(await drain(apply, { now, eventTimeoutMs: 30 })).toMatchObject({ timedOut: 1, deferred: 1 });
+    expect(await drain(apply, { now: now + HOOK_REPLAY_INFLIGHT_MAX_MS - 1_000, eventTimeoutMs: 30 })).toMatchObject({ applied: 0, deferred: 1 });
+    expect(await drain(apply, { now: now + HOOK_REPLAY_INFLIGHT_MAX_MS + 1_000, eventTimeoutMs: 30 })).toMatchObject({ applied: 1, deferred: 0 });
+    expect(logs.lines.some((line) => line.msg.includes('an abandoned replay never settled'))).toBe(true);
+  });
+
+  it('gives a remote event a 30 s bound, and ages it from its pull, never from the remote hook\'s own time', async () => {
+    const { HOOK_REPLAY_REMOTE_EVENT_TIMEOUT_MS, HOOK_REPLAY_WINDOW_MS } = await import('@/lib/hook-spool');
+    expect(HOOK_REPLAY_REMOTE_EVENT_TIMEOUT_MS).toBe(30_000);
+    const now = Date.now();
+    await fs.mkdir(spoolDir(), { recursive: true });
+    const old = now - HOOK_REPLAY_WINDOW_MS - 60_000;
+    const remoteFile = (at: number, pulledAt: number, tag: string) => fs.writeFile(path.join(spoolDir(), `${at}-r42-${tag}.json`),
+      JSON.stringify({ v: 1, at, pulledAt, session: 'pt-r', query: 'remote=claude&event=stop&session=pt-r', body: {} }));
+    // Fired before the window, pulled just now (the host was unreachable): replayed.
+    await remoteFile(old, now - 1_000, 'aa');
+    // Pulled before the window and never replayed since: dropped.
+    await remoteFile(old + 1, old + 2, 'bb');
+    // A local event that old: dropped as before.
+    await spoolEvent(old + 3, claudeStop());
+    const timeouts: number[] = [];
+    // 50 ms: past the 1 ms local bound, inside the remote one.
+    const apply = vi.fn(async (d: IHookDelivery) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      timeouts.push(d.replayedAt!);
+    });
+    const result = await drain(apply, { now, eventTimeoutMs: 1, remoteEventTimeoutMs: 1_000 });
+    expect(result).toMatchObject({ applied: 1, dropped: 2, timedOut: 0 });
+    expect(timeouts).toEqual([old]);
   });
 
   it('a replay that settles within the bound is applied, and the default bound is 5 s', async () => {
@@ -880,7 +980,7 @@ describe('drainHookSpool (ADR-0020)', () => {
     const floors = path.join(spoolDir(), '.floors.json');
     await fs.writeFile(floors, '{"w":1}\n');
     await age(floors, 30 * 24 * 60 * MIN);
-    expect(await drain(apply)).toEqual({ applied: 0, bad: 0, timedOut: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0 });
+    expect(await drain(apply)).toEqual({ applied: 0, bad: 0, timedOut: 0, deferred: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0 });
     expect(seen).toEqual([]);
     expect(await fs.readdir(spoolDir())).toEqual(['.floors.json']);
   });
@@ -918,7 +1018,7 @@ describe('drainHookSpool (ADR-0020)', () => {
 
   it('an absent spool directory is an empty spool', async () => {
     const { seen, apply } = collect();
-    expect(await drain(apply)).toEqual({ applied: 0, bad: 0, timedOut: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0 });
+    expect(await drain(apply)).toEqual({ applied: 0, bad: 0, timedOut: 0, deferred: 0, dropped: 0, metadataOnly: 0, prunedBad: 0, prunedTmp: 0 });
     expect(seen).toEqual([]);
   });
 });

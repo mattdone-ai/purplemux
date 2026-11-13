@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import type { IAgentRuntimeSnapshot, ITurnError } from '@/lib/providers/types';
+import { classifyTurnErrorText } from '@/lib/providers/turn-error-class';
 import { TURN_TAIL_CHARS } from '@/lib/turn-end';
 import type { ICurrentAction } from '@/types/status';
 import type { TToolName } from '@/types/timeline';
@@ -120,10 +121,11 @@ const codexTurnError = (payload: Record<string, unknown>): ITurnError | null => 
   if (typeof error !== 'object' || error === null) return null;
   const e = error as { message?: unknown; codex_error_info?: unknown };
   const code = typeof e.codex_error_info === 'string' && e.codex_error_info ? e.codex_error_info : 'unknown';
+  const text = (typeof e.message === 'string' ? e.message : '').trim().slice(0, 300);
   return {
-    class: Object.hasOwn(CODEX_ERROR_CLASS, code) ? CODEX_ERROR_CLASS[code] : 'other',
+    class: Object.hasOwn(CODEX_ERROR_CLASS, code) ? CODEX_ERROR_CLASS[code] : classifyTurnErrorText(code, text),
     code,
-    text: (typeof e.message === 'string' ? e.message : '').trim().slice(0, 300),
+    text,
     turnId: typeof payload.turn_id === 'string' ? payload.turn_id : '',
   };
 };

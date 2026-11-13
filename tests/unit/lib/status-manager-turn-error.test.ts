@@ -227,8 +227,6 @@ describe('API-error turn ends (story 26, ADR-0018 amendment)', () => {
   });
 
   it.each([
-    ['claude-authentication-failed.jsonl', 'claude-code'],
-    ['codex-other-401.jsonl', 'codex-cli'],
     ['claude-usage-warning-footer-negative.jsonl', 'claude-code'],
   ] as Array<[string, TPanelType]>)('keeps story 15 classification for %s: a ready stop with no end line (no immediate nudge, L49), no resume', async (fixture, panelType) => {
     const { manager, nudges, resumes } = await setup();
@@ -431,5 +429,340 @@ describe('API-error turn ends (story 26, ADR-0018 amendment)', () => {
     }
     expect(paste).not.toHaveBeenCalled();
     expect(keeper.orchKeeper.get('ws-1')?.beats ?? 0).toBe(0);
+  });
+});
+
+// PMUX-REMOTE-RESILIENCE fixes 1 and 2.
+describe('auth failures, rate limits and fleet outage mode', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockHome.value = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-turn-error-sm-'));
+    const ws = { id: 'ws-1', name: 'ws', directories: [mockHome.value], orchestration: { enabled: true, orchestratorTabId: 'tab-o' } };
+    workspaceStore.getWorkspaceByIdCached.mockResolvedValue(ws);
+    workspaceStore.getWorkspacesCached.mockResolvedValue({ workspaces: [ws] });
+    liveness.statusForTab.mockResolvedValue({ probes: [], backgroundJobs: [] });
+  });
+  afterEach(async () => {
+    await fs.rm(mockHome.value, { recursive: true, force: true });
+  });
+
+  const failedTurn = (code: string, text: string, uuid: string) => [
+    { type: 'user', timestamp: '2026-11-13T00:00:00.000Z', message: { content: 'go' } },
+    { type: 'assistant', isApiErrorMessage: true, error: code, uuid, timestamp: '2026-11-13T00:00:01.000Z', message: { model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text }] } },
+    { type: 'system', subtype: 'stop_hook_summary', timestamp: '2026-11-13T00:00:02.000Z' },
+  ];
+  const cleanTurn = (uuid: string) => [
+    { type: 'user', timestamp: '2026-11-13T00:01:00.000Z', message: { content: 'go' } },
+    { type: 'assistant', timestamp: '2026-11-13T00:01:30.000Z', uuid, message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Work done, nothing to report.' }] } },
+  ];
+  const workerTab = async (manager: { registerTab: (id: string, e: ITabStatusEntry) => void }, id: string, lines: unknown[], over: Partial<ITabStatusEntry> = {}) => {
+    const entry: ITabStatusEntry = { ...worker('claude-code', await transcript('claude-usage-warning-footer-negative.jsonl', lines)), tmuxSession: `tmux-${id}`, tabName: id, ...over };
+    manager.registerTab(id, entry);
+    return entry;
+  };
+  const stop = (manager: { updateTabFromHook: (s: string, e: string) => void }, id: string) => {
+    manager.updateTabFromHook(`tmux-${id}`, 'prompt-submit');
+    manager.updateTabFromHook(`tmux-${id}`, 'stop');
+  };
+  const forTab = async (resumes: () => Promise<Array<{ targetTabId: string; state: string; droppedReason?: string | null }>>, id: string) =>
+    (await resumes()).filter((r) => r.targetTabId === id);
+
+  it('escalates an auth failure AT ONCE as a provider/account auth failure, types no resume, and resumes once after recovery', async () => {
+    const { manager, nudges, resumes, clearDebounce } = await setup();
+    const w = await workerTab(manager, 'tab-w', failedTurn('authentication_failed', 'Failed to authenticate. API Error: 401 · Please run /login', 'auth-1'));
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(nudges()).toHaveLength(1));
+    expect(nudges()[0]).toContain('AUTH FAILURE (provider/account auth failure): Failed to authenticate. API Error: 401 · Please run /login');
+    expect(nudges()[0]).toContain('do NOT re-prompt it');
+    await settle();
+    expect(await resumes()).toEqual([]);
+    expect(w.turnError).toMatchObject({ class: 'auth-failure', escalated: true, waitingFor: 'auth-failure|claude|local' });
+
+    // Another tab on the same host gets a clean answer from the provider: the account works again.
+    await workerTab(manager, 'tab-x', cleanTurn('ok-1'));
+    stop(manager, 'tab-x');
+    await waitFor(async () => expect(await forTab(resumes, 'tab-w')).toHaveLength(1));
+    expect(w.turnError).toMatchObject({ recoveryResumed: true, waitingFor: null });
+    // A second clean turn elsewhere owes nothing more: one resume per recovery.
+    stop(manager, 'tab-x');
+    await settle();
+    expect(await forTab(resumes, 'tab-w')).toHaveLength(1);
+    expect(nudges()).toHaveLength(1);
+
+    // The resumed turn is refused again: said once more, then never again, and no further resume.
+    w.jsonlPath = await transcript('claude-usage-warning-footer-negative.jsonl', failedTurn('authentication_failed', 'Please run /login', 'auth-1b'));
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(nudges()).toHaveLength(2));
+    expect(nudges()[1]).toContain('(again, after the resume that followed its provider\'s recovery)');
+    clearDebounce();
+    w.jsonlPath = await transcript('claude-usage-warning-footer-negative.jsonl', failedTurn('authentication_failed', 'Please run /login', 'auth-1c'));
+    stop(manager, 'tab-w');
+    stop(manager, 'tab-x');
+    await settle();
+    expect(nudges()).toHaveLength(2);
+    expect(await forTab(resumes, 'tab-w')).toHaveLength(1);
+  });
+
+  it('never takes a clean turn on ANOTHER host as an auth recovery: credentials are per host', async () => {
+    const { manager, resumes } = await setup();
+    const w = await workerTab(manager, 'tab-w', failedTurn('authentication_failed', 'OAuth token revoked · Please run /login', 'auth-2'), { host: 'remote-a' });
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(w.turnError).toMatchObject({ class: 'auth-failure', waitingFor: 'auth-failure|claude|remote-a' }));
+    await workerTab(manager, 'tab-x', cleanTurn('ok-2'));
+    stop(manager, 'tab-x');
+    await settle();
+    await settle();
+    expect(await forTab(resumes, 'tab-w')).toEqual([]);
+  });
+
+  it('resumes a rate-limited tab with backoff, at most RATE_LIMIT_MAX_RESUMES times, then nudges RATE LIMITED once', async () => {
+    const { manager, nudges, resumes, clearDebounce } = await setup();
+    const { RATE_LIMIT_MAX_RESUMES, rateLimitBackoffMs } = await import('@/lib/status-manager');
+    expect([0, 1, 2, 5].map(rateLimitBackoffMs)).toEqual([60_000, 120_000, 240_000, 900_000]);
+    const delays: number[] = [];
+    (manager as unknown as { rateLimitBackoff: (n: number) => number }).rateLimitBackoff = (n) => {
+      delays.push(n);
+      return 10;
+    };
+    const lines = (n: number) => failedTurn('rate_limit', 'API Error: Request rejected (429) · rate limit', `rl-${n}`);
+    const w = await workerTab(manager, 'tab-w', lines(0));
+    stop(manager, 'tab-w');
+    for (let n = 1; n <= RATE_LIMIT_MAX_RESUMES; n += 1) {
+      await waitFor(async () => expect(await forTab(resumes, 'tab-w')).toHaveLength(n));
+      w.jsonlPath = await transcript('claude-usage-warning-footer-negative.jsonl', lines(n));
+      clearDebounce();
+      stop(manager, 'tab-w');
+    }
+    await waitFor(() => expect(nudges()).toHaveLength(1));
+    expect(nudges()[0]).toContain(`RATE LIMITED after its backoff resumes: API Error: Request rejected (429) · rate limit (after ${RATE_LIMIT_MAX_RESUMES} backoff resume(s))`);
+    expect(delays).toEqual([0, 1, 2]);
+    await settle();
+    expect(await forTab(resumes, 'tab-w')).toHaveLength(RATE_LIMIT_MAX_RESUMES);
+  });
+
+  it('holds re-prompts fleet-wide and raises ONE alert when 3 tabs fail with one code; a clean turn resumes each held tab once', async () => {
+    const { manager, nudges, resumes } = await setup();
+    const ids = ['tab-a', 'tab-b', 'tab-c', 'tab-d'];
+    const tabs: Record<string, ITabStatusEntry> = {};
+    for (const id of ids) tabs[id] = await workerTab(manager, id, failedTurn('server_error', 'API Error: Server error mid-response', `se-${id}`));
+    stop(manager, 'tab-a');
+    await waitFor(async () => expect(await forTab(resumes, 'tab-a')).toHaveLength(1));
+    stop(manager, 'tab-b');
+    await waitFor(async () => expect(await forTab(resumes, 'tab-b')).toHaveLength(1));
+    stop(manager, 'tab-c');
+    await waitFor(() => expect(alerts.dispatch).toHaveBeenCalledTimes(1));
+    const [draft] = alerts.dispatch.mock.calls[0] as unknown as [{ kind: string; body: string }];
+    expect(draft.kind).toBe('flag');
+    expect(draft.body).toContain('provider outage: 3 tabs failed with claude api-error "server_error"');
+    // The resumes queued before the threshold are withdrawn; the tab that crossed it gets none.
+    await waitFor(async () => expect((await resumes()).map((r) => [r.targetTabId, r.state, r.droppedReason])).toEqual([
+      ['tab-a', 'dropped', 'provider-outage'], ['tab-b', 'dropped', 'provider-outage'],
+    ]));
+    // A fourth failure inside the outage: held too, still one alert, no nudge.
+    stop(manager, 'tab-d');
+    await waitFor(() => expect(tabs['tab-d'].turnError?.heldBy).toBe('api-error|claude|server_error'));
+    await settle();
+    expect(alerts.dispatch).toHaveBeenCalledTimes(1);
+    expect(nudges()).toEqual([]);
+
+    await workerTab(manager, 'tab-x', cleanTurn('ok-3'));
+    stop(manager, 'tab-x');
+    await waitFor(async () => expect((await resumes()).filter((r) => r.state === 'queued').map((r) => r.targetTabId).sort()).toEqual(ids));
+    for (const id of ids) expect(tabs[id].turnError).toMatchObject({ heldBy: null, recoveryResumed: true });
+  });
+
+  it('lets one canary resume through an outage once it has been quiet, and none while another is out', async () => {
+    const { manager, resumes } = await setup();
+    const { ProviderOutageTracker } = await import('@/lib/provider-outage');
+    (manager as unknown as { outages: unknown }).outages = new ProviderOutageTracker({ threshold: 2, windowMs: 600_000, quietMs: 0, maxQuietMs: 0, now: () => Date.now() });
+    const b = await workerTab(manager, 'tab-a', failedTurn('server_error', 'API Error: Server error', 'se-a'))
+      && await workerTab(manager, 'tab-b', failedTurn('server_error', 'API Error: Server error', 'se-b'));
+    stop(manager, 'tab-a');
+    await waitFor(async () => expect(await forTab(resumes, 'tab-a')).toHaveLength(1));
+    stop(manager, 'tab-b');
+    await waitFor(() => expect(b.turnError?.heldBy).toBeTruthy());
+    await waitFor(async () => expect((await forTab(resumes, 'tab-a'))[0].state).toBe('dropped'));
+
+    const tick = () => (manager as unknown as { tickOutages: () => void }).tickOutages();
+    tick();
+    tick();
+    await waitFor(async () => expect((await resumes()).filter((r) => r.state === 'queued').map((r) => r.targetTabId)).toEqual(['tab-a']));
+    await settle();
+    expect((await resumes()).filter((r) => r.state === 'queued')).toHaveLength(1);
+  });
+
+  it('withdraws a queued resume when the agent exits: it would be typed into a shell', async () => {
+    const { manager, resumes } = await setup();
+    const entry = worker('claude-code', await transcript('claude-server-error-2.1.283.jsonl'));
+    manager.registerTab('tab-w', entry);
+    manager.updateTabFromHook('tmux-tab-w', 'stop');
+    await waitFor(() => expect(entry.turnError?.resumeItemId).toBeTruthy());
+    (manager as unknown as { applyCliState: (id: string, e: unknown, s: string, o: unknown) => void }).applyCliState('tab-w', entry, 'inactive', { silent: true });
+    expect(entry.turnError).toBeNull();
+    await waitFor(async () => expect((await resumes())[0]).toMatchObject({ state: 'dropped', droppedReason: 'agent-exited' }));
+  });
+
+  // Review r1 (both reviewers): a tab held again after its one recovery resume, and holds across a restart.
+  const smallOutages = async (manager: unknown, threshold = 2) => {
+    const { ProviderOutageTracker } = await import('@/lib/provider-outage');
+    (manager as { outages: unknown }).outages = new ProviderOutageTracker({ threshold, windowMs: 600_000, quietMs: 0, maxQuietMs: 0, now: () => Date.now() });
+  };
+  const failAgain = async (entry: ITabStatusEntry, id: string, uuid: string, code = 'server_error', text = 'API Error: Server error') => {
+    entry.jsonlPath = await transcript('claude-usage-warning-footer-negative.jsonl', failedTurn(code, text, uuid));
+  };
+
+  it('a tab held by a SECOND outage in the same episode is released and escalated once, never stranded (review r1)', async () => {
+    const { manager, nudges, resumes, clearDebounce } = await setup();
+    await smallOutages(manager);
+    const a = await workerTab(manager, 'tab-a', failedTurn('server_error', 'API Error: Server error', 'a-1'));
+    const b = await workerTab(manager, 'tab-b', failedTurn('server_error', 'API Error: Server error', 'b-1'));
+    stop(manager, 'tab-a');
+    await waitFor(async () => expect(await forTab(resumes, 'tab-a')).toHaveLength(1));
+    stop(manager, 'tab-b');
+    await waitFor(() => expect(b.turnError?.heldBy).toBeTruthy());
+    await waitFor(() => expect(alerts.dispatch).toHaveBeenCalledTimes(1));
+    // Outage 1 ends: both resumed once.
+    await workerTab(manager, 'tab-x', cleanTurn('ok-r1'));
+    stop(manager, 'tab-x');
+    await waitFor(() => expect([a.turnError?.recoveryResumed, b.turnError?.recoveryResumed]).toEqual([true, true]));
+    // Both fail again: a escalates on its own (its second failure); b crosses the threshold and is held by outage 2.
+    await failAgain(a, 'tab-a', 'a-2');
+    stop(manager, 'tab-a');
+    await waitFor(() => expect(nudges()).toHaveLength(1));
+    expect(nudges()[0]).toContain('worker tab-a (tab-a) API ERROR after its one automatic resume');
+    clearDebounce();
+    await failAgain(b, 'tab-b', 'b-2');
+    stop(manager, 'tab-b');
+    await waitFor(() => expect(b.turnError?.heldBy).toBe('api-error|claude|server_error'));
+    await settle();
+    expect(nudges()).toHaveLength(1);
+    // The same incident within 30 min: no second alert.
+    expect(alerts.dispatch).toHaveBeenCalledTimes(1);
+    // Outage 2 ends: b already had its recovery resume, so it is released and told once; a stays quiet.
+    stop(manager, 'tab-x');
+    await waitFor(() => expect(nudges()).toHaveLength(2));
+    expect(nudges()[1]).toContain('worker tab-b (tab-b) API ERROR after its one automatic resume');
+    expect(nudges()[1]).toContain('held it again; no further automatic resume');
+    expect(b.turnError).toMatchObject({ heldBy: null, escalated: true });
+    expect(a.turnError?.heldBy ?? null).toBeNull();
+    expect(await forTab(resumes, 'tab-b')).toHaveLength(1);
+  });
+
+  it('a hold that survives a server restart is escalated once by the next server, never left waiting (review r1)', async () => {
+    const first = await setup();
+    await smallOutages(first.manager);
+    (first.manager as unknown as { rateLimitBackoff: (n: number) => number }).rateLimitBackoff = () => 3_600_000;
+    const a = await workerTab(first.manager, 'tab-a', failedTurn('server_error', 'API Error: Server error', 'a-1'));
+    await workerTab(first.manager, 'tab-b', failedTurn('server_error', 'API Error: Server error', 'b-1'));
+    const r = await workerTab(first.manager, 'tab-r', failedTurn('rate_limit', 'API Error: rate limit', 'r-1'));
+    stop(first.manager, 'tab-a');
+    stop(first.manager, 'tab-b');
+    stop(first.manager, 'tab-r');
+    await waitFor(() => expect([a.turnError?.heldBy, r.turnError?.attempts]).toEqual(['api-error|claude|server_error', 1]));
+    const { turnErrorHoldsFile } = await import('@/lib/turn-error-holds');
+    await waitFor(async () => expect(Object.keys(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))).sort()).toEqual(['tab-a', 'tab-b', 'tab-r']));
+
+    // The next server: the same tabs, nothing in memory.
+    const next = await setup();
+    for (const id of ['tab-a', 'tab-b', 'tab-r']) await workerTab(next.manager, id, cleanTurn(`n-${id}`));
+    await (next.manager as unknown as { escalateRestoredHolds: () => Promise<void> }).escalateRestoredHolds();
+    await waitFor(() => expect(next.nudges()).toHaveLength(3));
+    const byTab = (id: string) => next.nudges().find((n) => n.includes(`worker ${id} (${id})`)) ?? '';
+    expect(byTab('tab-a')).toContain('it was held by a provider outage when the server restarted; no automatic resume will follow');
+    expect(byTab('tab-r')).toContain('RATE LIMITED');
+    expect(byTab('tab-r')).toContain('it waited out a rate-limit backoff when the server restarted');
+    await waitFor(async () => expect(JSON.parse(await fs.readFile(turnErrorHoldsFile(), 'utf-8'))).toEqual({}));
+  });
+
+  it('init escalates the restored holds once its scan built the tabs', async () => {
+    const source = await fs.readFile(path.join(__dirname, '../../../src/lib/status-manager.ts'), 'utf-8');
+    const scan = source.indexOf('    await this.scanAll();\n    // Floors of tabs closed');
+    expect(scan).toBeGreaterThan(0);
+    expect(source.indexOf('await this.escalateRestoredHolds();', scan)).toBeGreaterThan(scan);
+  });
+
+  it('a held canary resume frees the slot with no per-tab escalation; the next canary goes to another tab', async () => {
+    const { manager, nudges, resumes, store } = await setup();
+    await smallOutages(manager);
+    await workerTab(manager, 'tab-a', failedTurn('server_error', 'API Error: Server error', 'a-1'));
+    const b = await workerTab(manager, 'tab-b', failedTurn('server_error', 'API Error: Server error', 'b-1'));
+    stop(manager, 'tab-a');
+    await waitFor(async () => expect(await forTab(resumes, 'tab-a')).toHaveLength(1));
+    stop(manager, 'tab-b');
+    await waitFor(() => expect(b.turnError?.heldBy).toBeTruthy());
+    const tick = () => (manager as unknown as { tickOutages: () => void }).tickOutages();
+    tick();
+    await waitFor(async () => expect((await resumes()).filter((x) => x.state === 'queued').map((x) => x.targetTabId)).toEqual(['tab-a']));
+    const canary = (await resumes()).find((x) => x.state === 'queued')!;
+    manager.handleHeldResume({ ...canary, state: 'held', heldReason: 'composer-not-empty (30 refusals)' });
+    await settle();
+    expect(nudges()).toEqual([]);
+    await store.mutateInbox((st) => ({ state: store.holdInState(st, canary.id, 'x', Date.now()), value: null }));
+    tick();
+    await waitFor(async () => expect((await resumes()).filter((x) => x.state === 'queued').map((x) => x.targetTabId)).toEqual(['tab-b']));
+  });
+
+  it('an agent exit and a new session close an auth or rate-limit episode, and cancel a pending backoff', async () => {
+    const { manager, resumes } = await setup();
+    (manager as unknown as { rateLimitBackoff: (n: number) => number }).rateLimitBackoff = () => 50;
+    const r = await workerTab(manager, 'tab-r', failedTurn('rate_limit', 'API Error: rate limit', 'r-1'));
+    stop(manager, 'tab-r');
+    await waitFor(() => expect(r.turnError?.attempts).toBe(1));
+    (manager as unknown as { applyCliState: (id: string, e: unknown, s: string, o: unknown) => void }).applyCliState('tab-r', r, 'inactive', { silent: true });
+    expect(r.turnError).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await forTab(resumes, 'tab-r')).toEqual([]);
+
+    const w = await workerTab(manager, 'tab-w', failedTurn('authentication_failed', 'Please run /login', 'w-1'));
+    stop(manager, 'tab-w');
+    await waitFor(() => expect(w.turnError?.class).toBe('auth-failure'));
+    manager.updateTabFromHook('tmux-tab-w', 'session-start');
+    expect(w.turnError).toBeNull();
+  });
+
+  it('a Codex 401 ("other" code) through the manager escalates at once as an auth failure', async () => {
+    const { manager, nudges, resumes } = await setup();
+    const entry = worker('codex-cli', await transcript('codex-other-401.jsonl'));
+    manager.registerTab('tab-w', entry);
+    manager.updateTabFromHook('tmux-tab-w', 'stop');
+    await waitFor(() => expect(nudges()).toHaveLength(1));
+    expect(nudges()[0]).toContain('AUTH FAILURE (provider/account auth failure): unexpected status 401 Unauthorized');
+    await settle();
+    expect(await resumes()).toEqual([]);
+  });
+
+  it('an outage alert that cannot be dispatched still holds every tab, and throws nothing', async () => {
+    const { manager, nudges } = await setup();
+    await smallOutages(manager);
+    alerts.dispatch.mockRejectedValueOnce(new Error('push down'));
+    const a = await workerTab(manager, 'tab-a', failedTurn('server_error', 'API Error', 'a-1'));
+    const b = await workerTab(manager, 'tab-b', failedTurn('server_error', 'API Error', 'b-1'));
+    stop(manager, 'tab-a');
+    stop(manager, 'tab-b');
+    await waitFor(() => expect(alerts.dispatch).toHaveBeenCalledTimes(1));
+    await settle();
+    expect([a.turnError?.heldBy, b.turnError?.heldBy]).toEqual(['api-error|claude|server_error', 'api-error|claude|server_error']);
+    expect(nudges()).toEqual([]);
+  });
+
+  it('an auth outage is keyed by host: only a clean turn on that host ends it, and it offers no canary', async () => {
+    const { manager, resumes } = await setup();
+    const remote = { host: 'remote-a' };
+    const ids = ['tab-a', 'tab-b', 'tab-c'];
+    const tabs: ITabStatusEntry[] = [];
+    for (const id of ids) tabs.push(await workerTab(manager, id, failedTurn('authentication_failed', 'Please run /login', `${id}-1`), remote));
+    for (const id of ids) stop(manager, id);
+    await waitFor(() => expect(alerts.dispatch).toHaveBeenCalledTimes(1));
+    const [draft] = alerts.dispatch.mock.calls[0] as unknown as [{ body: string }];
+    expect(draft.body).toContain('auth-failure "authentication_failed" on remote-a');
+    (manager as unknown as { tickOutages: () => void }).tickOutages();
+    await workerTab(manager, 'tab-local', cleanTurn('ok-l'));
+    stop(manager, 'tab-local');
+    await settle();
+    expect(await resumes()).toEqual([]);
+    await workerTab(manager, 'tab-x', cleanTurn('ok-x'), remote);
+    stop(manager, 'tab-x');
+    await waitFor(async () => expect((await resumes()).map((x) => x.targetTabId).sort()).toEqual(ids));
   });
 });

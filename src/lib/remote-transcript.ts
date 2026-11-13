@@ -51,12 +51,16 @@ interface IMirror {
 const g = globalThis as unknown as {
   __ptRemoteMirrors?: Map<string, IMirror>;
   __ptRemoteMirrorLocks?: Map<string, Promise<unknown>>;
+  __ptRemoteMirrorQueued?: Map<string, Promise<boolean>>;
   __ptRemoteMirrorCleanup?: boolean;
 };
 if (!g.__ptRemoteMirrors) g.__ptRemoteMirrors = new Map();
 if (!g.__ptRemoteMirrorLocks) g.__ptRemoteMirrorLocks = new Map();
+if (!g.__ptRemoteMirrorQueued) g.__ptRemoteMirrorQueued = new Map();
 const mirrors = g.__ptRemoteMirrors;
 const locks = g.__ptRemoteMirrorLocks;
+/** Session → the sync queued behind the running one and not yet started: a later caller joins it. */
+const queuedSyncs = g.__ptRemoteMirrorQueued;
 
 const tabIdOf = (session: string): string | null => session.match(WORKSPACE_SESSION)?.[3] ?? null;
 
@@ -93,8 +97,10 @@ const loadSidecar = async (session: string): Promise<IMirror | null> => {
  * Bind a remote tab's session to the transcript its hook named, and return the
  * local copy's path. A new session id or remote path starts a new copy.
  */
-export const bindRemoteTranscript = (input: { session: string; host: string; sessionId: string; remotePath: string }): Promise<string> =>
-  serialize(input.session, async () => {
+export const bindRemoteTranscript = (input: { session: string; host: string; sessionId: string; remotePath: string }): Promise<string> => {
+  // A sync queued before this bind runs before it: a caller after the bind must not join that one.
+  queuedSyncs.delete(input.session);
+  return serialize(input.session, async () => {
     const tabId = tabIdOf(input.session);
     if (!tabId) throw new Error(`not a workspace session: ${input.session}`);
     if (!isValidRemoteTranscriptPath(input.remotePath, input.sessionId)) throw new Error('not a Claude transcript path');
@@ -107,6 +113,7 @@ export const bindRemoteTranscript = (input: { session: string; host: string; ses
     mirrors.set(input.session, mirror);
     return localPath;
   });
+};
 
 const localSize = async (file: string): Promise<number> => {
   try {
@@ -120,46 +127,63 @@ const localSize = async (file: string): Promise<number> => {
  * Copy the remote bytes past the local copy's length. A remote file shorter
  * than the copy (rewritten) restarts the copy. Answers whether a copy exists;
  * a local tab, or a remote one no hook has bound, answers false at once.
+ *
+ * A caller that finds a sync queued and not yet started joins it
+ * (PMUX-REMOTE-RESILIENCE fix 5): that sync starts after the call, so it copies
+ * every byte written before the call. A burst of N stops costs at most two ssh
+ * reads, not N.
  */
 export const syncRemoteTranscript = async (session: string): Promise<boolean> => {
   const host = await sessionHostOf(session);
   if (!host) return false;
-  return serialize(session, async () => {
-    const mirror = mirrors.get(session) ?? (await loadSidecar(session));
-    if (!mirror || mirror.host !== host) return false;
-    const localPath = mirrorPathFor(mirror.tabId, mirror.sessionId);
-    await fs.mkdir(path.dirname(localPath), { recursive: true, mode: 0o700 });
-    let offset = await localSize(localPath);
-    for (let read = 0; read < MIRROR_MAX_READS; read += 1) {
-      const command = `p=${shQuote(mirror.remotePath)}; s=$(stat -c %s "$p" 2>/dev/null) || exit 3; echo "$s"; tail -c +${offset + 1} "$p" | head -c ${MIRROR_CHUNK_BYTES}`;
-      let out: Buffer;
-      try {
-        out = await runSshBuffer(mirror.host, command, { timeoutMs: MIRROR_READ_TIMEOUT_MS, maxBytes: MIRROR_CHUNK_BYTES });
-      } catch (err) {
-        // Exit 3: Claude has not written the file yet (a session start before the first prompt).
-        if ((err as { code?: unknown }).code !== 3) log.warn({ session, host: mirror.host, failure: describeRemoteFailure(err) }, 'remote transcript read failed');
-        return offset > 0;
-      }
-      const newline = out.indexOf(0x0a);
-      const remoteSize = Number(out.subarray(0, newline).toString('utf-8'));
-      if (newline < 0 || !Number.isSafeInteger(remoteSize)) return offset > 0;
-      if (remoteSize < offset) {
-        log.info({ session, remoteSize, offset }, 'remote transcript is shorter than its copy; copying it again');
-        await fs.writeFile(localPath, '', { mode: 0o600 });
-        offset = 0;
-        continue;
-      }
-      const chunk = out.subarray(newline + 1);
-      if (chunk.length > 0) {
-        await fs.appendFile(localPath, chunk, { mode: 0o600 });
-        offset += chunk.length;
-      } else if (offset === 0) {
-        await fs.appendFile(localPath, '', { mode: 0o600 });
-      }
-      if (chunk.length < MIRROR_CHUNK_BYTES || offset >= remoteSize) return true;
-    }
-    return true;
+  const waiting = queuedSyncs.get(session);
+  if (waiting) return waiting;
+  const sync: Promise<boolean> = serialize(session, async () => {
+    if (queuedSyncs.get(session) === sync) queuedSyncs.delete(session);
+    return copyRemoteBytes(session, host);
   });
+  queuedSyncs.set(session, sync);
+  void sync.finally(() => {
+    if (queuedSyncs.get(session) === sync) queuedSyncs.delete(session);
+  }).catch(() => {});
+  return sync;
+};
+
+const copyRemoteBytes = async (session: string, host: string): Promise<boolean> => {
+  const mirror = mirrors.get(session) ?? (await loadSidecar(session));
+  if (!mirror || mirror.host !== host) return false;
+  const localPath = mirrorPathFor(mirror.tabId, mirror.sessionId);
+  await fs.mkdir(path.dirname(localPath), { recursive: true, mode: 0o700 });
+  let offset = await localSize(localPath);
+  for (let read = 0; read < MIRROR_MAX_READS; read += 1) {
+    const command = `p=${shQuote(mirror.remotePath)}; s=$(stat -c %s "$p" 2>/dev/null) || exit 3; echo "$s"; tail -c +${offset + 1} "$p" | head -c ${MIRROR_CHUNK_BYTES}`;
+    let out: Buffer;
+    try {
+      out = await runSshBuffer(mirror.host, command, { timeoutMs: MIRROR_READ_TIMEOUT_MS, maxBytes: MIRROR_CHUNK_BYTES });
+    } catch (err) {
+      // Exit 3: Claude has not written the file yet (a session start before the first prompt).
+      if ((err as { code?: unknown }).code !== 3) log.warn({ session, host: mirror.host, failure: describeRemoteFailure(err) }, 'remote transcript read failed');
+      return offset > 0;
+    }
+    const newline = out.indexOf(0x0a);
+    const remoteSize = Number(out.subarray(0, newline).toString('utf-8'));
+    if (newline < 0 || !Number.isSafeInteger(remoteSize)) return offset > 0;
+    if (remoteSize < offset) {
+      log.info({ session, remoteSize, offset }, 'remote transcript is shorter than its copy; copying it again');
+      await fs.writeFile(localPath, '', { mode: 0o600 });
+      offset = 0;
+      continue;
+    }
+    const chunk = out.subarray(newline + 1);
+    if (chunk.length > 0) {
+      await fs.appendFile(localPath, chunk, { mode: 0o600 });
+      offset += chunk.length;
+    } else if (offset === 0) {
+      await fs.appendFile(localPath, '', { mode: 0o600 });
+    }
+    if (chunk.length < MIRROR_CHUNK_BYTES || offset >= remoteSize) return true;
+  }
+  return true;
 };
 
 /** Drop a closed tab's copies. */
