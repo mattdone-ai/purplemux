@@ -101,6 +101,9 @@ import type { IOrchestratorPresenceFacts } from '@/types/coordination';
 import fs from 'fs/promises';
 import { watch, type FSWatcher } from 'fs';
 import { syncRemoteTranscript } from '@/lib/remote-transcript';
+import { appendCoordinationAudit } from '@/lib/coordination-audit';
+import { OUTAGE_WINDOW_MS, ProviderOutageTracker, failureKeyId, type IFailureKey } from '@/lib/provider-outage';
+import { TurnErrorHoldStore, type ITurnErrorHold } from '@/lib/turn-error-holds';
 import { needsDecisionPushDetail } from '@/lib/needs-decision';
 import {
   needsDecisionDeps,
@@ -217,6 +220,27 @@ const TAB_COUNT_MEDIUM = 11;
 const TAB_COUNT_LARGE = 21;
 const BUSY_STUCK_MS = 10 * 60 * 1000;
 const STOP_SETTLE_MS = 500;
+/** Backoff resumes a rate-limited episode gets before its target is nudged (PMUX-REMOTE-RESILIENCE fix 1). */
+export const RATE_LIMIT_MAX_RESUMES = 3;
+/** 1, 2, then 4 minutes; never more than 15. */
+export const rateLimitBackoffMs = (attempts: number): number => Math.min(60_000 * 2 ** attempts, 15 * 60_000);
+/** What a restored hold tells the target: the resume or notice it was owed is gone with the previous server. */
+const restoredHoldDetail = (hold: ITurnErrorHold): string => {
+  if (hold.owed === 'notice') {
+    return 'it failed again after the resume its provider\'s recovery owed it, and a provider outage held it when the server restarted; no further automatic resume';
+  }
+  if (hold.reason === 'auth-wait') {
+    return 'it waited for its provider to answer on its host again when the server restarted: the resume purplemux promised will not come; re-prompt it once its account is signed in again';
+  }
+  if (hold.reason === 'backoff') return 'it waited out a rate-limit backoff when the server restarted: no automatic resume will follow; re-prompt it once the limit clears';
+  return 'it was held by a provider outage when the server restarted: the resume the outage alert promised will not come; re-prompt it when the provider answers';
+};
+const TURN_ERROR_ALERT_LEAD: Readonly<Record<'api-error' | 'usage-limit' | 'auth-failure' | 'rate-limit', string>> = {
+  'api-error': 'API error after its one automatic resume',
+  'usage-limit': 'halted by a usage limit',
+  'auth-failure': 'provider/account auth failure',
+  'rate-limit': 'rate limited after its backoff resumes',
+};
 const PROCESS_START_CACHE_MS = 60_000;
 const AGENT_LAUNCH_GRACE_MS = 5_000;
 // A Claude or Grok tab whose SessionStart hook never fired stays `inactive` with
@@ -409,6 +433,17 @@ export class StatusManager {
   /** Bumped by every hook or launch binding: a poll write that lands after one never claims ownership. */
   private sessionBindingEpoch = new Map<string, number>();
   private orphanResumesEscalated = new Set<string>();
+  /** Remote tabs moved from inactive to unknown because their host did not answer (fix 3), with when they went inactive. */
+  private readonly unreadInactive = new Map<string, number | null>();
+  /** Fleet outage mode (PMUX-REMOTE-RESILIENCE fix 2): N tabs failing with one key hold every such tab. */
+  private readonly outages = new ProviderOutageTracker();
+  /** A rate-limited tab's pending backoff resume. */
+  private readonly backoffResumes = new Map<string, ReturnType<typeof setTimeout>>();
+  private rateLimitBackoff: (attempts: number) => number = rateLimitBackoffMs;
+  /** The resumes owed only in memory, persisted so a restart escalates them (review r1). */
+  private readonly turnErrorHolds = new TurnErrorHoldStore();
+  private holdsSaveQueued = false;
+  private holdsSaved = '{}';
   private processStartCache = new Map<string, { startedAt: number | null; checkedAt: number; stamp: number | null }>();
   private pendingKickoffs = new Map<string, { prompt: string; timer: ReturnType<typeof setTimeout> }>();
   private codexLifecycleEpoch = new Map<string, { generation: string; phase: 'pending' | 'active'; epoch: number }>();
@@ -710,6 +745,7 @@ export class StatusManager {
     await this.scanAll();
     // Floors of tabs closed while no server ran go; a missing floor is only too low, never wrong.
     this.hookFloors.retain(new Set(this.tabs.keys()));
+    await this.escalateRestoredHolds();
     this.hookScanReady = true;
     this.startPolling();
     this.tabEvents.start();
@@ -829,9 +865,16 @@ export class StatusManager {
       : null);
     // A remote host not read: the tab stays unknown until a hook or a read pane says (review r3 B1).
     if (agentRunning === null) return;
+    // Inactive before its host stopped answering (fix 3): an agent still absent is that same exit, nudged once already.
+    const wasInactive = this.unreadInactive.has(tabId);
+    const inactiveSince = this.unreadInactive.get(tabId) ?? null;
+    this.unreadInactive.delete(tabId);
 
     if (!agentRunning) {
-      this.applyCliState(tabId, entry, 'idle', { silent: true });
+      if (this.tabs.get(tabId) !== entry || entry.cliState !== 'unknown') return;
+      this.applyCliState(tabId, entry, wasInactive ? 'inactive' : 'idle', wasInactive ? { silent: true, nudge: null } : { silent: true });
+      // The same exit: the fleet's clock keeps the time the agent was first seen gone.
+      if (wasInactive && inactiveSince !== null) this.inactiveSince.set(tabId, inactiveSince);
       this.persistToLayout(entry);
       this.broadcastUpdate(tabId, entry);
       return;
@@ -1020,9 +1063,10 @@ export class StatusManager {
 
   private logHookSpoolDrain(result: IHookSpoolDrainResult, stale: number, durationMs: number): void {
     const { applied, timedOut, bad, dropped, metadataOnly } = result;
-    if (applied + bad + dropped + metadataOnly === 0) return;
-    const fields = { applied, stale, timedOut, bad, dropped, metadataOnly, durationMs };
-    const line = `hook spool drain: ${applied} applied (${stale} stale), ${timedOut} timed out, ${bad} bad, in ${durationMs} ms`;
+    const deferred = result.deferred ?? 0;
+    if (applied + bad + dropped + metadataOnly + deferred === 0) return;
+    const fields = { applied, stale, timedOut, deferred, bad, dropped, metadataOnly, durationMs };
+    const line = `hook spool drain: ${applied} applied (${stale} stale), ${timedOut} timed out, ${deferred} deferred, ${bad} bad, in ${durationMs} ms`;
     if (timedOut > 0 || bad > 0) hookLog.warn(fields, line);
     else hookLog.info(fields, line);
   }
@@ -1052,7 +1096,9 @@ export class StatusManager {
 
   private isStaleReplay(tabId: string, replayedAt: number | undefined): boolean {
     if (replayedAt === undefined) return false;
-    if (Date.now() - replayedAt > HOOK_REPLAY_WINDOW_MS) return true;
+    // A remote tab's event arrives when a pull takes it, however late (PMUX-REMOTE-RESILIENCE fix 4): the
+    // drain judged its age from that pull. Only the floor orders it here.
+    if (!this.tabs.get(tabId)?.host && Date.now() - replayedAt > HOOK_REPLAY_WINDOW_MS) return true;
     const floor = this.hookFloors.get(tabId);
     return floor !== undefined && replayedAt < floor;
   }
@@ -1180,6 +1226,7 @@ export class StatusManager {
     // one shared promise, so a poll during a drain starts no second one. On
     // 28 Sep a drain of 11 files held every poll for 7 minutes.
     if (this.hookSpoolDrain) void this.drainHookSpool();
+    this.tickOutages();
     const { workspaces } = await getWorkspaces();
     const panesInfo = await getAllPanesInfo();
     current();
@@ -1394,6 +1441,18 @@ export class StatusManager {
         };
         const checkAgentRunning = async (): Promise<boolean> => (await agentRunningNow()) === true;
 
+        // PMUX-REMOTE-RESILIENCE fix 3: a host that did not answer (an ssh timeout) cannot show that an agent
+        // exited, so its inactive tab reads unknown, never inactive. Once the host answers, resolveUnknown
+        // decides; an agent still absent goes back to inactive with no second nudge.
+        if (existing.cliState === 'inactive' && tab.host && paneUnread && provider) {
+          log.info({ tabId: tab.id, host: tab.host }, 'remote host not read: an inactive tab reads unknown until it answers');
+          this.unreadInactive.set(tab.id, this.inactiveSince.get(tab.id) ?? null);
+          this.applyCliState(tab.id, existing, 'unknown', { silent: true, nudge: null });
+          this.persistToLayout(existing);
+          this.broadcastUpdate(tab.id, existing);
+          continue;
+        }
+
         // A remote tab left unknown while its host was not read is resolved once its pane reads again.
         if (existing.cliState === 'unknown' && tab.host && !paneUnread) {
           this.resolveUnknown(tab.id).catch((err) => log.warn('resolveUnknown failed: %s', err));
@@ -1463,6 +1522,19 @@ export class StatusManager {
             this.updateTabFromHook(existing.tmuxSession, 'session-start');
             continue;
           }
+          // PMUX-REMOTE-RESILIENCE fix 3: a remote tab that a hook bound to a session, inactive while
+          // its agent runs (the probe reads only with the agent proven) and showing neither a composer nor a dialog,
+          // is mid-turn. It is not inactive: unknown until its transcript or its next hook says what it is.
+          if (reading === 'other' && tab.host && probedState === 'inactive' && existing.agentSessionId
+              && this.stillAt(tab.id, existing, probedState, seq)) {
+            log.info({ tabId: tab.id, host: tab.host }, 'remote tab inactive while its agent runs: unknown until its transcript or a hook says');
+            this.inactiveSeenAt.delete(tab.id);
+            this.applyCliState(tab.id, existing, 'unknown', { silent: true, nudge: null });
+            this.persistToLayout(existing);
+            this.broadcastUpdate(tab.id, existing);
+            this.resolveUnknown(tab.id).catch((err) => log.warn('resolveUnknown failed: %s', err));
+            continue;
+          }
           if (reading !== 'ready' && reading !== 'unread' && this.stillAt(tab.id, existing, probedState, seq)
               && this.applyStartupPromptReading(tab.id, existing, reading, now)) {
             continue;
@@ -1491,9 +1563,12 @@ export class StatusManager {
         this.modelWatch.forget(tabId);
         this.codexLifecycleEpoch.delete(tabId);
         this.stuckNudgedTabs.delete(tabId);
+        this.clearBackoffResume(tabId);
+        this.outages.forget(tabId);
         this.transcriptFallbackLogged.delete(tabId);
         this.inactiveSeenAt.delete(tabId);
         this.inactiveSince.delete(tabId);
+        this.unreadInactive.delete(tabId);
         this.pollBoundSessions.delete(tabId);
         this.sessionBindingEpoch.delete(tabId);
         this.processStartCache.delete(tabId);
@@ -2033,10 +2108,12 @@ export class StatusManager {
       return;
     }
     const prevBusySince = entry.busySince;
+    // Out of unknown by any other path than its resolution (a hook, the mid-turn read): the inactive it stood for is gone.
+    if (prevState === 'unknown' && newState !== 'unknown') this.unreadInactive.delete(tabId);
     entry.cliState = newState;
     entry.startupPrompt = newState === 'startup-prompt' ? opts.startupPrompt ?? null : null;
-    // The agent process is gone: its halt went with it.
-    if (newState === 'inactive' && entry.turnError?.class === 'usage-limit') this.closeTurnErrorEpisode(entry, 'agent-exited');
+    // The agent process is gone: its halt went with it, and a resume would be typed into its shell.
+    if (newState === 'inactive' && entry.turnError) this.closeTurnErrorEpisode(tabId, entry, 'agent-exited');
     entry.readyForReviewAt = newState === 'ready-for-review' ? Date.now() : null;
     entry.busySince = newState === 'busy' ? Date.now() : null;
     if (newState === 'inactive') this.inactiveSince.set(tabId, Date.now());
@@ -2450,12 +2527,15 @@ export class StatusManager {
   }
 
   /**
-   * A turn that ended on a provider error (story 26, ADR-0018 amendment).
-   * `api-error`: the worker is resumed ONCE through the inbox (composer gate,
-   * bounded) and no one is nudged; a second failure in the same episode, or a
-   * resume notice the inbox holds, nudges the target once. `usage-limit`:
-   * nothing is ever typed (typing cancels the provider's auto-continue); the
-   * target is nudged once. A clean stop ends the episode.
+   * A turn that ended on a provider error (story 26, ADR-0018 amendment; PMUX-REMOTE-RESILIENCE fixes 1-2).
+   * `api-error`: the worker is resumed ONCE through the inbox (composer gate, bounded) and no one is nudged; a
+   * second failure in the same episode, or a resume notice the inbox holds, nudges the target once.
+   * `usage-limit`: nothing is ever typed (typing cancels the provider's auto-continue); the target is nudged once.
+   * `auth-failure`: a resume fails the same way, so the target is nudged AT ONCE and the tab waits for its
+   * provider to answer on its host again (a clean turn of another tab there), then is resumed once.
+   * `rate-limit`: resumed with backoff, at most RATE_LIMIT_MAX_RESUMES times, then the target is nudged once.
+   * Every resumable class also counts toward fleet outage mode: N tabs that fail with one key inside the window
+   * hold every such tab — no resume, no per-tab nudge — and raise ONE alert. A clean stop ends the episode.
    */
   private applyTurnError(tabId: string, entry: ITabStatusEntry, error: ITurnError, stopSeq: number | undefined): void {
     const at = Date.now();
@@ -2474,45 +2554,284 @@ export class StatusManager {
       return;
     }
     if (episode) episode.turnId = error.turnId || episode.turnId;
-    if (!episode) this.closeTurnErrorEpisode(entry, `episode-closed:${error.class}`);
+    if (!episode) this.closeTurnErrorEpisode(tabId, entry, `episode-closed:${error.class}`);
     if (error.class === 'usage-limit') {
       if (episode) return;
-      entry.turnError = { class: 'usage-limit', code: error.code, text: error.text, startedAt: at, resumeItemId: null, escalated: true, turnId: error.turnId };
-      this.escalateTurnError(tabId, entry, 'usage-limit', error.text || error.code);
+      // Only a provider that continues by itself after the reset is halted (review r2): typing would cancel that.
+      // Claude Code does not, so its tab stays open to a re-prompt after the reset.
+      const halts = (entry.agentProviderId ?? getProviderByPanelType(entry.panelType)?.id) === 'codex';
+      entry.turnError = { class: 'usage-limit', code: error.code, text: error.text, startedAt: at, resumeItemId: null, escalated: true, turnId: error.turnId, halts };
+      this.escalateTurnError(tabId, entry, 'usage-limit', `${error.text || error.code}${halts ? '' : ' (this provider does not continue by itself: re-prompt it after the reset)'}`);
+      return;
+    }
+    if (error.class !== 'api-error' && error.class !== 'auth-failure' && error.class !== 'rate-limit') return;
+    const cls = error.class;
+    const current: ITurnErrorEpisode = episode
+      ?? { class: cls, code: error.code, text: error.text, startedAt: at, resumeItemId: null, escalated: false, turnId: error.turnId };
+    entry.turnError = current;
+
+    const key: IFailureKey = { cls, provider: entry.agentProviderId ?? getProviderByPanelType(entry.panelType)?.id ?? 'unknown', host: entry.host ?? null, code: error.code };
+    const verdict = this.outages.record(key, tabId);
+    if (verdict.started) this.startOutage(key, verdict.held, error, verdict.alert);
+    if (verdict.active) {
+      this.holdForOutage(tabId, entry, failureKeyId(key));
+      return;
+    }
+
+    if (cls === 'auth-failure') {
+      if (!current.escalated) {
+        current.escalated = true;
+        current.waitingFor = failureKeyId(key);
+        this.saveHolds();
+        this.escalateTurnError(tabId, entry, 'auth-failure', error.text || error.code);
+      } else if (current.recoveryResumed) {
+        // The one resume after the recovery failed too: the account is still refused, said once more.
+        this.reportAfterRecovery(tabId, entry, current, `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
+      }
+      return;
+    }
+    if (cls === 'rate-limit') {
+      const attempts = current.attempts ?? 0;
+      if (attempts >= RATE_LIMIT_MAX_RESUMES) {
+        if (current.recoveryResumed) {
+          this.reportAfterRecovery(tabId, entry, current, `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
+        } else if (!current.escalated) {
+          current.escalated = true;
+          this.escalateTurnError(tabId, entry, 'rate-limit', `${error.text || error.code} (after ${attempts} backoff resume(s))`);
+        }
+        return;
+      }
+      current.attempts = attempts + 1;
+      this.scheduleBackoffResume(tabId, entry, current, this.rateLimitBackoff(attempts));
       return;
     }
     if (episode) {
-      if (!episode.escalated) {
+      if (episode.recoveryResumed) {
+        this.reportAfterRecovery(tabId, entry, episode, `${error.text || error.code} (again, after the resume that followed its provider's recovery)`);
+      } else if (!episode.escalated) {
         episode.escalated = true;
         this.withdrawResume(episode, 'episode-escalated');
         this.escalateTurnError(tabId, entry, 'api-error', error.text || error.code);
       }
       return;
     }
-    const next: ITurnErrorEpisode = { class: 'api-error', code: error.code, text: error.text, startedAt: at, resumeItemId: null, escalated: false, turnId: error.turnId };
-    entry.turnError = next;
+    this.queueResume(tabId, entry, current, error.turnId || String(at), 'api-error stop: one resume queued');
+  }
+
+  /**
+   * Queue the episode's resume notice. When it cannot be queued, the episode escalates at once: no resume can go
+   * out. An episode closed or escalated while the notice was queued has it withdrawn.
+   */
+  private queueResume(
+    tabId: string,
+    entry: ITabStatusEntry,
+    episode: ITurnErrorEpisode,
+    dedupe: string,
+    logLine: string,
+    opts: { kind: 'first' | 'backoff' | 'recovery' | 'canary'; onQueueFailed?: () => void } = { kind: 'first' },
+  ): void {
     enqueueNotice({
       kind: 'resume',
       targetWorkspaceId: entry.workspaceId,
       targetTabId: tabId,
-      dedupeKey: `resume-${tabId}-${error.turnId || at}`,
+      dedupeKey: `resume-${tabId}-${dedupe}`,
       fields: { resumeId: `r-${nanoid(8)}` },
     }).then(({ item }) => {
-      next.resumeItemId = item.id;
-      // The episode ended while the resume was being queued: withdraw it.
-      if (entry.turnError !== next || next.escalated) {
-        this.withdrawResume(next, 'episode-closed');
+      episode.resumeItemId = item.id;
+      // The episode ended, escalated or was held by an outage while the resume was being queued: withdraw it.
+      // A canary is the one resume an outage lets through, so its hold does not withdraw it.
+      if (entry.turnError !== episode || (opts.kind === 'first' && episode.escalated) || (opts.kind !== 'canary' && episode.heldBy)) {
+        this.withdrawResume(episode, episode.heldBy ? 'provider-outage' : 'episode-closed');
         return;
       }
-      log.info({ tabId, resume: item.id, code: error.code }, 'api-error stop: one resume queued');
+      log.info({ tabId, resume: item.id, code: episode.code, class: episode.class }, logLine);
     }).catch((err) => {
-      // No resume can go out, so the episode escalates at once.
-      log.warn(`api-error resume could not be queued for ${tabId}: ${err instanceof Error ? err.message : err}`);
-      if (entry.turnError === next && !next.escalated) {
-        next.escalated = true;
-        this.escalateTurnError(tabId, entry, 'api-error', `${error.text || error.code} (the resume could not be queued)`);
+      log.warn(`${episode.class} resume could not be queued for ${tabId}: ${err instanceof Error ? err.message : err}`);
+      opts.onQueueFailed?.();
+      if (opts.kind !== 'canary' && entry.turnError === episode && !episode.escalated) {
+        episode.escalated = true;
+        this.escalateTurnError(tabId, entry, episode.class, `${episode.text || episode.code} (the resume could not be queued)`);
       }
     });
+  }
+
+  /** A rate-limited tab's next resume, after its backoff; a newer event or a closed episode cancels it. */
+  private scheduleBackoffResume(tabId: string, entry: ITabStatusEntry, episode: ITurnErrorEpisode, delayMs: number): void {
+    this.clearBackoffResume(tabId);
+    const attempt = episode.attempts ?? 1;
+    const timer = setTimeout(() => {
+      this.backoffResumes.delete(tabId);
+      this.saveHolds();
+      if (this.tabs.get(tabId) !== entry || entry.turnError !== episode || episode.heldBy) return;
+      this.queueResume(tabId, entry, episode, `${episode.turnId || episode.startedAt}-${attempt}`, `rate-limit stop: backoff resume ${attempt} queued`, { kind: 'backoff' });
+    }, delayMs);
+    timer.unref?.();
+    this.backoffResumes.set(tabId, timer);
+    this.saveHolds();
+    log.info({ tabId, attempt, delayMs, code: episode.code }, 'rate-limit stop: resume after backoff');
+  }
+
+  private clearBackoffResume(tabId: string): void {
+    const timer = this.backoffResumes.get(tabId);
+    if (timer) clearTimeout(timer);
+    this.backoffResumes.delete(tabId);
+  }
+
+  /** The threshold was crossed: every tab in the window is held, and the human gets the one alert. */
+  private startOutage(key: IFailureKey, held: readonly string[], error: ITurnError, alert: boolean): void {
+    const id = failureKeyId(key);
+    for (const heldTabId of held) {
+      const heldEntry = this.tabs.get(heldTabId);
+      if (heldEntry) this.holdForOutage(heldTabId, heldEntry, id);
+    }
+    if (!alert) {
+      // The same key again soon after its last end: one incident, already alerted (review r1 finding 4).
+      log.warn({ outage: id, held }, 'provider outage re-entered within the re-alert window: tabs held, no second alert');
+      void appendCoordinationAudit({ event: 'provider-outage-reentered', outage: id, held: [...held] }).catch(() => {});
+      return;
+    }
+    const first = held[0] ? this.tabs.get(held[0]) : undefined;
+    const where = key.cls === 'auth-failure' ? ` on ${key.host ?? 'this host'}` : '';
+    const when = key.cls === 'auth-failure'
+      ? `each held tab is resumed once after a turn on ${key.host ?? 'this host'} succeeds again: sign the account in, then prompt any tab there`
+      : 'each held tab is resumed once when the provider answers again';
+    const detail = `provider outage: ${held.length} tabs failed with ${key.provider} ${key.cls} "${key.code}"${where} within ${Math.round(OUTAGE_WINDOW_MS / 60_000)} min (${error.text || error.code}). `
+      + `Automatic resumes are held fleet-wide and no per-tab alert follows; ${when}.`;
+    log.warn({ outage: id, held }, detail);
+    void appendCoordinationAudit({ event: 'provider-outage-started', outage: id, held: [...held] }).catch(() => {});
+    void getWorkspaceByIdCached(first?.workspaceId ?? '').then((ws) => this.dispatchAlert({
+      kind: 'flag',
+      tabId: held[0] ?? '',
+      workspace: ws,
+      workspaceId: first?.workspaceId ?? '',
+      tabName: first?.tabName ?? '',
+      providerId: toAlertProvider(first?.agentProviderId),
+      agentSessionId: first?.agentSessionId,
+      detail,
+    })).catch((err) => log.warn(`provider outage alert failed: ${err instanceof Error ? err.message : err}`));
+  }
+
+  /** Hold one tab for an outage: its queued resume and its backoff are withdrawn, and it escalates no further. */
+  private holdForOutage(tabId: string, entry: ITabStatusEntry, outageId: string): void {
+    const episode = entry.turnError;
+    if (!episode || episode.class === 'usage-limit') return;
+    this.clearBackoffResume(tabId);
+    if (episode.heldBy === outageId) return;
+    episode.heldBy = outageId;
+    this.withdrawResume(episode, 'provider-outage');
+    this.saveHolds();
+    log.info({ tabId, outage: outageId }, 'turn error held by a provider outage');
+  }
+
+  /**
+   * A clean stop proves its provider answers (on its host): the outages it ends release their tabs, and the
+   * auth failures waiting on it are resumed, each once.
+   */
+  private noteProviderAnswered(tabId: string, entry: ITabStatusEntry, cleanAt: number): void {
+    const provider = entry.agentProviderId ?? getProviderByPanelType(entry.panelType)?.id;
+    if (!provider) return;
+    const host = entry.host ?? null;
+    for (const ended of this.outages.recover(provider, host, cleanAt)) {
+      log.info({ outage: ended.id, held: ended.held, durationMs: ended.durationMs, by: tabId }, 'provider outage ended: a clean turn; held tabs resume once');
+      void appendCoordinationAudit({ event: 'provider-outage-ended', outage: ended.id, held: ended.held, durationMs: ended.durationMs, by: tabId }).catch(() => {});
+      for (const heldTabId of ended.held) this.resumeAfterRecovery(heldTabId, ended.id);
+    }
+    const authKey = failureKeyId({ cls: 'auth-failure', provider, host, code: '' });
+    for (const [waitingTabId, waiting] of this.tabs) {
+      if (waitingTabId !== tabId && waiting.turnError?.waitingFor === authKey) this.resumeAfterRecovery(waitingTabId, authKey);
+    }
+  }
+
+  /**
+   * The provider answers again: the tab is released. Its first recovery owes it one resume. A tab that already had
+   * that resume and was held again (a second outage in the same episode, review r1) is owed no second one: it is
+   * told to its target once, so no tab stays held behind an alert that promised it a resume.
+   */
+  private resumeAfterRecovery(tabId: string, reason: string): void {
+    const entry = this.tabs.get(tabId);
+    const episode = entry?.turnError;
+    if (!entry || !episode || episode.class === 'usage-limit') return;
+    episode.heldBy = null;
+    episode.waitingFor = null;
+    this.saveHolds();
+    if (episode.recoveryResumed) {
+      log.info({ tabId, outage: reason }, 'turn error released by a second recovery: already resumed once');
+      this.reportAfterRecovery(tabId, entry, episode, `${episode.text || episode.code} (it failed again after the resume its provider's recovery owed it, and ${reason} held it again; no further automatic resume)`);
+      return;
+    }
+    episode.recoveryResumed = true;
+    this.queueResume(tabId, entry, episode, `recovered-${episode.turnId || episode.startedAt}`, `turn error: resumed once after ${reason} recovered`, { kind: 'recovery' });
+  }
+
+  /**
+   * The failure after a recovery resume is told to the target once, whatever the class and whatever was said
+   * before the recovery (review r2): the nudge or alert that came before promised that resume.
+   */
+  private reportAfterRecovery(tabId: string, entry: ITabStatusEntry, episode: ITurnErrorEpisode, detail: string): void {
+    if (episode.class === 'usage-limit' || episode.escalatedAfterRecovery) return;
+    episode.escalatedAfterRecovery = true;
+    episode.escalated = true;
+    this.saveHolds();
+    this.escalateTurnError(tabId, entry, episode.class, detail);
+  }
+
+  /** What each tab is still owed only in memory (see `turn-error-holds.ts`). */
+  private collectHolds(): Record<string, ITurnErrorHold> {
+    const holds: Record<string, ITurnErrorHold> = {};
+    for (const [tabId, entry] of this.tabs) {
+      const episode = entry.turnError;
+      if (!episode || episode.class === 'usage-limit') continue;
+      const reason = episode.heldBy ? 'outage' : episode.waitingFor ? 'auth-wait' : this.backoffResumes.has(tabId) ? 'backoff' : null;
+      if (!reason) continue;
+      const owed = reason === 'backoff' || !episode.recoveryResumed ? 'resume' : episode.escalatedAfterRecovery ? null : 'notice';
+      if (!owed) continue;
+      holds[tabId] = { workspaceId: entry.workspaceId, class: episode.class, code: episode.code, text: episode.text, reason, owed };
+    }
+    return holds;
+  }
+
+  /** Persist what is owed; coalesced to one write per tick, and none when the set did not change. */
+  private saveHolds(): void {
+    if (this.holdsSaveQueued) return;
+    this.holdsSaveQueued = true;
+    queueMicrotask(() => {
+      this.holdsSaveQueued = false;
+      const holds = this.collectHolds();
+      const text = JSON.stringify(holds);
+      if (text === this.holdsSaved) return;
+      this.holdsSaved = text;
+      void this.turnErrorHolds.save(holds);
+    });
+  }
+
+  /**
+   * Boot: the owed resumes the previous server held in memory are gone with it. Each tab that still exists and
+   * whose target was not yet told is escalated once; the file then holds this server's set (none yet).
+   */
+  private async escalateRestoredHolds(): Promise<void> {
+    const restored = await this.turnErrorHolds.load();
+    this.holdsSaved = JSON.stringify(restored);
+    for (const [tabId, hold] of Object.entries(restored)) {
+      const entry = this.tabs.get(tabId);
+      if (!entry || entry.workspaceId !== hold.workspaceId) continue;
+      log.info({ tabId, hold }, 'turn-error hold lost at a server restart: escalated');
+      this.escalateTurnError(tabId, entry, hold.class, `${hold.text || hold.code} (${restoredHoldDetail(hold)})`);
+    }
+    this.saveHolds();
+  }
+
+  /** The poll's outage step: one canary resume per outage whose quiet period passed. */
+  private tickOutages(): void {
+    for (const { id, tabId } of this.outages.dueCanaries()) {
+      const entry = this.tabs.get(tabId);
+      const episode = entry?.turnError;
+      if (!entry || !episode || episode.class === 'usage-limit') {
+        this.outages.forget(tabId);
+        continue;
+      }
+      log.info({ outage: id, tabId }, 'provider outage quiet: one canary resume');
+      this.queueResume(tabId, entry, episode, `canary-${Date.now()}`, 'provider outage canary resume queued', { kind: 'canary', onQueueFailed: () => this.outages.canaryFailed(id, tabId) });
+    }
   }
 
   /**
@@ -2521,7 +2840,7 @@ export class StatusManager {
    * nudge would be withheld and dropped), the human is alerted directly,
    * whatever the alert policy: an escalation that reaches no one is not one.
    */
-  private escalateTurnError(tabId: string, entry: ITabStatusEntry, kind: 'api-error' | 'usage-limit', detail: string): void {
+  private escalateTurnError(tabId: string, entry: ITabStatusEntry, kind: 'api-error' | 'usage-limit' | 'auth-failure' | 'rate-limit', detail: string): void {
     this.nudgeOrchestrator(tabId, entry, kind, detail).then(async (hadTarget) => {
       if (hadTarget) return;
       const ws = await getWorkspaceByIdCached(entry.workspaceId);
@@ -2533,7 +2852,7 @@ export class StatusManager {
         tabName: entry.tabName,
         providerId: toAlertProvider(entry.agentProviderId),
         agentSessionId: entry.agentSessionId,
-        detail: `${kind === 'usage-limit' ? 'halted by a usage limit' : 'API error after its one automatic resume'}: ${detail}`,
+        detail: `${TURN_ERROR_ALERT_LEAD[kind]}: ${detail}`,
       });
     }).catch((err) => {
       log.warn(`${kind} nudge failed: ${err instanceof Error ? err.message : err}`);
@@ -2548,14 +2867,18 @@ export class StatusManager {
     }).catch((err) => log.warn(`resume ${id} could not be withdrawn: ${err instanceof Error ? err.message : err}`));
   }
 
-  private closeTurnErrorEpisode(entry: ITabStatusEntry, reason: string): void {
+  private closeTurnErrorEpisode(tabId: string, entry: ITabStatusEntry, reason: string): void {
     if (entry.turnError) this.withdrawResume(entry.turnError, reason);
     entry.turnError = null;
+    this.clearBackoffResume(tabId);
+    this.outages.forget(tabId);
+    this.saveHolds();
   }
 
   /** True while the tab's last stop was a usage-limit halt: nothing automated types into it. */
   isHaltedByUsageLimit(tabId: string): boolean {
-    return this.tabs.get(tabId)?.turnError?.class === 'usage-limit';
+    const episode = this.tabs.get(tabId)?.turnError;
+    return episode?.class === 'usage-limit' && episode.halts !== false;
   }
 
   /**
@@ -2569,10 +2892,16 @@ export class StatusManager {
     if (!entry || entry.workspaceId !== item.targetWorkspaceId) return;
     const held = `resume notice ${item.id} held: ${item.heldReason ?? 'undelivered'}`;
     const episode = entry.turnError;
-    if (episode?.class === 'api-error' && episode.resumeItemId === item.id) {
+    if (episode && episode.class !== 'usage-limit' && episode.resumeItemId === item.id) {
+      // An outage's canary that could not be typed: the outage alert speaks for the tab; the next canary follows.
+      if (episode.heldBy) {
+        if (this.outages.isCanary(episode.heldBy, item.targetTabId)) this.outages.canaryFailed(episode.heldBy, item.targetTabId);
+        log.info({ tabId: item.targetTabId, resume: item.id, outage: episode.heldBy }, 'resume of a tab held by an outage was held: the outage alert speaks for it');
+        return;
+      }
       if (episode.escalated) return;
       episode.escalated = true;
-      this.escalateTurnError(item.targetTabId, entry, 'api-error', `${episode.text || episode.code} (${held})`);
+      this.escalateTurnError(item.targetTabId, entry, episode.class, `${episode.text || episode.code} (${held})`);
       return;
     }
     if (this.orphanResumesEscalated.has(item.id)) return;
@@ -3199,7 +3528,12 @@ export class StatusManager {
     }
     // A clean stop (or an unclassified error) ends any error episode, and a
     // resume not yet typed is withdrawn: it would be stale.
-    this.closeTurnErrorEpisode(entry, 'episode-closed');
+    this.closeTurnErrorEpisode(tabId, entry, 'episode-closed');
+    // A turn the provider answered, read from the transcript, proves the provider (on this host) answers again.
+    if (!turnError && snapshot && snapshot.transcriptRead !== false && snapshot.lastAssistantTail && !snapshot.interrupted) {
+      // The stop's own time (this server's clock for a live stop): a remote transcript's clock may lag ours.
+      this.noteProviderAnswered(tabId, entry, entry.lastEvent?.at ?? Date.now());
+    }
 
     // F10 step 1: the stop's own message is the tail; the transcript read stays for the background counts, and a
     // difference between the two is logged (the shadow that measures the transcript race).
@@ -3583,8 +3917,8 @@ export class StatusManager {
         this.orchestrationPendingLaunches.delete(tabId);
         entry.lastResumeOrStartedAt = now;
       }
-      // A new agent session is not the halted one (story 26 review r2).
-      if (entry.turnError?.class === 'usage-limit') this.closeTurnErrorEpisode(entry, 'session-start');
+      // A new agent session is not the halted one (story 26 review r2), nor the one an auth or rate limit refused.
+      if (entry.turnError && entry.turnError.class !== 'api-error') this.closeTurnErrorEpisode(tabId, entry, 'session-start');
       // A /clear or a fresh launch has no context reading yet; after a rotation it is the session the first message waits for.
       this.contextLifecycle.onSessionStart(tabId);
       // A relaunch after the agent died mid-turn: that turn ended here, with no count.
@@ -3804,7 +4138,10 @@ export class StatusManager {
     }
     this.stuckNudgedTabs.delete(tabId);
     this.inactiveSince.delete(tabId);
+    this.unreadInactive.delete(tabId);
     this.jobEventAt.delete(tabId);
+    this.clearBackoffResume(tabId);
+    this.outages.forget(tabId);
     // A poll that read the layout before the close must not bring the tab back (L38).
     this.retiredTabs.set(tabId, { until: Date.now() + CLOSED_RETIRE_MS, by: 'close' });
     this.tabs.delete(tabId);
@@ -4175,9 +4512,13 @@ export class StatusManager {
     }
   }
 
-  /** Stops at once; the returned promise settles when the hook floors are saved (the graceful shutdown awaits it). */
+  /** Stops at once; the returned promise settles when the hook floors and the turn-error holds are saved. */
   shutdown(): Promise<void> {
     const floorsSaved = this.hookFloors.flush();
+    // The last owed-resume set, written now: a pending coalesced write would run after the process exits.
+    const holds = this.collectHolds();
+    this.holdsSaved = JSON.stringify(holds);
+    const holdsSaved = this.turnErrorHolds.save(holds);
     this.stopPolling();
     this.tabEvents.stop();
     if (this.contextTimer) clearInterval(this.contextTimer);
@@ -4193,7 +4534,7 @@ export class StatusManager {
       }
     }
     this.clients.clear();
-    return floorsSaved;
+    return Promise.all([floorsSaved, holdsSaved]).then(() => {});
   }
 
   /** A closed tab stops receiving nudges at once; the layout copy is cleared too. */

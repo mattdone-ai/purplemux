@@ -108,6 +108,8 @@ export const WAKE_CLASS_TABLE: Readonly<Record<TWakeKind, TRule>> = {
   thrash: 'urgent',
   'api-error': 'urgent',
   'usage-limit': 'urgent',
+  'auth-failure': 'urgent',
+  'rate-limit': 'urgent',
   inactive: 'urgent',
   stalled: 'urgent',
   'model-drift': 'urgent',

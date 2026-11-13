@@ -27,6 +27,8 @@ export interface IHookDelivery {
   body: unknown;
   replayedAt?: number;
   occurredAt?: number;
+  /** A replayed remote event's transcript sync, shared across one drain (`batchRemoteReplays`). */
+  remoteTranscriptSync?: (session: string, remotePath: string) => Promise<boolean>;
 }
 
 export interface IHookOutcome {

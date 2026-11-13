@@ -27,9 +27,29 @@ describe('lastTurnError — Claude Code 2.1.283 (structured fields only)', () =>
     });
   });
 
-  it('classifies authentication_failed as other: never resumed', async () => {
+  it('classifies authentication_failed as auth-failure: escalated at once, resumed only after recovery (PMUX-REMOTE-RESILIENCE fix 1)', async () => {
     const snapshot = await readClaudeRuntimeSnapshot(fixture('claude-authentication-failed.jsonl'), { force: true });
-    expect(snapshot.lastTurnError).toMatchObject({ class: 'other', code: 'authentication_failed' });
+    expect(snapshot.lastTurnError).toMatchObject({ class: 'auth-failure', code: 'authentication_failed' });
+  });
+
+  it.each([
+    ['unknown', 'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}} · Please run /login', 'auth-failure'],
+    ['unknown', 'API Error: 403 <html><head><title>Attention Required! | Cloudflare</title></head></html>', 'auth-failure'],
+    ['rate_limit', 'API Error: Request rejected (429) · This request would exceed the rate limit', 'rate-limit'],
+    ['unknown', 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}', 'rate-limit'],
+    ['invalid_request', 'API Error: 400 prompt is too long', 'other'],
+    // Review r1 finding 5: a plan limit is a usage limit (never typed into), whatever code it carries.
+    ['rate_limit', "You've hit your 5-hour limit · resets 3pm (UTC)", 'usage-limit'],
+    ['unknown', 'Claude AI usage limit reached|1794600000', 'usage-limit'],
+    ['rate_limit', 'API Error: Request rejected · rate limit', 'rate-limit'],
+    // A bare 429 elsewhere in the text is no rate limit.
+    ['invalid_request', 'API Error: 400 the request had 429 tool results', 'other'],
+  ])('classifies a %s entry "%s" as %s', async (code, text, cls) => {
+    const file = await copyWith('claude-usage-warning-footer-negative.jsonl', [
+      { type: 'user', timestamp: '2026-11-13T00:00:00.000Z', message: { content: 'go' } },
+      { type: 'assistant', isApiErrorMessage: true, error: code, uuid: 'e-1', timestamp: '2026-11-13T00:00:01.000Z', message: { model: '<synthetic>', content: [{ type: 'text', text }] } },
+    ]);
+    expect((await readClaudeRuntimeSnapshot(file, { force: true })).lastTurnError).toMatchObject({ class: cls, code });
   });
 
   it('never reads the usage WARNING footer as an error, as a captured pane or as a quote', async () => {
@@ -61,7 +81,7 @@ describe('lastTurnError — Codex task_complete.error', () => {
   it.each([
     ['codex-usage-limit-exceeded.jsonl', 'usage-limit', 'usage_limit_exceeded', /You've hit your usage limit/],
     ['codex-server-overloaded.jsonl', 'api-error', 'server_overloaded', /at capacity/],
-    ['codex-other-401.jsonl', 'other', 'other', /401 Unauthorized/],
+    ['codex-other-401.jsonl', 'auth-failure', 'other', /401 Unauthorized/],
   ])('classifies %s as %s', async (name, cls, code, text) => {
     const snapshot = await readCodexRuntimeSnapshot(fixture(name), { force: true });
     expect(snapshot.lastTurnError).toMatchObject({ class: cls, code, text: expect.stringMatching(text) });

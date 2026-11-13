@@ -20,6 +20,8 @@ export interface IRemoteHookDelivery {
   body: unknown;
   replayedAt?: number;
   occurredAt?: number;
+  /** One drain's shared sync for replayed events (`batchRemoteReplays`); a live event syncs on its own. */
+  remoteTranscriptSync?: (session: string, remotePath: string) => Promise<boolean>;
 }
 
 const one = (query: IRemoteHookDelivery['query'], key: string): string | null => {
@@ -55,7 +57,7 @@ export const handleRemoteClaudeHook = async (delivery: IRemoteHookDelivery): Pro
   if (isValidRemoteTranscriptPath(transcriptPath, sessionId)) {
     try {
       const jsonlPath = await bindRemoteTranscript({ session, host, sessionId: sessionId as string, remotePath: transcriptPath });
-      await syncRemoteTranscript(session);
+      await (delivery.remoteTranscriptSync ?? syncRemoteTranscript)(session, transcriptPath);
       statusManager.applyAgentHookMeta('claude', session, { sessionId: sessionId as string, jsonlPath }, at);
     } catch (err) {
       log.warn({ session, host, err: err instanceof Error ? err.message : String(err) }, 'remote transcript bind failed; applying the event without it');

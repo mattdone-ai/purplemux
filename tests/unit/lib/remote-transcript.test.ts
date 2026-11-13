@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // ADR-0022 slice (b): the local copy of a remote tab's transcript, kept by bounded ssh reads.
 
 const mockHome = vi.hoisted(() => ({ value: '', remote: '' }));
-const ssh = vi.hoisted(() => ({ calls: [] as string[], fail: null as null | { code: number; stderr?: string } }));
+const ssh = vi.hoisted(() => ({ calls: [] as string[], fail: null as null | { code: number; stderr?: string }, hold: null as Promise<void> | null }));
 
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
@@ -22,6 +22,7 @@ vi.mock('@/lib/remote-host', async (importOriginal) => {
     // The "remote" file is a local one; the command's offset and length are honoured as tail/head would.
     runSshBuffer: async (_host: string, command: string, opts: { maxBytes: number }) => {
       ssh.calls.push(command);
+      if (ssh.hold) await ssh.hold;
       if (ssh.fail) throw Object.assign(new Error('failed'), ssh.fail);
       const from = Number(command.match(/tail -c \+(\d+)/)?.[1]) - 1;
       const max = Number(command.match(/head -c (\d+)/)?.[1]);
@@ -41,12 +42,14 @@ describe('remote transcript copy (ADR-0022)', () => {
     vi.resetModules();
     delete (globalThis as Record<string, unknown>).__ptRemoteMirrors;
     delete (globalThis as Record<string, unknown>).__ptRemoteMirrorLocks;
+    delete (globalThis as Record<string, unknown>).__ptRemoteMirrorQueued;
     delete (globalThis as Record<string, unknown>).__ptRemoteMirrorCleanup;
     delete (globalThis as Record<string, unknown>).__ptTabLifecycle;
     mockHome.value = await fs.mkdtemp(path.join(os.tmpdir(), 'pmux-remote-transcript-'));
     mockHome.remote = path.join(mockHome.value, 'remote.jsonl');
     ssh.calls = [];
     ssh.fail = null;
+    ssh.hold = null;
   });
   afterEach(async () => {
     await fs.rm(mockHome.value, { recursive: true, force: true });
@@ -76,6 +79,40 @@ describe('remote transcript copy (ADR-0022)', () => {
     expect(await fs.readFile(local, 'utf-8')).toBe('{"a":"é"}\n{"b":2}\n');
     expect(ssh.calls.at(-1)).toContain(`tail -c +${Buffer.byteLength('{"a":"é"}\n') + 1} "$p"`);
     expect(ssh.calls.at(-1)).toContain(`p='${REMOTE_PATH}'`);
+  });
+
+  it('a burst of syncs costs at most two ssh reads: a caller joins the sync queued and not yet started (PMUX-REMOTE-RESILIENCE fix 5)', async () => {
+    await fs.writeFile(mockHome.remote, '{"a":1}\n');
+    const { bindRemoteTranscript, syncRemoteTranscript, mirrorPathFor } = await import('@/lib/remote-transcript');
+    await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
+    const burst = Array.from({ length: 20 }, () => syncRemoteTranscript(SESSION));
+    expect(await Promise.all(burst)).toEqual(Array(20).fill(true));
+    expect(ssh.calls.length).toBeLessThanOrEqual(2);
+    // A call after the burst settled reads again, and sees bytes written since.
+    await fs.appendFile(mockHome.remote, '{"b":2}\n');
+    await syncRemoteTranscript(SESSION);
+    expect(await fs.readFile(mirrorPathFor('tab-r', SID), 'utf-8')).toBe('{"a":1}\n{"b":2}\n');
+  });
+
+  it('a sync asked for after a bind never joins one queued before it: it reads the newly bound transcript', async () => {
+    const other = '1f9e2c4a-1111-2222-3333-444455556666';
+    const otherPath = `/home/user/.claude/projects/-home-user-code/${other}.jsonl`;
+    await fs.writeFile(mockHome.remote, '{"a":1}\n');
+    const { bindRemoteTranscript, syncRemoteTranscript } = await import('@/lib/remote-transcript');
+    await bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: SID, remotePath: REMOTE_PATH });
+    let release!: () => void;
+    ssh.hold = new Promise<void>((resolve) => { release = resolve; });
+    const running = syncRemoteTranscript(SESSION);
+    await vi.waitFor(() => expect(ssh.calls).toHaveLength(1));
+    const queued = syncRemoteTranscript(SESSION);
+    await new Promise((resolve) => setImmediate(resolve));
+    const rebound = bindRemoteTranscript({ session: SESSION, host: 'host-b', sessionId: other, remotePath: otherPath });
+    const after = syncRemoteTranscript(SESSION);
+    ssh.hold = null;
+    release();
+    await Promise.all([running, queued, rebound, after]);
+    // running and queued read the first transcript; after waited for the bind and read the new one.
+    expect(ssh.calls.map((c) => (c.includes(otherPath) ? 'new' : 'old'))).toEqual(['old', 'old', 'new']);
   });
 
   it('restarts the copy when the remote file was rewritten shorter', async () => {

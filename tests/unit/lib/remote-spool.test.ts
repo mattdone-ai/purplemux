@@ -25,6 +25,14 @@ vi.mock('@/lib/session-host', () => ({
   sessionHostOf: async (s: string) => (s === 'pt-ws-a-pane-p-tab-r' ? 'host-b' : s === 'pt-ws-a-pane-p-tab-g' ? 'gpu2' : null),
 }));
 vi.mock('@/lib/coordination-audit', () => ({ appendCoordinationAudit: audit }));
+const syncs = vi.hoisted(() => ({ calls: [] as string[], fail: false }));
+vi.mock('@/lib/remote-transcript', () => ({
+  syncRemoteTranscript: async (session: string) => {
+    syncs.calls.push(session);
+    if (syncs.fail) throw new Error('ssh timed out');
+    return true;
+  },
+}));
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
   return { ...actual, default: { ...actual, hostname: () => 'host-a' }, hostname: () => 'host-a' };
@@ -60,9 +68,16 @@ describe('pulling remote hook spools (ADR-0022)', () => {
       file('not-a-spool-name.json', R, `remote=claude&session=${R}`),
     ];
     const { pullRemoteHookSpools } = await import('@/lib/remote-spool');
+    const before = Date.now();
     const [pull] = await pullRemoteHookSpools(dir);
     expect(pull).toEqual({ host: 'host-b', taken: 1, dropped: 4, quarantined: 0 });
     expect(await fs.readdir(dir)).toEqual(['1791660000123-r4242-0a1b2c3d.json']);
+    // The replay window starts at the pull (PMUX-REMOTE-RESILIENCE fix 4).
+    const taken = JSON.parse(await fs.readFile(path.join(dir, '1791660000123-r4242-0a1b2c3d.json'), 'utf-8'));
+    expect(taken).toMatchObject({ at: 1791660000123, session: R });
+    expect(taken.pulledAt).toBeGreaterThanOrEqual(before);
+    const { parseSpooledHook } = await import('@/lib/hook-spool');
+    expect(parseSpooledHook(JSON.stringify(taken))?.pulledAt).toBe(taken.pulledAt);
     expect(remote.commands.at(-1)).toBe(`host-b: cd "$HOME/.purplemux-remote/host-a/hook-spool" && rm -f -- '1791660000123-4242-0a1b2c3d.json' '1791660000150-4246-0a1b2c41.json' '1791660000200-4243-0a1b2c3e.json' '1791660000300-4244-0a1b2c3f.json' '1791660000400-4245-0a1b2c40.json'`);
   });
 
@@ -148,5 +163,61 @@ describe('the remote list script, run for real', () => {
     await fs.utimes(path.join(bad, 'old.json'), old, old);
     await list();
     expect(await fs.readdir(bad)).toEqual(['new.json']);
+  });
+});
+
+describe('batchRemoteReplays (PMUX-REMOTE-RESILIENCE fix 5)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    syncs.calls = [];
+    syncs.fail = false;
+  });
+
+  it('shares a FAILED sync for the rest of the drain only: the events still apply, and the next drain reads again', async () => {
+    syncs.fail = true;
+    const { batchRemoteReplays } = await import('@/lib/remote-spool');
+    const results: boolean[] = [];
+    const apply = vi.fn(async (d: { remoteTranscriptSync?: (s: string, p: string) => Promise<boolean> }) => {
+      results.push(await d.remoteTranscriptSync!(R, '/p/projects/x/a.jsonl'));
+    });
+    const batch = batchRemoteReplays(apply);
+    for (let i = 0; i < 5; i += 1) await batch(delivery(R));
+    expect(results).toEqual([false, false, false, false, false]);
+    expect(syncs.calls).toEqual([R]);
+    syncs.fail = false;
+    await batchRemoteReplays(apply)(delivery(R));
+    expect(results.at(-1)).toBe(true);
+    expect(syncs.calls).toEqual([R, R]);
+  });
+
+  const delivery = (session: string, extra: Record<string, string> = {}, replayedAt: number | null = 1) => ({
+    query: { remote: 'claude', session, event: 'stop', ...extra }, body: {}, ...(replayedAt === null ? {} : { replayedAt }),
+  });
+
+  it('gives every replayed remote event of one drain one shared sync per session and transcript; a new drain syncs again', async () => {
+    const { batchRemoteReplays } = await import('@/lib/remote-spool');
+    const seen: Array<{ remoteTranscriptSync?: (s: string, p: string) => Promise<boolean> }> = [];
+    const apply = vi.fn(async (d: { remoteTranscriptSync?: (s: string, p: string) => Promise<boolean> }) => {
+      seen.push(d);
+      await d.remoteTranscriptSync?.((d as unknown as { query: { session: string } }).query.session, (d as unknown as { query: { path?: string } }).query.path ?? '/p/projects/x/a.jsonl');
+    });
+    const batch = batchRemoteReplays(apply);
+    for (let i = 0; i < 50; i += 1) await batch(delivery(R));
+    await batch(delivery('pt-ws-a-pane-p-tab-q'));
+    await batch(delivery(R, { path: '/p/projects/x/b.jsonl' }));
+    expect(syncs.calls).toEqual([R, 'pt-ws-a-pane-p-tab-q', R]);
+    expect(apply).toHaveBeenCalledTimes(52);
+
+    await batchRemoteReplays(apply)(delivery(R));
+    expect(syncs.calls).toHaveLength(4);
+  });
+
+  it('leaves a live remote event and a local replay alone: each keeps its own sync, or none', async () => {
+    const { batchRemoteReplays } = await import('@/lib/remote-spool');
+    const apply = vi.fn(async (_d: unknown) => {});
+    const batch = batchRemoteReplays(apply);
+    await batch(delivery(R, {}, null));
+    await batch({ query: { session: R, event: 'stop' }, body: {}, replayedAt: 1 });
+    for (const [d] of apply.mock.calls) expect((d as { remoteTranscriptSync?: unknown }).remoteTranscriptSync).toBeUndefined();
   });
 });

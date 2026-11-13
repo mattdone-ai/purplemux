@@ -602,6 +602,33 @@ describe('the readiness probe of a remote tab: one batched capture per host, nev
     expect(entry().startupPrompt?.kind).toBe('folder-trust');
   });
 
+  it('an inactive remote tab whose agent runs mid-turn reads unknown, never inactive, with no nudge (PMUX-REMOTE-RESILIENCE fix 3)', async () => {
+    ssh.scan = () => pane('claude');
+    ssh.capture = captureReply({ [SESSION]: fixture('claude-busy-line-in-composer.ansi') });
+    // A hook bound the session before: the layout tab carries its id.
+    state.tabs = [{ ...remoteTab('tab-r', SESSION), claudeSessionId: '0f9e2c4a-1111-2222-3333-444455556666' }];
+    const { manager, entry, inactiveNudges } = await createManager('inactive');
+    await pollAt(manager, 0);
+    await pollAt(manager, 9_000);
+    expect(entry().cliState).toBe('inactive');
+    await pollAt(manager, 10_000);
+    expect(entry().cliState).toBe('unknown');
+    await pollAt(manager, 20_000);
+    // The transcript copy cannot be read here (its ssh read times out): it stays unknown until a hook says.
+    expect(entry().cliState).toBe('unknown');
+    expect(inactiveNudges()).toEqual([]);
+  });
+
+  it('a fresh launch no hook bound yet, at a first-run screen, stays inactive as before', async () => {
+    ssh.scan = () => pane('claude');
+    ssh.capture = captureReply({ [SESSION]: fixture('claude-onboarding-theme.ansi') });
+    const { manager, entry } = await createManager('inactive');
+    await pollAt(manager, 0);
+    await pollAt(manager, 9_000);
+    await pollAt(manager, 10_000);
+    expect(entry().cliState).toBe('inactive');
+  });
+
   it('a failed capture backs the host off for 30 s; a capture older than two poll intervals is not read', async () => {
     ssh.scan = () => pane('claude');
     ssh.capture = () => SSH_255;
@@ -742,5 +769,56 @@ describe('the orchestrator prompt and nudge for a remote INACTIVE (vel-D61)', ()
   it('a local tab\'s inactive nudge is unchanged', async () => {
     const { buildNudgeMessage } = await import('@/lib/orchestration');
     expect(buildNudgeMessage('inactive', 'tab-l', 'l', 'ws-1')).toBe('[orchestrator-watchdog] worker tab-l (l) is INACTIVE (agent process gone). Respawn the tab or mark its task blocked.');
+  });
+});
+
+describe('an inactive remote tab and a host that stops answering (PMUX-REMOTE-RESILIENCE fix 3)', () => {
+  beforeEach(resetWorld);
+  afterEach(() => vi.useRealTimers());
+
+  it('reads unknown while the host times out; once it answers without the agent, inactive again with no second nudge and the same since', async () => {
+    const { manager, entry, inactiveNudges, pollAndSettle } = await createManager('inactive');
+    const since = T0 - 3_600_000;
+    (manager as unknown as { inactiveSince: Map<string, number> }).inactiveSince.set('tab-r', since);
+    await pollAndSettle();
+    expect(entry().cliState).toBe('unknown');
+    expect(inactiveNudges()).toEqual([]);
+    // The host answers after its scan backoff, with no such session: the agent is still gone.
+    ssh.scan = () => ({ stdout: '' });
+    vi.setSystemTime(T0 + 31_000);
+    await pollAndSettle();
+    await vi.waitFor(() => expect(entry().cliState).toBe('inactive'));
+    expect(inactiveNudges()).toEqual([]);
+    expect((manager as unknown as { fleetFacts: (id: string) => { inactiveSince: number | null } }).fleetFacts('tab-r').inactiveSince).toBe(since);
+  });
+
+  it('once the host answers with the agent in the pane, it never reads inactive', async () => {
+    const { entry, inactiveNudges, pollAndSettle } = await createManager('inactive');
+    await pollAndSettle();
+    expect(entry().cliState).toBe('unknown');
+    ssh.scan = () => pane('claude');
+    for (const offset of [31_000, 62_000, 93_000]) {
+      vi.setSystemTime(T0 + offset);
+      await pollAndSettle();
+    }
+    expect(entry().cliState).not.toBe('inactive');
+    expect(inactiveNudges()).toEqual([]);
+  });
+
+  it('a hook that moves the tab out of unknown drops the inactive it stood for (review r1 finding 6)', async () => {
+    const { manager, entry, pollAndSettle } = await createManager('inactive');
+    await pollAndSettle();
+    expect(entry().cliState).toBe('unknown');
+    const unread = (manager as unknown as { unreadInactive: Map<string, number | null> }).unreadInactive;
+    expect(unread.has('tab-r')).toBe(true);
+    (manager as unknown as { updateTabFromHook: (s: string, e: string) => void }).updateTabFromHook(SESSION, 'prompt-submit');
+    expect(entry().cliState).toBe('busy');
+    expect(unread.has('tab-r')).toBe(false);
+  });
+
+  it('a tab in any other state keeps it while the host times out (unchanged, ADR-0022 §19)', async () => {
+    const { entry, pollAndSettle } = await createManager('ready-for-review');
+    await pollAndSettle();
+    expect(entry().cliState).toBe('ready-for-review');
   });
 });

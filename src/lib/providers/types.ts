@@ -72,7 +72,7 @@ export interface IRuntimeSnapshotOptions {
  * worker quoting "API Error:" or a pane's usage-warning footer is not an error.
  */
 export interface ITurnError {
-  class: 'api-error' | 'usage-limit' | 'other';
+  class: 'api-error' | 'usage-limit' | 'auth-failure' | 'rate-limit' | 'other';
   /** The provider's error code (`server_error`, `usage_limit_exceeded` …). */
   code: string;
   /** The error message, ≤ 300 characters. */
