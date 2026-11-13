@@ -101,8 +101,20 @@ const strandedText = (screen: IScreenReading, screenEmptyAtGate: boolean): boole
   screen.firstLinePending || (screen.composer === 'text' && screenEmptyAtGate);
 
 /**
+ * Text the one extra Enter may submit. On a remote tab (PMUX-REMOTE-SEND, 2026-11-13) any text on the composer line
+ * after the typing is the send's own: 16 remote briefs sat typed for up to 6 h, folded to a placeholder the first
+ * line cannot match, behind a gate that did not read the screen. An unreadable screen never qualifies: it may be an
+ * option list, which an Enter would answer.
+ */
+const mayResubmit = (screen: IScreenReading, request: ISubmitConfirmRequest): boolean =>
+  strandedText(screen, request.screenEmptyAtGate) || (request.remote && screen.composer === 'text');
+
+/**
  * Poll after the typing until a proof, or the deadline. A failed capture is never proof, and neither is an empty
- * composer on a tab with a prompt-submit hook. Enter is pressed at most once more.
+ * composer on a tab with a prompt-submit hook, unless a remote tab's composer showed the text after the typing and
+ * then read empty: the agent took it, and only its hook did not cross the tailnet. Enter is pressed at most once
+ * more; one still due at the deadline is pressed there, and the screen and the hook are read again after it
+ * before the send names its failure.
  *
  * The hook evidence is read again after every capture (review r1 F1): a remote capture is one ssh call that can
  * take the whole budget, and a hook that lands while it runs is proof. Without that read, the last capture could
@@ -118,6 +130,7 @@ export const confirmSubmission = async (
   const screenProves = !hasPromptSubmitHook(request.panelType, request.remote);
   const startedAt = now();
   let resubmitted = false;
+  let textSeen = false;
 
   const proven = (): boolean => hasSubmitProof(request.baseline, deps.readEvidence());
 
@@ -125,20 +138,28 @@ export const confirmSubmission = async (
     if (proven()) return { submitted: true, confirmation: 'prompt-submit', resubmitted };
     const screen = await readScreen(deps, request);
     if (proven()) return { submitted: true, confirmation: 'prompt-submit', resubmitted };
-    if (screenProves && screen.composer === 'empty' && !screen.firstLinePending) {
+    const cleared = screen.composer === 'empty' && !screen.firstLinePending;
+    if (cleared && (screenProves || (request.remote && textSeen))) {
       return { submitted: true, confirmation: 'composer-empty', resubmitted };
     }
+    if (screen.composer === 'text' || screen.firstLinePending) textSeen = true;
     const elapsed = now() - startedAt;
-    if (elapsed >= deadlineMs) {
+    const enterDue = !resubmitted && mayResubmit(screen, request);
+    if (elapsed >= deadlineMs && !enterDue) {
       return {
         submitted: false,
-        notSubmitted: strandedText(screen, request.screenEmptyAtGate) ? 'typed-not-submitted' : 'submit-unconfirmed',
+        notSubmitted: mayResubmit(screen, request) ? 'typed-not-submitted' : 'submit-unconfirmed',
         resubmitted,
       };
     }
-    if (!resubmitted && elapsed >= SUBMIT_RETRY_AFTER_MS && strandedText(screen, request.screenEmptyAtGate)) {
+    if (enterDue && elapsed >= SUBMIT_RETRY_AFTER_MS) {
       resubmitted = true;
       await deps.pressEnter().catch(() => undefined);
+      // An Enter pressed at the deadline gets one settle and one more look before the answer.
+      if (elapsed >= deadlineMs) {
+        await sleep(SUBMIT_RETRY_AFTER_MS);
+        continue;
+      }
     }
     await sleep(Math.min(SUBMIT_CONFIRM_POLL_MS, deadlineMs - elapsed));
   }

@@ -435,6 +435,11 @@ export class StatusManager {
   private orphanResumesEscalated = new Set<string>();
   /** Remote tabs moved from inactive to unknown because their host did not answer (fix 3), with when they went inactive. */
   private readonly unreadInactive = new Map<string, number | null>();
+  /**
+   * Remote tabs the process probe moved to inactive, with the state, event and launch it found them at
+   * (PMUX-REMOTE-SEND). A later answered read that proves the same agent still runs gives that state back.
+   */
+  private readonly probeInactive = new Map<string, { prevState: TCliState; seq: number | undefined; launch: number | undefined }>();
   /** Fleet outage mode (PMUX-REMOTE-RESILIENCE fix 2): N tabs failing with one key hold every such tab. */
   private readonly outages = new ProviderOutageTracker();
   /** A rate-limited tab's pending backoff resume. */
@@ -1453,6 +1458,21 @@ export class StatusManager {
           continue;
         }
 
+        // PMUX-REMOTE-SEND: the probe read this remote agent as gone and an answered read now proves it in its
+        // pane, with no event and no launch since. Nothing changed but the reading: the tab gets its state back.
+        const probedGone = tab.host && !paneUnread ? this.probeInactive.get(tab.id) : undefined;
+        if (probedGone && existing.cliState === 'inactive') {
+          if (existing.eventSeq !== probedGone.seq || existing.lastResumeOrStartedAt !== probedGone.launch) {
+            this.probeInactive.delete(tab.id);
+          } else if ((await agentRunningNow()) === true) {
+            log.info({ tabId: tab.id, host: tab.host, state: probedGone.prevState }, 'remote agent proven present again — inactive was a misread, state restored');
+            this.applyCliState(tab.id, existing, probedGone.prevState, { silent: true, nudge: null });
+            this.persistToLayout(existing);
+            this.broadcastUpdate(tab.id, existing);
+            continue;
+          }
+        }
+
         // A remote tab left unknown while its host was not read is resolved once its pane reads again.
         if (existing.cliState === 'unknown' && tab.host && !paneUnread) {
           this.resolveUnknown(tab.id).catch((err) => log.warn('resolveUnknown failed: %s', err));
@@ -1487,10 +1507,12 @@ export class StatusManager {
             const titleShellStyle = !!title && SHELL_TITLE_RE.test(title);
             if ((!title || titleShellStyle) && (await agentRunningNow()) === false) {
               log.info({ tabId: tab.id, prevState: existing.cliState, host: tab.host }, 'agent process gone — transitioning to inactive');
+              const prevState = existing.cliState;
               this.applyCliState(tab.id, existing, 'inactive', {
                 silent: true,
                 ...(tab.host ? { nudge: { kind: 'inactive' as const, detail: remoteInactiveDetail(tab.host, ws.id, tab.id) } } : {}),
               });
+              if (tab.host) this.probeInactive.set(tab.id, { prevState, seq: existing.eventSeq, launch: existing.lastResumeOrStartedAt });
               this.persistToLayout(existing);
               this.broadcastUpdate(tab.id, existing);
               continue;
@@ -1569,6 +1591,7 @@ export class StatusManager {
         this.inactiveSeenAt.delete(tabId);
         this.inactiveSince.delete(tabId);
         this.unreadInactive.delete(tabId);
+        this.probeInactive.delete(tabId);
         this.pollBoundSessions.delete(tabId);
         this.sessionBindingEpoch.delete(tabId);
         this.processStartCache.delete(tabId);
@@ -2110,6 +2133,7 @@ export class StatusManager {
     const prevBusySince = entry.busySince;
     // Out of unknown by any other path than its resolution (a hook, the mid-turn read): the inactive it stood for is gone.
     if (prevState === 'unknown' && newState !== 'unknown') this.unreadInactive.delete(tabId);
+    if (newState !== 'inactive') this.probeInactive.delete(tabId);
     entry.cliState = newState;
     entry.startupPrompt = newState === 'startup-prompt' ? opts.startupPrompt ?? null : null;
     // The agent process is gone: its halt went with it, and a resume would be typed into its shell.
@@ -4139,6 +4163,7 @@ export class StatusManager {
     this.stuckNudgedTabs.delete(tabId);
     this.inactiveSince.delete(tabId);
     this.unreadInactive.delete(tabId);
+    this.probeInactive.delete(tabId);
     this.jobEventAt.delete(tabId);
     this.clearBackoffResume(tabId);
     this.outages.forget(tabId);

@@ -128,7 +128,9 @@ await Promise.all([
 
 const scanBackoff = () => (globalThis as unknown as { __ptRemoteScanBackoff?: Map<string, number> }).__ptRemoteScanBackoff;
 const paneLine = (session: string, command: string, pid = '4242'): string => `${session}\t${command}\t/home/user\t${pid}\t1794200000\n`;
-const pane = (command: string): TReply => ({ stdout: paneLine(SESSION, command) });
+/** A scan that ran to its end: tmux exited 0 and the end marker followed its list (PMUX-REMOTE-SEND). */
+const scanned = (lines: string): TReply => ({ stdout: `${lines}@pmux-scan-end\n` });
+const pane = (command: string): TReply => scanned(paneLine(SESSION, command));
 const TIMED_OUT: TReply = { killed: true, code: null, signal: 'SIGTERM' };
 const SSH_255: TReply = { code: 255, stderr: 'kex_exchange_identification: read: Connection reset by peer' };
 const PRESENT: TReply = { stdout: 'present\t%3\t4242\t4300\t918273\n' };
@@ -276,7 +278,7 @@ describe('a remote claude tab and a host that does not answer (vel-D61, ADR-0022
   });
 
   it('an answered scan without the session is absence: inactive, one nudge that names the host and the check', async () => {
-    ssh.scan = () => ({ stdout: '' });
+    ssh.scan = () => scanned('');
     const { entry, inactiveNudges, pollAndSettle } = await createManager('idle');
     await pollAndSettle();
     expect(entry().cliState).toBe('inactive');
@@ -326,7 +328,7 @@ describe('the proofs are bounded and never hold the poll (review r1 F1)', () => 
   it('cache expiry and key change: after 60 s, or when the pane or its command changes, it proves again', async () => {
     let command = 'node';
     let pid = '4242';
-    ssh.scan = () => ({ stdout: paneLine(SESSION, command, pid) });
+    ssh.scan = () => scanned(paneLine(SESSION, command, pid));
     ssh.proof = () => PRESENT;
     const { entry, pollAndSettle } = await createManager('idle');
     await pollAndSettle();
@@ -366,7 +368,7 @@ describe('the proofs are bounded and never hold the poll (review r1 F1)', () => 
     const other = remoteTab('tab-o', 'pt-ws-1-pane-b-tab-o', HOST2);
     const local: ITab = { id: 'tab-local', name: 'local', order: 0, sessionName: LOCAL_SESSION, panelType: 'terminal' };
     state.tabs = [...slow, other, local];
-    ssh.scan = (host) => ({ stdout: host === HOST ? slow.map((t) => paneLine(t.sessionName, 'node')).join('') : paneLine(other.sessionName, 'node') });
+    ssh.scan = (host) => scanned(host === HOST ? slow.map((t) => paneLine(t.sessionName, 'node')).join('') : paneLine(other.sessionName, 'node'));
     const hung: Array<() => void> = [];
     ssh.proof = (session) => (session === other.sessionName ? PRESENT : new Promise<TReply>((resolve) => { hung.push(() => resolve(PRESENT)); }));
     ssh.localPanes = paneLine(LOCAL_SESSION, 'vim', '777');
@@ -403,7 +405,7 @@ describe('the proofs are bounded and never hold the poll (review r1 F1)', () => 
   it('20 tabs on a fast host: all proven in one poll, at most 4 at once, and the next poll asks none (r2 M1)', async () => {
     const tabs = Array.from({ length: 20 }, (_, i) => remoteTab(`tab-f${i}`, `pt-ws-1-pane-a-tab-f${i}`));
     state.tabs = tabs;
-    ssh.scan = (host) => ({ stdout: host === HOST ? tabs.map((t) => paneLine(t.sessionName, 'node')).join('') : '' });
+    ssh.scan = (host) => scanned(host === HOST ? tabs.map((t) => paneLine(t.sessionName, 'node')).join('') : '');
     let running = 0;
     let peak = 0;
     ssh.proof = () => {
@@ -459,7 +461,7 @@ describe('busy remote tabs read their titles from the scan, never one ssh each (
   for (const count of [5, 11]) {
     it(`${count} busy tabs on a slow host that answers its scan: no per-tab ssh, titles from the scan, the local tab read in the same poll`, async () => {
       const tabs = busyFleet(count);
-      ssh.scan = (host) => ({ stdout: host === HOST ? tabs.map((t, i) => titledLine(t.sessionName, `\u2733 task ${i}`)).join('') : '' });
+      ssh.scan = (host) => scanned(host === HOST ? tabs.map((t, i) => titledLine(t.sessionName, `\u2733 task ${i}`)).join('') : '');
       const { manager, entry } = await createManager('busy');
       for (const tab of tabs) entry(tab.id).lastEvent = { name: 'prompt-submit', at: T0, seq: 1 };
       await manager.poll();
@@ -471,7 +473,7 @@ describe('busy remote tabs read their titles from the scan, never one ssh each (
 
     it(`${count} busy tabs on a down host: no per-tab ssh, each keeps its summary, the local tab read in the same poll`, async () => {
       const tabs = busyFleet(count);
-      ssh.scan = (host) => (host === HOST ? TIMED_OUT : { stdout: '' });
+      ssh.scan = (host) => (host === HOST ? TIMED_OUT : scanned(''));
       const { manager, entry } = await createManager('busy');
       for (const tab of tabs) {
         entry(tab.id).lastEvent = { name: 'prompt-submit', at: T0, seq: 1 };
@@ -564,7 +566,7 @@ describe('the readiness probe of a remote tab: one batched capture per host, nev
   it('three inactive remote tabs at an empty composer: one capture ssh for all three, read at the next poll, each tab ready', async () => {
     const tabs = [0, 1, 2].map((i) => remoteTab(`tab-c${i}`, `pt-ws-1-pane-a-tab-c${i}`));
     state.tabs = tabs;
-    ssh.scan = (host) => ({ stdout: host === HOST ? tabs.map((t) => paneLine(t.sessionName, 'claude')).join('') : '' });
+    ssh.scan = (host) => scanned(host === HOST ? tabs.map((t) => paneLine(t.sessionName, 'claude')).join('') : '');
     ssh.capture = captureReply(Object.fromEntries(tabs.map((t) => [t.sessionName, fixture('claude-empty-composer.ansi')])));
     const { manager, entry } = await createManager('inactive');
     await pollAt(manager, 0);
@@ -655,7 +657,7 @@ describe('one poll at a time, coalesced, never wedged (review r1 F1 d, r2 M2 and
     const release: { first: (reply: TReply) => void } = { first: () => {} };
     let held = false;
     ssh.scan = (host) => {
-      if (host !== HOST) return { stdout: '' };
+      if (host !== HOST) return scanned('');
       if (held) return pane('claude');
       held = true;
       return new Promise<TReply>((resolve) => { release.first = resolve; });
@@ -749,7 +751,7 @@ describe('one poll at a time, coalesced, never wedged (review r1 F1 d, r2 M2 and
     await queued;
     expect(hostScans()).toHaveLength(3);
     // The hung scan finally answers "no session" (an absence): the superseded poll must not act on it.
-    release.first({ stdout: '' });
+    release.first(scanned(''));
     await hung;
     expect(entry().cliState).toBe('idle');
   });
@@ -784,7 +786,7 @@ describe('an inactive remote tab and a host that stops answering (PMUX-REMOTE-RE
     expect(entry().cliState).toBe('unknown');
     expect(inactiveNudges()).toEqual([]);
     // The host answers after its scan backoff, with no such session: the agent is still gone.
-    ssh.scan = () => ({ stdout: '' });
+    ssh.scan = () => scanned('');
     vi.setSystemTime(T0 + 31_000);
     await pollAndSettle();
     await vi.waitFor(() => expect(entry().cliState).toBe('inactive'));
@@ -820,5 +822,116 @@ describe('an inactive remote tab and a host that stops answering (PMUX-REMOTE-RE
     const { entry, pollAndSettle } = await createManager('ready-for-review');
     await pollAndSettle();
     expect(entry().cliState).toBe('ready-for-review');
+  });
+});
+
+// PMUX-REMOTE-SEND (2026-11-13): 27 "agent process gone" transitions on remote tabs whose claude ran, while the pool
+// reads of the same hosts ended early. A scan that exits 0 without its end marker is a failed read, never absence.
+describe('a remote scan that ends early is unknown, never absence (PMUX-REMOTE-SEND)', () => {
+  beforeEach(resetWorld);
+  afterEach(() => vi.useRealTimers());
+
+  for (const [label, reply] of [
+    ['an empty read', { stdout: '' }],
+    ['a read cut before the end marker', { stdout: paneLine('pt-ws-1-pane-z-tab-other', 'claude') }],
+    ['a read cut inside a pane line', { stdout: `${paneLine('pt-ws-1-pane-z-tab-other', 'claude')}pt-ws-1-pa` }],
+  ] as const) {
+    it(`${label}: the tab keeps its state, no inactive nudge, and the host backs off`, async () => {
+      ssh.scan = () => reply;
+      const { entry, inactiveNudges, pollAndSettle } = await createManager('idle');
+      await pollAndSettle();
+      expect(entry().cliState).toBe('idle');
+      expect(inactiveNudges()).toEqual([]);
+      expect(scanBackoff()?.get(HOST)).toBeGreaterThan(Date.now());
+    });
+  }
+
+  it('an ssh timeout on the scan: the tab keeps its state and sends no nudge', async () => {
+    ssh.scan = () => TIMED_OUT;
+    const { entry, inactiveNudges, pollAndSettle } = await createManager('ready-for-review');
+    await pollAndSettle();
+    expect(entry().cliState).toBe('ready-for-review');
+    expect(inactiveNudges()).toEqual([]);
+  });
+
+  it('a positive read that lists the host\'s panes without this session: inactive, one nudge', async () => {
+    ssh.scan = () => scanned(paneLine('pt-ws-1-pane-z-tab-other', 'claude'));
+    const { entry, inactiveNudges, pollAndSettle } = await createManager('idle');
+    await pollAndSettle();
+    expect(entry().cliState).toBe('inactive');
+    expect(inactiveNudges()).toHaveLength(1);
+  });
+});
+
+describe('a remote tab read inactive comes back once its agent is proven (PMUX-REMOTE-SEND)', () => {
+  beforeEach(resetWorld);
+  afterEach(() => vi.useRealTimers());
+
+  /** One answered scan without the session moves the tab to inactive; the next answered scan shows its claude. */
+  const misread = async (cliState: TCliState, prepare?: (entry: ITabStatusEntry) => void) => {
+    ssh.scan = () => scanned('');
+    const made = await createManager(cliState);
+    prepare?.(made.entry());
+    await made.pollAndSettle();
+    expect(made.entry().cliState).toBe('inactive');
+    expect(made.inactiveNudges()).toHaveLength(1);
+    ssh.scan = () => pane('claude');
+    vi.setSystemTime(T0 + 30_000);
+    return made;
+  };
+
+  for (const cliState of ['idle', 'ready-for-review'] as const) {
+    it(`a ${cliState} tab returns to ${cliState} at the next answered read, with no second nudge`, async () => {
+      const { entry, inactiveNudges, pollAndSettle } = await misread(cliState);
+      await pollAndSettle();
+      expect(entry().cliState).toBe(cliState);
+      expect(inactiveNudges()).toHaveLength(1);
+    });
+  }
+
+  it('a busy tab mid-turn returns to busy (its turn is still open)', async () => {
+    const { entry, pollAndSettle } = await misread('busy', (e) => {
+      e.lastEvent = { name: 'prompt-submit', at: T0 - 60_000, seq: 1 };
+    });
+    await pollAndSettle();
+    expect(entry().cliState).toBe('busy');
+  });
+
+  it('a foreground the scan does not know is proven on the host first: present restores, absent keeps inactive', async () => {
+    const { entry, pollAndSettle } = await misread('idle');
+    ssh.scan = () => pane('2.1.319');
+    ssh.proof = () => ABSENT;
+    await pollAndSettle();
+    vi.setSystemTime(T0 + 60_000);
+    await pollAndSettle();
+    expect(entry().cliState).toBe('inactive');
+    ssh.proof = () => PRESENT;
+    vi.setSystemTime(T0 + 120_000);
+    await pollAndSettle();
+    vi.setSystemTime(T0 + 150_000);
+    await pollAndSettle();
+    expect(entry().cliState).toBe('idle');
+  });
+
+  it('a host that times out after the misread restores nothing until it answers', async () => {
+    const { entry, pollAndSettle } = await misread('idle');
+    ssh.scan = () => TIMED_OUT;
+    await pollAndSettle();
+    expect(entry().cliState).not.toBe('idle');
+  });
+
+  it('an agent relaunched in the pane is a new agent: no restore of the old state', async () => {
+    const { entry, pollAndSettle } = await misread('ready-for-review');
+    entry().lastResumeOrStartedAt = T0;
+    await pollAndSettle();
+    expect(entry().cliState).not.toBe('ready-for-review');
+  });
+
+  it('an event after the misread decides the state, not the restore', async () => {
+    const { manager, entry, pollAndSettle } = await misread('idle');
+    (manager as unknown as { updateTabFromHook: (s: string, e: string) => void }).updateTabFromHook(SESSION, 'prompt-submit');
+    expect(entry().cliState).toBe('busy');
+    await pollAndSettle();
+    expect(entry().cliState).toBe('busy');
   });
 });

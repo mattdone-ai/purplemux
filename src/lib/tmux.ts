@@ -793,13 +793,35 @@ interface IRemoteScan {
   answered: boolean;
 }
 
+/**
+ * The last line of a remote scan that ran to its end. tmux prints it only after a list that exited 0, so a read
+ * that ssh ended early (the pool read's "no @end marker", 2026-11-13) is a failed read, never a host without panes.
+ */
+export const REMOTE_SCAN_END = '@pmux-scan-end';
+
+const remoteScanCommand = (): string =>
+  `${remoteTmuxCommand(['list-panes', '-a', '-F', ALL_PANES_FORMAT])} && echo ${REMOTE_SCAN_END}`;
+
+/** The panes of a scan that ran to its end marker; null when the read ended before it. */
+export const parseRemoteScan = (stdout: string, host: string): Map<string, IPaneInfo> | null => {
+  const lines = stdout.trimEnd().split('\n');
+  if (lines.at(-1)?.trim() !== REMOTE_SCAN_END) return null;
+  return parsePanes(lines.slice(0, -1).join('\n'), host);
+};
+
 /** A host that does not answer contributes nothing: its tabs read as not running, never as local. */
 const remotePanes = async (host: string): Promise<IRemoteScan> => {
   if ((scanBackoff.get(host) ?? 0) > Date.now()) return { panes: new Map(), answered: false };
   try {
-    const { stdout } = await runSsh(host, remoteTmuxCommand(['list-panes', '-a', '-F', ALL_PANES_FORMAT]), { timeoutMs: CMD_TIMEOUT });
+    const { stdout } = await runSsh(host, remoteScanCommand(), { timeoutMs: CMD_TIMEOUT });
+    const panes = parseRemoteScan(stdout, host);
+    if (!panes) {
+      scanBackoff.set(host, Date.now() + REMOTE_SCAN_BACKOFF_MS);
+      log.warn({ host, bytes: stdout.length }, 'remote pane scan ended early (no end marker); host unknown, skipped for 30 s');
+      return { panes: new Map(), answered: false };
+    }
     scanBackoff.delete(host);
-    return { panes: parsePanes(stdout, host), answered: true };
+    return { panes, answered: true };
   } catch (err) {
     if (isTmuxAbsence(err)) {
       scanBackoff.delete(host);

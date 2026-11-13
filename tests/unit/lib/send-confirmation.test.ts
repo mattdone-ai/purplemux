@@ -342,3 +342,81 @@ describe('submitConfirmDeadlineMs (review r1 F2)', () => {
     expect(elapsed).toBe(30_000);
   });
 });
+
+// PMUX-REMOTE-SEND (2026-11-13): 16 remote briefs sat typed in the composer for up to 6 h; one Enter each submitted them.
+describe('confirmSubmission on a remote tab (PMUX-REMOTE-SEND)', () => {
+  const REMOTE = { remote: true, screenEmptyAtGate: false } as const;
+  const SUBMITTED = evidence({ cliState: 'busy', eventSeq: 8, lastPromptSubmitSeq: 8 });
+  const OPTION_LIST = 'Do you want to proceed?\n❯ 1. Yes\n  2. No\n';
+
+  it('presses one Enter for text on the composer line the gate did not see empty, and confirms on the hook', async () => {
+    const { result, enters } = await run({
+      panes: [PLACEHOLDER],
+      request: REMOTE,
+      afterEnter: { evidence: [SUBMITTED], panes: [EMPTY] },
+    });
+
+    expect(enters).toEqual([SUBMIT_RETRY_AFTER_MS]);
+    expect(result).toEqual({ submitted: true, confirmation: 'prompt-submit', resubmitted: true });
+  });
+
+  it('takes the composer clearing after it showed the text as proof when no hook crosses', async () => {
+    const { result } = await run({
+      panes: [PLACEHOLDER],
+      request: REMOTE,
+      afterEnter: { panes: [EMPTY] },
+    });
+
+    expect(result).toEqual({ submitted: true, confirmation: 'composer-empty', resubmitted: true });
+  });
+
+  it('takes a composer that cleared on its own after the text as proof, with no extra Enter', async () => {
+    const { result, enters } = await run({ panes: [STRANDED, EMPTY], request: REMOTE });
+
+    expect(enters).toEqual([]);
+    expect(result).toEqual({ submitted: true, confirmation: 'composer-empty', resubmitted: false });
+  });
+
+  it('a composer that never showed the text is no proof, and gets no Enter', async () => {
+    const { result, enters, elapsed } = await run({ panes: [EMPTY], request: REMOTE });
+
+    expect(enters).toEqual([]);
+    expect(elapsed).toBe(SUBMIT_CONFIRM_REMOTE_MS);
+    expect(result).toEqual({ submitted: false, notSubmitted: 'submit-unconfirmed', resubmitted: false });
+  });
+
+  it('never presses Enter on an option list or a failed capture', async () => {
+    for (const pane of [OPTION_LIST, null]) {
+      const { result, enters } = await run({ panes: [pane], request: REMOTE });
+
+      expect(enters).toEqual([]);
+      expect(result).toEqual({ submitted: false, notSubmitted: 'submit-unconfirmed', resubmitted: false });
+    }
+  });
+
+  it('text that stays after the one Enter: typed-not-submitted, and the text is never typed again', async () => {
+    const { result, enters } = await run({ panes: [PLACEHOLDER], request: REMOTE });
+
+    expect(enters).toHaveLength(1);
+    expect(result).toEqual({ submitted: false, notSubmitted: 'typed-not-submitted', resubmitted: true });
+  });
+
+  it('text first seen at the deadline: Enter there, then one more look before the answer', async () => {
+    const reads = Math.ceil(SUBMIT_CONFIRM_REMOTE_MS / SUBMIT_CONFIRM_POLL_MS);
+    const { result, enters, elapsed } = await run({
+      panes: [...Array<string>(reads).fill(EMPTY), PLACEHOLDER],
+      request: REMOTE,
+      afterEnter: { evidence: [SUBMITTED] },
+    });
+
+    expect(enters).toEqual([SUBMIT_CONFIRM_REMOTE_MS]);
+    expect(elapsed).toBe(SUBMIT_CONFIRM_REMOTE_MS + SUBMIT_RETRY_AFTER_MS);
+    expect(result).toEqual({ submitted: true, confirmation: 'prompt-submit', resubmitted: true });
+  });
+
+  it('a local tab keeps its rule: an empty composer after the text is no proof on a hook tab', async () => {
+    const { result } = await run({ panes: [STRANDED, EMPTY] });
+
+    expect(result).toMatchObject({ submitted: false, notSubmitted: 'submit-unconfirmed' });
+  });
+});
