@@ -59,6 +59,18 @@ scratch `CLAUDE_CONFIG_DIR` (onboarding marked done, no credentials) in a scratc
 
 The three 2026-11-04 incidents (ws-zOfVyu D14, hfl-37, hfl-38) kept no capture; these were made to stand for them.
 
+### `panes/claude-composer-*` (a typed brief that was not submitted, PMUX-SEND-R3)
+
+Real `tmux capture-pane -p -e` captures of Claude Code **2.1.323** on 2026-11-14, each after a neutral synthetic brief
+was typed the way `sendTypedText` types it (200-character chunks 10 ms apart, Ctrl+J for each newline) and not
+submitted. The cwd on the banner row is replaced with `~/project`. Each `.typed.txt` beside a capture is the text typed.
+
+| Fixture | Covers |
+|---|---|
+| `claude-composer-wrapped-80x24.ansi` | a wrapped brief taller than the box: the box shows its middle, `❯` + U+00A0 on that first visible row |
+| `claude-composer-numbered-80x24.ansi` | a numbered brief whose box opens on `❯ 1. …`, which the r2 list guard read as a picker |
+| `claude-composer-numbered-240x16.ansi` | the same at 240x16 (a short remote pane): the box opens on `❯ 3. …` |
+
 ## `mission-questions/`
 
 `owner-steps.json` is the tuning set of the owner-steps lint (vel-MC-ACT, `ownerStepsLint` in

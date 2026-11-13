@@ -1,7 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 import { describe, expect, it, vi } from 'vitest';
-import { checkComposerReady, paneShowsEmptyComposer, paneStartupPrompt } from '@/lib/composer-readiness';
+import {
+  SENT_TEXT_MIN_MATCH,
+  checkComposerReady,
+  composerHoldsSentText,
+  paneShowsEmptyComposer,
+  paneStartupPrompt,
+  showsSubmittableComposer,
+} from '@/lib/composer-readiness';
 import type { TCliState } from '@/types/timeline';
 
 const EMPTY = 'done\n────────\n❯ \n────────\n';
@@ -190,5 +197,79 @@ describe('paneStartupPrompt (story 05, D14)', () => {
     const { result, capture } = check('startup-prompt', { pane: pane('claude-trust-prompt.ansi') });
     expect(await result).toEqual({ ok: false, reason: 'composer-not-ready:startup-prompt' });
     expect(capture).not.toHaveBeenCalled();
+  });
+});
+
+// PMUX-SEND-R3: real Claude Code 2.1.323 captures of a typed brief that was not submitted (tests/fixtures/README.md).
+describe('composerHoldsSentText (PMUX-SEND-R3)', () => {
+  const fixture = (name: string): string => fs.readFileSync(path.resolve('tests/fixtures/panes', name), 'utf-8');
+  const typed = (name: string): string => fixture(name.replace(/\.ansi$/, '.typed.txt'));
+  const RULE = '─'.repeat(60);
+  const framed = (...rows: string[]): string => ['● Earlier output', '', RULE, ...rows, RULE, '  ⏵⏵ bypass permissions on'].join('\n');
+  const BRIEF = 'Read the sources and the tests before any change, then measure the head of each row and record it.';
+
+  for (const name of ['claude-composer-wrapped-80x24.ansi', 'claude-composer-numbered-80x24.ansi', 'claude-composer-numbered-240x16.ansi']) {
+    it(`reads the typed brief in the box of ${name}`, () => {
+      expect(composerHoldsSentText('claude-code', fixture(name), typed(name))).toBe(true);
+    });
+
+    it(`reads no other brief in the box of ${name}`, () => {
+      expect(composerHoldsSentText('claude-code', fixture(name), BRIEF)).toBe(false);
+    });
+  }
+
+  it('the numbered boxes are the shape the r2 list guard refused, and the wrapped one is not', () => {
+    expect(showsSubmittableComposer('claude-code', fixture('claude-composer-numbered-80x24.ansi'))).toBe(false);
+    expect(showsSubmittableComposer('claude-code', fixture('claude-composer-numbered-240x16.ansi'))).toBe(false);
+    expect(showsSubmittableComposer('claude-code', fixture('claude-composer-wrapped-80x24.ansi'))).toBe(true);
+  });
+
+  it('the wrapped box opens in the middle of the brief, so its first line is not on screen', () => {
+    const plain = fixture('claude-composer-wrapped-80x24.ansi').replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+    const firstLine = typed('claude-composer-wrapped-80x24.ansi').split('\n')[0];
+
+    expect(plain).toContain('❯\u00a0');
+    expect(plain).not.toContain(firstLine.slice(0, 30));
+  });
+
+  it('joins a word the box wrapped mid-word, after a no-break space prompt', () => {
+    expect(composerHoldsSentText('claude-code', framed('❯\u00a0Read the sources and the tests before any change, then meas', '  ure the head'), BRIEF)).toBe(true);
+  });
+
+  it('refuses a window shorter than the floor, and takes a short text whole', () => {
+    const tooShort = BRIEF.slice(BRIEF.length - (SENT_TEXT_MIN_MATCH - 1));
+
+    expect(composerHoldsSentText('claude-code', framed(`❯ ${tooShort}`), BRIEF)).toBe(false);
+    expect(composerHoldsSentText('claude-code', framed('❯ ok, go on'), 'ok, go on')).toBe(true);
+  });
+
+  it('takes the whole text with a draft beside it, but never a short text inside a list', () => {
+    expect(composerHoldsSentText('claude-code', framed('❯ a draft of my own', `  ${BRIEF}`), BRIEF)).toBe(true);
+    expect(composerHoldsSentText('claude-code', framed('❯ 1. Red', '  2. Green', '  3. Blue'), 'Red')).toBe(false);
+    expect(composerHoldsSentText('claude-code', framed('❯ 1. a draft', `  2. ${BRIEF}`), BRIEF)).toBe(false);
+  });
+
+  it('keeps the list guard on every row outside the box', () => {
+    const menuAbove = ['Pick one', '❯ 1. Review them first', '  2. Commit now', RULE, `❯ ${BRIEF}`, RULE].join('\n');
+
+    expect(composerHoldsSentText('claude-code', menuAbove, BRIEF)).toBe(false);
+  });
+
+  it('reads no text in a real AskUserQuestion menu, whose rules frame the options', () => {
+    const dir = path.resolve('tests/fixtures/ask-user-question');
+    for (const name of fs.readdirSync(dir).filter((file) => file.endsWith('.txt'))) {
+      const pane = fs.readFileSync(path.join(dir, name), 'utf-8');
+
+      expect(composerHoldsSentText('claude-code', pane, 'Red')).toBe(false);
+      expect(composerHoldsSentText('claude-code', pane, BRIEF)).toBe(false);
+    }
+  });
+
+  it('needs the frame: a cut capture, an empty box or another agent reads false', () => {
+    expect(composerHoldsSentText('claude-code', ['● Earlier output', '', `❯ ${BRIEF}`].join('\n'), BRIEF)).toBe(false);
+    expect(composerHoldsSentText('claude-code', framed('❯\u00a0'), BRIEF)).toBe(false);
+    expect(composerHoldsSentText('claude-code', [RULE, 'not the composer', BRIEF, RULE].join('\n'), BRIEF)).toBe(false);
+    expect(composerHoldsSentText('codex-cli', framed(`❯ ${BRIEF}`), BRIEF)).toBe(false);
+    expect(composerHoldsSentText('claude-code', null, BRIEF)).toBe(false);
   });
 });

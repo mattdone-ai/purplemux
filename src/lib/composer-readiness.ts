@@ -165,6 +165,58 @@ export const showsSubmittableComposer = (panelType: TPanelType | undefined, capt
   return panelType !== 'claude-code' || claudeComposerFramed(tail(plain, COMPOSER_SCAN_LINES).split('\n'));
 };
 
+/**
+ * A Claude composer frame: the rows from the last rule but one down to the last rule, the first row the `❯` line.
+ * `box` is what the input box holds; `outside` is every other row of the read, in order, rules kept.
+ */
+interface IClaudeComposerFrame {
+  box: string[];
+  outside: string[];
+}
+
+const claudeComposerFrame = (lines: string[]): IClaudeComposerFrame | null => {
+  const bottom = lines.findLastIndex((line) => COMPOSER_RULE.test(line));
+  if (bottom < 0) return null;
+  const top = lines.slice(0, bottom).findLastIndex((line) => COMPOSER_RULE.test(line));
+  if (top < 0 || top + 1 >= bottom || !COMPOSER_LINE.test(lines[top + 1])) return null;
+  return { box: lines.slice(top + 1, bottom), outside: [...lines.slice(0, top + 1), ...lines.slice(bottom)] };
+};
+
+/** Text as the sender typed it, compared without any whitespace (a wrap, an indent, a no-break space) or control character. */
+const squashText = (text: string): string => text.replace(/[\x00-\x1f\x7f]/g, '').replace(/[\s\u00a0]+/g, '');
+
+/** The shortest box that counts as the send's own text, unless the whole text is shorter. */
+export const SENT_TEXT_MIN_MATCH = 24;
+
+/**
+ * Whether a Claude input box holds the text a send typed (PMUX-SEND-R3). The box shows a window of a long brief, wrapped
+ * and indented, with `❯` and a no-break space (U+00A0) on its first visible row, which is often the middle of the text.
+ * So the rows are joined and every whitespace dropped, on both sides. The box counts when it is a window of the sent
+ * text, at {@link SENT_TEXT_MIN_MATCH} characters or the whole text, or when it holds all of a sent text that long
+ * and its rows are no list.
+ *
+ * The box's own rows are the send's text, never a list: measured on Claude Code 2.1.323, a numbered brief scrolled to
+ * `❯ 3. …` read as a picker to the r2 guard, and the extra Enter never fired. Every row outside the box keeps that guard.
+ * Only Claude draws this frame; any other agent reads false.
+ */
+export const composerHoldsSentText = (panelType: TPanelType | undefined, captured: string | null, content: string): boolean => {
+  if (panelType !== 'claude-code' || !captured) return false;
+  const frame = claudeComposerFrame(tail(paneAsSeen(panelType, captured), COMPOSER_SCAN_LINES).split('\n'));
+  if (!frame) return false;
+  const rest = tail(frame.outside.join('\n'));
+  if (parsePermissionOptions(rest).options.length > 0 || parseChoiceOptions(rest).options.length > 0) return false;
+  const sent = squashText(content);
+  const box = squashText(frame.box.join('\n').replace(/^[ \t]*❯/, ''));
+  if (box.length === 0) return false;
+  // A window of the sent text, and nothing else: the box rows are the send's own, whatever they look like.
+  if (sent.includes(box)) return box.length >= Math.min(SENT_TEXT_MIN_MATCH, sent.length);
+  // The whole sent text and more (a draft beside it): never a short text, which a menu's option could hold, and never
+  // a box that reads as a list.
+  const boxRows = frame.box.join('\n');
+  return sent.length >= SENT_TEXT_MIN_MATCH && box.includes(sent)
+    && parsePermissionOptions(boxRows).options.length === 0 && parseChoiceOptions(boxRows).options.length === 0;
+};
+
 export type TComposerReadiness = { ok: true } | { ok: false; reason: string };
 
 export type TComposerScreenRefusal = 'composer-unreadable' | 'interactive-prompt-active' | 'composer-not-empty';

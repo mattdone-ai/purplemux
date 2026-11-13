@@ -1,0 +1,4 @@
+Ticket SEND-WRAP: the receiver reads every open row and reports each one.
+Facts: the first look found three rows that did not move, and the second look found that two of them moved and one did not. Read the sources and the tests before any change, then measure the head of each row and whether it moved since the last look, and record it with the time.
+Rules: own worktree and a new branch off main. Run the full gate at the committed head and keep its log. Do not push.
+End: DONE: send-wrap <head> | BLOCKED: <why>.
