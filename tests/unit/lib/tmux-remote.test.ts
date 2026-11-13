@@ -148,12 +148,22 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect((await observeRemoteProviderProcess(REMOTE, 'claude')).state).toBe('unknown');
   });
 
+  it('a process proof that ssh cut short or timed out is unknown, never absent (PMUX-REMOTE-SEND)', async () => {
+    const { observeRemoteProviderProcess } = await import('@/lib/tmux');
+    for (const stdout of ['', 'abs', 'present\t%3\t4100', 'unknown\ttmux failed\n']) {
+      replies.fn = () => ({ stdout });
+      expect((await observeRemoteProviderProcess(REMOTE, 'claude')).state).toBe('unknown');
+    }
+    replies.fn = () => ({ code: null as unknown as number, stderr: '' });
+    expect((await observeRemoteProviderProcess(REMOTE, 'claude')).state).toBe('unknown');
+  });
+
   it('each scan carries the hosts it read: two concurrent scans, one failing, never read each other\'s answer (review r4)', async () => {
     let n = 0;
     replies.fn = (cmd) => {
       if (cmd === 'tmux') return { stdout: '' };
       n += 1;
-      return n === 1 ? { code: 255, stderr: 'ssh: connect to host host-b port 22: Connection timed out' } : { stdout: `${REMOTE}\tclaude\t/home/r\t999\t7\n` };
+      return n === 1 ? { code: 255, stderr: 'ssh: connect to host host-b port 22: Connection timed out' } : { stdout: `${REMOTE}\tclaude\t/home/r\t999\t7\n@pmux-scan-end\n` };
     };
     const { getAllPanesInfo } = await import('@/lib/tmux');
     const [failed, answered] = await Promise.all([getAllPanesInfo(), getAllPanesInfo()]);
@@ -210,13 +220,42 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
   it('merges the remote panes into the pane map with pid 0 and the host', async () => {
     replies.fn = (cmd) => cmd === 'tmux'
       ? { stdout: `${LOCAL}\tbash\t/home/l\t111\t5\n` }
-      : { stdout: `${REMOTE}\tclaude\t/home/r\t999\t7\nnot-ours\tbash\t/\t1\t1\n` };
+      : { stdout: `${REMOTE}\tclaude\t/home/r\t999\t7\nnot-ours\tbash\t/\t1\t1\n@pmux-scan-end\n` };
     const { getAllPanesInfo } = await import('@/lib/tmux');
     const panes = await getAllPanesInfo();
     expect(panes.get(LOCAL)).toEqual({ command: 'bash', path: '/home/l', pid: 111, windowActivity: 5 });
     // paneRef is the remote pane pid as text, an opaque proof-cache identity (vel-D61), never a local pid.
     expect(panes.get(REMOTE)).toEqual({ command: 'claude', path: '/home/r', pid: 0, windowActivity: 7, host: hostOf.map.get(REMOTE), paneRef: '999' });
     expect(panes.has('not-ours')).toBe(false);
+  });
+
+  // PMUX-REMOTE-SEND: a scan that ssh ended early is a failed read; a session missing from it is unknown, never gone.
+  it('a scan that exits 0 without its end marker is not an answer: no host read, no remote panes', async () => {
+    for (const stdout of ['', `${REMOTE}\tclaude\t/home/r\t999\t7\n`, `${REMOTE}\tclaude\t/ho`]) {
+      scanBackoff()?.clear();
+      replies.fn = (cmd) => cmd === 'tmux' ? { stdout: `${LOCAL}\tbash\t/home/l\t111\t5\n` } : { stdout };
+      const { getAllPanesInfo } = await import('@/lib/tmux');
+      const panes = await getAllPanesInfo();
+      expect([...(panes.answeredRemoteHosts ?? [])]).toEqual([]);
+      expect([...panes.keys()]).toEqual([LOCAL]);
+    }
+  });
+
+  it('the scan asks tmux for the end marker only after a list that exited 0', async () => {
+    replies.fn = (cmd) => cmd === 'tmux' ? { stdout: '' } : { stdout: '@pmux-scan-end\n' };
+    const { getAllPanesInfo } = await import('@/lib/tmux');
+    const panes = await getAllPanesInfo();
+    expect([...(panes.answeredRemoteHosts ?? [])]).toEqual(['host-b']);
+    const scan = calls.list.find((c) => c.cmd === 'ssh' && remoteCommand(c).includes("'list-panes' '-a'"));
+    expect(remoteCommand(scan!)).toMatch(/' && echo @pmux-scan-end$/);
+  });
+
+  it('parseRemoteScan: the panes before the marker, null without it', async () => {
+    const { parseRemoteScan } = await import('@/lib/tmux');
+    expect(parseRemoteScan(`${REMOTE}\tclaude\t/home/r\t999\t7\n@pmux-scan-end\n`, 'host-b')?.get(REMOTE)?.command).toBe('claude');
+    expect(parseRemoteScan('@pmux-scan-end', 'host-b')?.size).toBe(0);
+    expect(parseRemoteScan(`${REMOTE}\tclaude\t/home/r\t999\t7\n`, 'host-b')).toBeNull();
+    expect(parseRemoteScan('@pmux-scan-end\npt-x\tclaude\t/\t1\t1\n', 'host-b')).toBeNull();
   });
 
   it('an unreachable host leaves only the local panes', async () => {

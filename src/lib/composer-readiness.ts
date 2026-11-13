@@ -1,4 +1,4 @@
-import { parsePermissionOptions } from '@/lib/permission-prompt';
+import { parseChoiceOptions, parsePermissionOptions } from '@/lib/permission-prompt';
 import { renderPaneResult } from '@/lib/pane-suggestions';
 import type { IClientTabStatusEntry } from '@/types/status';
 import type { TComposerReading } from '@/types/fleet-status';
@@ -139,6 +139,30 @@ export const readComposer = (panelType: TPanelType | undefined, captured: string
     if (match) return (match[1] ?? '').trim() === '' ? 'empty' : 'text';
   }
   return 'unreadable';
+};
+
+/** A Claude composer frame line: the rule drawn above and below the input box. */
+const COMPOSER_RULE = /^[ \t]*─{8,}[ \t]*$/;
+
+/** The bottom-most composer line of a Claude pane sits directly under a rule, with a rule somewhere below it. */
+const claudeComposerFramed = (lines: string[]): boolean => {
+  const index = lines.findLastIndex((line) => COMPOSER_LINE.test(line));
+  return index > 0 && COMPOSER_RULE.test(lines[index - 1]) && lines.slice(index + 1).some((line) => COMPOSER_RULE.test(line));
+};
+
+/**
+ * Whether the screen shows an input box that an Enter a send presses on its own can only submit (PMUX-REMOTE-SEND r2).
+ * Any selectable list in view refuses, not only the Yes/No dialogs {@link readComposer} knows: an AskUserQuestion
+ * menu or a picker shows its focused option as `❯ 1. …`, which an Enter would choose. A Claude composer counts only
+ * inside its frame of rules, so an unnumbered picker, or a capture cut above the input box whose transcript shows
+ * `❯ <message>`, never reads as typed text.
+ */
+export const showsSubmittableComposer = (panelType: TPanelType | undefined, captured: string | null): boolean => {
+  if (!captured) return false;
+  const plain = paneAsSeen(panelType, captured);
+  const recent = tail(plain);
+  if (parsePermissionOptions(recent).options.length > 0 || parseChoiceOptions(recent).options.length > 0) return false;
+  return panelType !== 'claude-code' || claudeComposerFramed(tail(plain, COMPOSER_SCAN_LINES).split('\n'));
 };
 
 export type TComposerReadiness = { ok: true } | { ok: false; reason: string };

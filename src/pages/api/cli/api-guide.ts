@@ -582,8 +582,12 @@ POST /api/cli/tabs/<tabId>/send?workspaceId=WS
   screen gate waits at least two of the host's ssh budgets, so one slow capture is never the answer.
   The send waits for its proof outside the tab's dispatch lock, so the agent's hooks apply, and inside
   the tab's send gate, so no other dispatch types into the tab until the send answers.
-  confirmation "composer-empty" counts only for a tab with no prompt-submit hook. Text still in the
-  composer at 1.5 s gets ONE more Enter (resubmitted: true). Without proof, submitted is false and
+  confirmation "composer-empty" counts for a tab with no prompt-submit hook, and for a remote tab
+  whose composer showed the text after the typing and then read empty. Text still in the composer at
+  1.5 s gets ONE more Enter (resubmitted: true); on a remote tab any text on the composer line does.
+  No extra Enter on any selectable list (a dialog, a menu, a picker), on an unreadable screen, or on a
+  Claude screen without its framed input box. An Enter still due at the deadline is pressed there
+  and the tab is read once more before the answer. Without proof, submitted is false and
   notSubmitted names why: typed-not-submitted (the text is still in the composer) or
   submit-unconfirmed (no turn seen, the screen proves nothing). The CLI then exits 1. The text was
   typed, so never resend it: a resend types it twice. A terminal tab has no turn: "submitted" reads
