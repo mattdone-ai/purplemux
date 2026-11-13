@@ -420,3 +420,70 @@ describe('confirmSubmission on a remote tab (PMUX-REMOTE-SEND)', () => {
     expect(result).toMatchObject({ submitted: false, notSubmitted: 'submit-unconfirmed' });
   });
 });
+
+// PMUX-REMOTE-SEND r2 (CONFIRM concern): a menu that is not a Yes/No dialog shows its focused option as `❯ 1. …`,
+// which read as composer text, so the remote extra Enter chose it and the "seen text" proof could be faked by it.
+describe('confirmSubmission never presses Enter into a selectable list (PMUX-REMOTE-SEND r2)', () => {
+  const REMOTE = { remote: true, screenEmptyAtGate: false } as const;
+  const ASK_USER_QUESTION = [
+    '● I need one decision before I go on.',
+    '',
+    ' ☐ Changes',
+    '',
+    'How should I handle the uncommitted changes?',
+    '',
+    '❯ 1. Review them first',
+    '     Read both diffs and explain what changed.',
+    '  2. Commit now',
+    '     Write an English commit message and commit.',
+    '  3. Leave them',
+    '  4. Type something.',
+    RULE,
+    '  5. Chat about this',
+    '',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+  ].join('\n');
+  const THEME_PICKER = fs.readFileSync(path.resolve('tests/fixtures/panes/claude-onboarding-theme.ansi'), 'utf-8');
+  const UNNUMBERED_PICKER = [
+    'Resume a conversation',
+    '',
+    '❯ Fix the remote send verification',
+    '  Review the pool read',
+    '  Draft the release notes',
+  ].join('\n');
+  /** The bottom of the screen did not arrive: the transcript's user message is the last `❯` line. */
+  const CUT_CAPTURE = ['● Earlier output of the agent', '', `❯ ${BRIEF.split('\n')[0]}`, '', '● Working on it'].join('\n');
+
+  for (const [label, pane] of [
+    ['an AskUserQuestion menu', ASK_USER_QUESTION],
+    ['a theme picker', THEME_PICKER],
+    ['an unnumbered picker', UNNUMBERED_PICKER],
+    ['a capture cut above the input box', CUT_CAPTURE],
+  ] as const) {
+    it(`${label} on a remote tab: no extra Enter, no proof, unconfirmed`, async () => {
+      const { result, enters } = await run({ panes: [pane], request: REMOTE });
+
+      expect(enters).toEqual([]);
+      expect(result).toEqual({ submitted: false, notSubmitted: 'submit-unconfirmed', resubmitted: false });
+    });
+
+    it(`${label} on a local tab whose gate saw an empty composer: no extra Enter`, async () => {
+      const { enters } = await run({ panes: [pane] });
+
+      expect(enters).toEqual([]);
+    });
+  }
+
+  it('a menu followed by an empty composer is no proof: the menu was never the send\'s text', async () => {
+    const { result } = await run({ panes: [ASK_USER_QUESTION, EMPTY], request: REMOTE });
+
+    expect(result).toEqual({ submitted: false, notSubmitted: 'submit-unconfirmed', resubmitted: false });
+  });
+
+  it('a brief that starts with a numbered list reads as a list: refused, never a wrong Enter', async () => {
+    const numbered = ['● Earlier output', '', RULE, '❯ 1. Read the logs', '  2. Fix the probe', RULE, '  ⏵⏵ bypass permissions on'].join('\n');
+    const { enters } = await run({ panes: [numbered], request: REMOTE });
+
+    expect(enters).toEqual([]);
+  });
+});

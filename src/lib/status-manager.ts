@@ -268,6 +268,22 @@ const AGENT_GUARDED_STATES: Set<TCliState> = new Set(['busy', 'idle', 'needs-inp
 const SHELL_TITLE_RE = /^[^|]+\|[^|]+$/;
 
 const PROCESS_RETRY_COUNT = 3;
+
+/**
+ * The states a misread inactive gives back (PMUX-REMOTE-SEND r2). A resting tab only: a turn, a question or a dialog
+ * goes to the pane probe and the transcript, which read what the agent shows now.
+ */
+const MISREAD_RESTORABLE: ReadonlySet<TCliState> = new Set<TCliState>(['idle', 'ready-for-review']);
+/** After this, a misread inactive is not given back: a hand relaunch whose hooks did not cross would get stale state. */
+export const MISREAD_RESTORE_WINDOW_MS = 10 * 60_000;
+
+interface IProbeInactive {
+  prevState: TCliState;
+  readyForReviewAt: number | null;
+  seq: number | undefined;
+  launch: number | undefined;
+  at: number;
+}
 /**
  * A tab announced as closing (`tab-closing`) is retired for this long, or until
  * its `tab-closed` or `aborted` event: a close reaps within seconds. A closed
@@ -436,10 +452,10 @@ export class StatusManager {
   /** Remote tabs moved from inactive to unknown because their host did not answer (fix 3), with when they went inactive. */
   private readonly unreadInactive = new Map<string, number | null>();
   /**
-   * Remote tabs the process probe moved to inactive, with the state, event and launch it found them at
-   * (PMUX-REMOTE-SEND). A later answered read that proves the same agent still runs gives that state back.
+   * Remote tabs the process probe moved to inactive from a resting state, with what they showed then
+   * (PMUX-REMOTE-SEND). A later answered read that proves the agent still runs gives that state back.
    */
-  private readonly probeInactive = new Map<string, { prevState: TCliState; seq: number | undefined; launch: number | undefined }>();
+  private readonly probeInactive = new Map<string, IProbeInactive>();
   /** Fleet outage mode (PMUX-REMOTE-RESILIENCE fix 2): N tabs failing with one key hold every such tab. */
   private readonly outages = new ProviderOutageTracker();
   /** A rate-limited tab's pending backoff resume. */
@@ -1462,13 +1478,13 @@ export class StatusManager {
         // pane, with no event and no launch since. Nothing changed but the reading: the tab gets its state back.
         const probedGone = tab.host && !paneUnread ? this.probeInactive.get(tab.id) : undefined;
         if (probedGone && existing.cliState === 'inactive') {
-          if (existing.eventSeq !== probedGone.seq || existing.lastResumeOrStartedAt !== probedGone.launch) {
+          if (existing.eventSeq !== probedGone.seq || existing.lastResumeOrStartedAt !== probedGone.launch
+              || now - probedGone.at > MISREAD_RESTORE_WINDOW_MS) {
             this.probeInactive.delete(tab.id);
           } else if ((await agentRunningNow()) === true) {
+            current();
             log.info({ tabId: tab.id, host: tab.host, state: probedGone.prevState }, 'remote agent proven present again — inactive was a misread, state restored');
-            this.applyCliState(tab.id, existing, probedGone.prevState, { silent: true, nudge: null });
-            this.persistToLayout(existing);
-            this.broadcastUpdate(tab.id, existing);
+            this.restoreMisreadInactive(tab.id, existing, probedGone);
             continue;
           }
         }
@@ -1508,11 +1524,16 @@ export class StatusManager {
             if ((!title || titleShellStyle) && (await agentRunningNow()) === false) {
               log.info({ tabId: tab.id, prevState: existing.cliState, host: tab.host }, 'agent process gone — transitioning to inactive');
               const prevState = existing.cliState;
+              const prevReadyForReviewAt = existing.readyForReviewAt ?? null;
               this.applyCliState(tab.id, existing, 'inactive', {
                 silent: true,
                 ...(tab.host ? { nudge: { kind: 'inactive' as const, detail: remoteInactiveDetail(tab.host, ws.id, tab.id) } } : {}),
               });
-              if (tab.host) this.probeInactive.set(tab.id, { prevState, seq: existing.eventSeq, launch: existing.lastResumeOrStartedAt });
+              if (tab.host && MISREAD_RESTORABLE.has(prevState)) {
+                this.probeInactive.set(tab.id, {
+                  prevState, readyForReviewAt: prevReadyForReviewAt, seq: existing.eventSeq, launch: existing.lastResumeOrStartedAt, at: now,
+                });
+              }
               this.persistToLayout(existing);
               this.broadcastUpdate(tab.id, existing);
               continue;
@@ -2179,6 +2200,21 @@ export class StatusManager {
         log.warn(`orchestrator nudge failed: ${err instanceof Error ? err.message : err}`);
       });
     }
+  }
+
+  /**
+   * Give a misread inactive back its resting state (PMUX-REMOTE-SEND r2). Not a transition: the agent never left
+   * that state, so nothing a transition does runs again (no session-history row, alert, kickoff, idle hook or nudge).
+   * Only the fields the move to inactive changed are set back.
+   */
+  private restoreMisreadInactive(tabId: string, entry: ITabStatusEntry, gone: IProbeInactive): void {
+    this.probeInactive.delete(tabId);
+    this.inactiveSince.delete(tabId);
+    entry.cliState = gone.prevState;
+    entry.readyForReviewAt = gone.prevState === 'ready-for-review' ? gone.readyForReviewAt : null;
+    this.reconcileJsonlWatch(tabId, entry);
+    this.persistToLayout(entry);
+    this.broadcastUpdate(tabId, entry);
   }
 
   // Every channel — web push, the status socket, and the client-side Electron

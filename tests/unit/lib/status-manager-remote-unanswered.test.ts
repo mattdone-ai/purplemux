@@ -889,12 +889,43 @@ describe('a remote tab read inactive comes back once its agent is proven (PMUX-R
     });
   }
 
-  it('a busy tab mid-turn returns to busy (its turn is still open)', async () => {
-    const { entry, pollAndSettle } = await misread('busy', (e) => {
-      e.lastEvent = { name: 'prompt-submit', at: T0 - 60_000, seq: 1 };
+  // PMUX-REMOTE-SEND r2: a turn, a question or a dialog is not given back: the pane probe and the transcript read it.
+  for (const cliState of ['busy', 'needs-input'] as const) {
+    it(`a ${cliState} tab is not restored: it stays for the pane probe`, async () => {
+      const { entry, pollAndSettle } = await misread(cliState, (e) => {
+        e.lastEvent = { name: 'prompt-submit', at: T0 - 60_000, seq: 1 };
+      });
+      await pollAndSettle();
+      expect(entry().cliState).toBe('inactive');
     });
+  }
+
+  it('the restore is not a transition: no session-history row, no idle hook, and the review time is kept', async () => {
+    const reviewAt = T0 - 5 * 60_000;
+    const { manager, entry, pollAndSettle } = await misread('ready-for-review', (e) => {
+      e.readyForReviewAt = reviewAt;
+      e.jsonlPath = '/nonexistent/session.jsonl';
+    });
+    const internal = manager as unknown as { saveSessionHistory: () => Promise<void>; contextLifecycle: { onIdle: (id: string) => void } };
+    const history = vi.spyOn(internal, 'saveSessionHistory').mockResolvedValue(undefined);
+    const onIdle = vi.spyOn(internal.contextLifecycle, 'onIdle');
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout'] });
+    vi.setSystemTime(T0 + 30_000);
     await pollAndSettle();
-    expect(entry().cliState).toBe('busy');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(entry().cliState).toBe('ready-for-review');
+    expect(entry().readyForReviewAt).toBe(reviewAt);
+    expect(history).not.toHaveBeenCalled();
+    expect(onIdle).not.toHaveBeenCalled();
+    expect((manager as unknown as { fleetFacts: (id: string) => { inactiveSince: number | null } }).fleetFacts('tab-r').inactiveSince).toBeNull();
+  });
+
+  it('a misread older than its window is not given back: a hand relaunch may have replaced the agent', async () => {
+    const { entry, pollAndSettle } = await misread('idle');
+    const { MISREAD_RESTORE_WINDOW_MS } = await import('@/lib/status-manager');
+    vi.setSystemTime(T0 + MISREAD_RESTORE_WINDOW_MS + 1);
+    await pollAndSettle();
+    expect(entry().cliState).toBe('inactive');
   });
 
   it('a foreground the scan does not know is proven on the host first: present restores, absent keeps inactive', async () => {

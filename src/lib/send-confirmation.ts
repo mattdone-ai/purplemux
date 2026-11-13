@@ -1,4 +1,4 @@
-import { paneAsSeen, readComposer } from '@/lib/composer-readiness';
+import { paneAsSeen, readComposer, showsSubmittableComposer } from '@/lib/composer-readiness';
 import { REMOTE_CALL_DEFAULT_MS } from '@/lib/tab-send';
 import type { ISubmitEvidence } from '@/types/status';
 import type { TPanelType } from '@/types/terminal';
@@ -86,6 +86,8 @@ const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTim
 const readScreen = async (deps: ISubmitConfirmDeps, request: ISubmitConfirmRequest): Promise<IScreenReading> => {
   const captured = await deps.capture().catch(() => null);
   if (!captured) return { composer: 'unreadable', firstLinePending: false };
+  // A selectable list, or a Claude screen without its composer frame, holds no text of the send's: no Enter, no proof.
+  if (!showsSubmittableComposer(request.panelType, captured)) return { composer: 'unreadable', firstLinePending: false };
   return {
     composer: readComposer(request.panelType, captured),
     firstLinePending: deps.isPendingLine(paneAsSeen(request.panelType, captured), request.content),
@@ -103,8 +105,8 @@ const strandedText = (screen: IScreenReading, screenEmptyAtGate: boolean): boole
 /**
  * Text the one extra Enter may submit. On a remote tab (PMUX-REMOTE-SEND, 2026-11-13) any text on the composer line
  * after the typing is the send's own: 16 remote briefs sat typed for up to 6 h, folded to a placeholder the first
- * line cannot match, behind a gate that did not read the screen. An unreadable screen never qualifies: it may be an
- * option list, which an Enter would answer.
+ * line cannot match, behind a gate that did not read the screen. An unreadable screen never qualifies: it may be a
+ * selectable list of any kind (a permission dialog, an AskUserQuestion menu, a picker), which an Enter would answer.
  */
 const mayResubmit = (screen: IScreenReading, request: ISubmitConfirmRequest): boolean =>
   strandedText(screen, request.screenEmptyAtGate) || (request.remote && screen.composer === 'text');
