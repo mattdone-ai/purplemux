@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { createLogger } from '@/lib/logger';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
-import { BREAK_REASON_MAX, codePoints } from '@/lib/human-actions';
+import { BREAK_REASON_MAX, actionReason, codePoints } from '@/lib/human-actions';
 import { LeasePolicyError, parseLeaseName, policyFor, resolveEpic, resolveNote, resolveTtl } from '@/lib/lease-policy';
 import type { ICaller } from '@/lib/caller';
 import type {
@@ -588,6 +588,8 @@ export const breakLease = async (
   reason: unknown,
   breaker: ILeaseHolder | ILeaseHumanBreaker | ILeaseScrumMasterBreaker,
   authority: ILeaseAuthority,
+  /** The Scrum Master's in-lock re-check (ADR-0047 r2 #5): a refusal text when its selection changed, else null. */
+  recheck?: () => string | null,
 ): Promise<ILease> => {
   const human = 'human' in breaker;
   const scrumMaster = !human && 'role' in breaker && breaker.role === 'portfolio-scrum-master' && breaker.verified;
@@ -596,11 +598,13 @@ export const breakLease = async (
   }
   const text = typeof reason === 'string' ? reason.trim() : '';
   if (!text) throw new LeasePolicyError('break needs a reason');
-  if ((human || scrumMaster) && codePoints(text) > BREAK_REASON_MAX) {
+  if ((human || scrumMaster) && actionReason(text) === null) {
     throw new LeasePolicyError(`the reason is ${codePoints(text)} characters; the limit is ${BREAK_REASON_MAX}`);
   }
   const { name } = parseLeaseName(rawName);
   const lease = await transact(authority.now(), (state) => {
+    const refusal = scrumMaster ? recheck?.() ?? null : null;
+    if (refusal) throw new LeaseError('forbidden', refusal);
     const r = removeInState(state, name);
     return { state: r.state, value: r.lease, effects: [{ type: 'released', lease: r.lease, reason: 'broken', by: breaker, extra: { breakReason: [...text].slice(0, BREAK_REASON_MAX).join('') } }] };
   });

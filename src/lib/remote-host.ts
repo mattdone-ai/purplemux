@@ -65,6 +65,20 @@ export const parseCallbackAllowHosts = (raw: string | null | undefined): string[
 
 const isLoopback = (host: string): boolean => host === 'localhost' || host === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 
+const OCTET = '(?:0|[1-9][0-9]{0,2})';
+const DOTTED_QUAD = new RegExp(`^${OCTET}\\.${OCTET}\\.${OCTET}\\.${OCTET}$`);
+
+/**
+ * A 100.64.0.0/10 address in its one canonical spelling (ADR-0047, r2 #2): four decimal octets 0..255, no leading
+ * zero, so 100.064.0.1 is no tailnet address here. The Portfolio Scrum Master's guard holds on its own with it; it
+ * does not lean on the general check running first.
+ */
+export const isCanonicalTailnetAddress = (host: string): boolean => {
+  if (!DOTTED_QUAD.test(host)) return false;
+  const [a, b, c, d] = host.split('.').map(Number);
+  return a === 100 && b >= 64 && b <= 127 && c <= 255 && d <= 255;
+};
+
 export const isTailnetAddress = (host: string): boolean => {
   const ip = host.match(/^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
   return !!ip && Number(ip[1]) >= 64 && Number(ip[1]) <= 127;
@@ -112,7 +126,7 @@ export const scrumMasterCallbackRefusal = (value: string, tailnetSuffix: string 
   const port = Number(m[2]);
   if (port < 1 || port > 65535) return `port ${m[2]} is out of range`;
   const host = m[1];
-  if (isTailnetAddress(host)) return null;
+  if (isCanonicalTailnetAddress(host)) return null;
   if (/^[0-9.]+$/.test(host) || host.startsWith('[')) return `${host} is not in 100.64.0.0/10`;
   if (!tailnetSuffix) {
     return `${host} is a name, and ${REMOTE_TAILNET_SUFFIX_KEY} is unset: the Portfolio Scrum Master names a 100.64.0.0/10 address, or the admin token sets the suffix`;

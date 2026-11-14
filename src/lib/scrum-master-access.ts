@@ -51,6 +51,15 @@ export const scrumMasterSnapshot = async (scope: TCliScope, targetWorkspaceId?: 
   return stillCurrent?.actor === designation.actor && stillCurrent.updatedAt === designation.updatedAt ? designation : null;
 };
 
+/**
+ * Inside a store lock (ADR-0047, r2 #5, as ADR-0045 ruling 5): the selection an action was authorized on is still the
+ * current one, and still names `targetWorkspaceId` when one is given. A change between the proof and the lock refuses.
+ */
+export const selectionStillHolds = (snapshot: IScrumMasterSnapshot, targetWorkspaceId?: string): boolean => {
+  const now = currentScrumMasterSelection();
+  return sameSelection(now, snapshot) && (!targetWorkspaceId || now!.selection.workspaceIds.includes(targetWorkspaceId));
+};
+
 /** A persisted human selection is effective only for its exact, still-current launch tab. */
 export const selectedScrumMasterScope = async (scope: TCliScope, targetWorkspaceId?: string): Promise<IPortfolioSelection | null> =>
   (await scrumMasterSnapshot(scope, targetWorkspaceId))?.selection ?? null;

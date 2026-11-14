@@ -2,6 +2,7 @@ import { STOP_PAYLOAD_CONFIG_KEY, TURN_END_SOURCE_CONFIG_KEY } from '@/lib/turn-
 import type { NextApiRequest, NextApiResponse } from 'next';
 import type { ICaller } from '@/lib/caller';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
+import { ACTION_REASON_MAX, actionReason } from '@/lib/human-actions';
 import {
   FleetConfigError,
   FleetConfigFileError,
@@ -100,7 +101,7 @@ export const scrumMasterKey = (key: string): { workspaceId: string | null } | nu
   return null;
 };
 
-export const REASON_MAX = 500;
+export const REASON_MAX = ACTION_REASON_MAX;
 
 /**
  * Why a write was refused, as the audit names it (ADR-0045 review r1): a refusal of the writer rule has its own kind;
@@ -131,13 +132,14 @@ const refusalOf = (err: FleetConfigError): TWriteRefusal => {
   return 'forbidden';
 };
 
-/** `reason` (ADR-0045): 1..500 characters when given; null when absent. */
+/** `reason` (ADR-0045): when given, trimmed and 1..500 code points (`actionReason`, ADR-0047); null when absent. */
 const checkReason = (raw: unknown): string | null => {
   if (raw === undefined || raw === null) return null;
-  if (typeof raw !== 'string' || raw.trim().length === 0 || raw.length > REASON_MAX) {
+  const reason = actionReason(raw);
+  if (reason === null) {
     throw new WriteRefusal('config-invalid', 'reason-invalid', `reason must be 1..${REASON_MAX} characters, got ${JSON.stringify(raw)}`);
   }
-  return raw;
+  return reason;
 };
 const POOL_ALIAS_KEY = /^pool\.(fallback|gate-host)\.[A-Za-z0-9._-]+$/;
 

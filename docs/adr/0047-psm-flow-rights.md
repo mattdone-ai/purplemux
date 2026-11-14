@@ -30,14 +30,17 @@ refused, each as before. The admin token keeps every right it had.
    store lock against the selection, and is audited with role `portfolio-scrum-master`, as every ADR-0045 write.
    Because the key decides where a host's hooks post, each with its tab's token, the Scrum Master's value names the
    tailnet only:
-   - `http(s)://<name>.<suffix>:<port>`, where `<name>` is one DNS label and `<suffix>` is the new admin-only key
-     `remote.tailnet-suffix` (for example `example-net.ts.net`). With that key unset, no name is accepted. The key is
-     never `ts.net` alone, which would admit a host of any tailnet.
-   - `http(s)://<address in 100.64.0.0/10>:<port>`.
+   - `http(s)://<name>.<suffix>:<port>`, where `<name>` is one lower-case DNS label and `<suffix>` is the new
+     admin-only key `remote.tailnet-suffix` (for example `example-net.ts.net`). With that key unset, no name is
+     accepted. The key is never `ts.net` alone, which would admit a host of any tailnet. A suffix outside `ts.net`
+     takes `https://` only: the check every writer passes refuses plain http to such a name.
+   - `http(s)://<address in 100.64.0.0/10>:<port>`, the address in its one canonical spelling: four decimal octets,
+     no leading zero (`100.064.0.1` is refused).
 
-   The port is required. The check that every writer passes (`callbackUrlRefusal`) runs first. A refusal names its
-   reason and is audited with the kind `outside-tailnet` or `unknown-host`. The admin token writes any value that
-   check takes, with no reason and no version, as before.
+   The port is required, 1..65535; no user part, path or query. The check that every writer passes
+   (`callbackUrlRefusal`) runs first, but the Scrum Master's check refuses every value outside these forms on its own.
+   A refusal names its reason and is audited with the kind `outside-tailnet` or `unknown-host`. The admin token writes
+   any value the general check takes, with no reason and no version, as before.
 2. **`lease break NAME --reason TEXT`.** The Scrum Master breaks any lease with a reason of 1..500 characters. The
    release is audited as before, and its `by` carries the role and the selection.
 3. **`inbox retry ID --reason TEXT`.** The Scrum Master retries a held notice whose target workspace is in its
@@ -47,6 +50,15 @@ refused, each as before. The admin token keeps every right it had.
    sender and the admin token retry as before, with no reason.
 4. **`note show ID`.** The Scrum Master reads a note whose recipient or sender workspace is in its selection. A read
    only: no ack, no point, no audit line.
+
+Every reason above is counted one way (`actionReason`): trimmed, then 1..500 code points, for the fleet-config
+writes, the lease break and the inbox retry alike.
+
+Each write re-checks the selection inside its store lock, as ADR-0045 ruling 5 does for fleet config: the fleet
+store for the callback URL, the lease lock for the break, the inbox lock for the retry. A selection that changed
+between the Scrum Master proof and the lock refuses the action, and nothing is written (`forbidden` for the break,
+403 `selection-changed` for the retry). The gap ADR-0045 states remains: a respawn of the manager tab between the proof
+and the lock is not seen by the compare, which reads the selection only. A note show is a read and holds no lock.
 
 ## Why
 

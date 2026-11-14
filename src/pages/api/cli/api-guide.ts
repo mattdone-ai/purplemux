@@ -1121,8 +1121,9 @@ Keys in use:
                event that cannot be posted still spools). Admin token only, except that the
                Portfolio Scrum Master's verified tab writes remote.callback-url.<host> for a host on
                remote.hosts, with a reason and the version it read, and only a tailnet value:
-               http(s)://<name>.<remote.tailnet-suffix>:<port> or http(s)://<100.64.0.0/10
-               address>:<port> (ADR-0047, owner order; else 400 config-invalid naming the reason).
+               http(s)://<name>.<remote.tailnet-suffix>:<port> (https only for a suffix outside
+               ts.net) or http(s)://<100.64.0.0/10 address, canonical: no leading zero>:<port>
+               (ADR-0047, owner order; else 400 config-invalid naming the reason).
   remote.tailnet-suffix
                The tailnet's MagicDNS suffix (e.g. example-net.ts.net): two or more lower-case DNS
                labels, never ts.net alone. Unset, a Portfolio Scrum Master callback URL names a

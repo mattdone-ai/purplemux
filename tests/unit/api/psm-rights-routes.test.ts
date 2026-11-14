@@ -71,9 +71,24 @@ const breakRoute = () => import('@/pages/api/cli/leases/break');
 const retryRoute = () => import('@/pages/api/cli/inbox/[id]/retry');
 const showRoute = () => import('@/pages/api/cli/notes/[id]/index');
 
+let store: PortfolioStore;
+/**
+ * The selection changes after the Scrum Master proof (two reads in scrumMasterSnapshot) and before the store lock's
+ * re-check, the window ADR-0047 r2 #5 closes.
+ */
+const changeAfterProof = () => {
+  const original = store.currentSelection;
+  let reads = 0;
+  vi.spyOn(store, 'currentSelection').mockImplementation(() => {
+    reads += 1;
+    const now = original();
+    return reads <= 2 || !now ? now : { ...now, updatedAt: now.updatedAt + 1 };
+  });
+};
+
 beforeEach(() => {
   state.home = fs.mkdtempSync(path.join(os.tmpdir(), 'pmux-psm-routes-'));
-  const store = new PortfolioStore(':memory:');
+  store = new PortfolioStore(':memory:');
   (globalThis as { __ptPortfolioStore?: PortfolioStore }).__ptPortfolioStore = store;
   store.select('human-a', { managerWorkspaceId: 'ws-pm', managerTabId: 'tab-sm', workspaceIds: ['ws-a'] });
   audit.entries.length = 0;
@@ -108,6 +123,22 @@ describe('lease break (ADR-0047)', () => {
     state.scope = SM;
     expect(await call(breakRoute, 'POST', {}, { name: 'merge:acme/x' })).toMatchObject({ status: 400 });
     expect(await call(breakRoute, 'POST', {}, { name: 'merge:acme/x', reason: 'x'.repeat(501) })).toMatchObject({ status: 400 });
+    expect(await held()).toBe(true);
+  });
+
+  it('counts the reason in code points after a trim: 500 emoji pass, 501 do not (r2 #3)', async () => {
+    await hold();
+    state.scope = SM;
+    expect(await call(breakRoute, 'POST', {}, { name: 'merge:acme/x', reason: '😀'.repeat(501) })).toMatchObject({ status: 400 });
+    expect(await call(breakRoute, 'POST', {}, { name: 'merge:acme/x', reason: ` ${'😀'.repeat(500)} ` })).toMatchObject({ status: 200 });
+  });
+
+  it('refuses when the selection changes between the proof and the lock: nothing is broken (r2 #5)', async () => {
+    await hold();
+    state.scope = SM;
+    changeAfterProof();
+    expect(await call(breakRoute, 'POST', {}, { name: 'merge:acme/x', reason: 'stuck' })).toMatchObject({
+      status: 403, body: { code: 'forbidden', error: expect.stringContaining('selection changed') } });
     expect(await held()).toBe(true);
   });
 
@@ -157,6 +188,23 @@ describe('inbox retry (ADR-0047)', () => {
     expect(await call(retryRoute, 'POST', { id: outside }, { reason: 'r' })).toMatchObject({ status: 404, body: { code: 'inbox-not-found' } });
     expect(await stateOf(inside)).toBe('held');
     expect(await stateOf(outside)).toBe('held');
+  });
+
+  it('counts the reason in code points after a trim: whitespace is no reason, 500 emoji are one (r2 #3)', async () => {
+    const { inside } = await seed();
+    state.scope = SM;
+    expect(await call(retryRoute, 'POST', { id: inside }, { reason: '   ' })).toMatchObject({ status: 400, body: { code: 'reason-missing' } });
+    expect(await call(retryRoute, 'POST', { id: inside }, { reason: '😀'.repeat(500) })).toMatchObject({ status: 200 });
+    expect(audit.entries[0]).toMatchObject({ reason: '😀'.repeat(500) });
+  });
+
+  it('refuses when the selection changes between the proof and the lock: nothing is retried (r2 #5)', async () => {
+    const { inside } = await seed();
+    state.scope = SM;
+    changeAfterProof();
+    expect(await call(retryRoute, 'POST', { id: inside }, { reason: 'r' })).toMatchObject({ status: 403, body: { code: 'selection-changed' } });
+    expect(await stateOf(inside)).toBe('held');
+    expect(audit.entries).toEqual([]);
   });
 
   it.each(REFUSED)('%s is refused (404, as a missing item)', async (_label, scope) => {

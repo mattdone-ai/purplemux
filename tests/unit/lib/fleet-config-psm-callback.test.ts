@@ -124,6 +124,45 @@ describe('the Portfolio Scrum Master writes a known host\'s callback URL (ADR-00
   });
 });
 
+// r2 #1/#2: the guard pinned value by value. Each refused value is refused by putValue (whichever check fires first)
+// AND by the Scrum Master's own check called directly, so the guard holds without the general check in front of it.
+describe('the value guard, pinned (ADR-0047 r2)', () => {
+  it.each([
+    ['no dot boundary before the suffix', `http://evil-${SUFFIX}:8022`],
+    ['userinfo', `http://x@control.${SUFFIX}:8022`],
+    ['an IPv6 literal', 'http://[fd00::1]:8022'],
+    ['a trailing dot', `http://control.${SUFFIX}.:8022`],
+    ['upper case', `http://Control.${SUFFIX}:8022`],
+    ['a decimal IP form', 'http://1681915905:8022'],
+    ['an octal IP form', 'http://0144.0100.0.1:8022'],
+    ['a leading-zero octet', 'http://100.064.0.1:8022'],
+    ['the address after the range', 'http://100.128.0.1:8022'],
+    ['the address before the range', 'http://100.63.255.255:8022'],
+    ['port 0', 'http://100.64.0.1:0'],
+    ['port 65536', 'http://100.64.0.1:65536'],
+    ['a path', 'http://100.64.0.1:8022/api'],
+    ['a query', 'http://100.64.0.1:8022?x=1'],
+  ])('refuses %s: %s', async (_label, value) => {
+    await setSuffix();
+    const { scrumMasterCallbackRefusal } = await import('@/lib/remote-host');
+    expect(scrumMasterCallbackRefusal(value, SUFFIX)).not.toBeNull();
+    await expect(write(sm, value)()).rejects.toMatchObject({ code: 'config-invalid' });
+  });
+
+  it.each(['http://100.64.0.0:8022', 'http://100.127.255.255:8022', 'https://100.100.1.1:1', 'http://100.64.0.1:65535'])('accepts the range end %s', async (value) => {
+    const { scrumMasterCallbackRefusal } = await import('@/lib/remote-host');
+    expect(scrumMasterCallbackRefusal(value, null)).toBeNull();
+    expect(await write(sm, value)()).toMatchObject({ version: 1 });
+  });
+
+  it('refuses a leading-zero octet on its own, where the shared address test would take it (r2 #2)', async () => {
+    const { isCanonicalTailnetAddress, isTailnetAddress, scrumMasterCallbackRefusal } = await import('@/lib/remote-host');
+    expect(isTailnetAddress('100.064.0.1')).toBe(true);
+    expect(isCanonicalTailnetAddress('100.064.0.1')).toBe(false);
+    expect(scrumMasterCallbackRefusal('http://100.064.0.1:8022', null)).toContain('is not in 100.64.0.0/10');
+  });
+});
+
 describe('remote.tailnet-suffix (ADR-0047)', () => {
   it('is admin-only: the Scrum Master is refused', async () => {
     const { putValue } = await import('@/lib/fleet-config-http');

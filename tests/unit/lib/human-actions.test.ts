@@ -163,3 +163,20 @@ describe('human action outcomes', () => {
     }
   });
 });
+
+// ADR-0047 r2 #3: every Portfolio Scrum Master action counts its reason one way: trimmed, then 1..500 code points.
+describe('actionReason', () => {
+  it('trims, and counts code points, not UTF-16 units', async () => {
+    const { ACTION_REASON_MAX, actionReason } = await import('@/lib/human-actions');
+    expect(actionReason('  the holder is gone  ')).toBe('the holder is gone');
+    expect(actionReason('😀'.repeat(ACTION_REASON_MAX))).toBe('😀'.repeat(ACTION_REASON_MAX)); // 1,000 UTF-16 units
+    expect(actionReason(`  ${'x'.repeat(ACTION_REASON_MAX)}  `)).toBe('x'.repeat(ACTION_REASON_MAX));
+  });
+
+  it('refuses empty, whitespace only, over 500 code points, and a non-string', async () => {
+    const { ACTION_REASON_MAX, actionReason } = await import('@/lib/human-actions');
+    for (const raw of ['', '   ', 'x'.repeat(ACTION_REASON_MAX + 1), '😀'.repeat(ACTION_REASON_MAX + 1), undefined, null, 42]) {
+      expect(actionReason(raw)).toBeNull();
+    }
+  });
+});

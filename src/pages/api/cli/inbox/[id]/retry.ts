@@ -1,13 +1,15 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { appendCoordinationAudit } from '@/lib/coordination-audit';
-import { REASON_MAX } from '@/lib/fleet-config-http';
+import { ACTION_REASON_MAX, actionReason } from '@/lib/human-actions';
 import { InboxError, mutateInbox, readInboxState, retryInState } from '@/lib/inbox-store';
 import { noticeSenderWorkspace, readNotesState } from '@/lib/notes-store';
-import { scrumMasterSnapshot, type IScrumMasterSnapshot } from '@/lib/scrum-master-access';
+import { scrumMasterSnapshot, selectionStillHolds, type IScrumMasterSnapshot } from '@/lib/scrum-master-access';
 import { resolveCliScope } from '@/lib/workspace-token';
 import type { IInboxItem } from '@/types/inbox';
 
 type TScope = NonNullable<ReturnType<typeof resolveCliScope>>;
+
+class SelectionChanged extends Error {}
 
 /**
  * Re-queue a `held` notice once, with a fresh refusal budget. The target
@@ -45,13 +47,14 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     scrumMaster = await scrumMasterSnapshot(scope, item.targetWorkspaceId);
     if (!scrumMaster) return notFound(res, id);
   }
-  const rawReason = (req.body as { reason?: unknown } | undefined)?.reason;
-  const reason = typeof rawReason === 'string' ? rawReason.trim() : '';
-  if (scrumMaster && (reason.length === 0 || (rawReason as string).length > REASON_MAX)) {
-    return res.status(400).json({ error: `a Portfolio Scrum Master retry needs a reason (--reason TEXT, 1..${REASON_MAX} characters, ADR-0047)`, code: 'reason-missing' });
+  const reason = actionReason((req.body as { reason?: unknown } | undefined)?.reason);
+  if (scrumMaster && reason === null) {
+    return res.status(400).json({ error: `a Portfolio Scrum Master retry needs a reason (--reason TEXT, 1..${ACTION_REASON_MAX} characters, ADR-0047)`, code: 'reason-missing' });
   }
   try {
     const retried = await mutateInbox((state) => {
+      // The selection the retry was authorized on must hold inside the lock too (ADR-0047 r2 #5).
+      if (scrumMaster && !selectionStillHolds(scrumMaster, item.targetWorkspaceId)) throw new SelectionChanged();
       const result = retryInState(state, id, Date.now());
       return { state: result.state, value: result.item };
     });
@@ -68,6 +71,9 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
     }
     return res.status(200).json({ item: retried });
   } catch (err) {
+    if (err instanceof SelectionChanged) {
+      return res.status(403).json({ error: 'the portfolio selection changed while the notice was retried; nothing was retried (ADR-0047)', code: 'selection-changed' });
+    }
     if (err instanceof InboxError) {
       return res.status(err.code === 'inbox-not-found' ? 404 : 409).json({ error: err.message, code: err.code });
     }

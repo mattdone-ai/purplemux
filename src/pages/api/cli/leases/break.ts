@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { breakLease } from '@/lib/lease-store';
 import { bodyOf, holderOf, leaseAuthority, requireCaller, requireMethod, sendLeaseError, viewOf } from '@/lib/lease-http';
-import { scrumMasterSnapshot } from '@/lib/scrum-master-access';
+import { scrumMasterSnapshot, selectionStillHolds } from '@/lib/scrum-master-access';
 import type { ILeaseHolder, ILeaseScrumMasterBreaker } from '@/types/lease';
 
 /**
@@ -20,7 +20,9 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
       ? { ...holder, role: 'portfolio-scrum-master', selection: { actor: snapshot.actor, updatedAt: snapshot.updatedAt,
         managerWorkspaceId: snapshot.selection.managerWorkspaceId, managerTabId: snapshot.selection.managerTabId } }
       : holder;
-    const broken = await breakLease(body.name, body.reason, breaker, leaseAuthority);
+    const recheck = () => (snapshot && !selectionStillHolds(snapshot)
+      ? 'the portfolio selection changed while the lease was broken; nothing was broken (ADR-0047)' : null);
+    const broken = await breakLease(body.name, body.reason, breaker, leaseAuthority, recheck);
     return res.status(200).json({ broken: await viewOf(broken) });
   } catch (err) {
     return sendLeaseError(res, err);

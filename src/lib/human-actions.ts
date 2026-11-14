@@ -11,6 +11,20 @@ export const NOTE_BODY_MAX_BYTES = 16 * 1024;
 export const BREAK_REASON_MAX = 500;
 
 export const codePoints = (text: string): number => [...text].length;
+
+/** The most a Portfolio Scrum Master action's reason may hold (ADR-0047). */
+export const ACTION_REASON_MAX = 500;
+
+/**
+ * A reason as every Portfolio Scrum Master action counts it (ADR-0047, r2 #3): trimmed, then 1..500 code points.
+ * The trimmed text, or null when it is not a string or falls outside that range.
+ */
+export const actionReason = (raw: unknown): string | null => {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  const length = codePoints(text);
+  return length >= 1 && length <= ACTION_REASON_MAX ? text : null;
+};
 export const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length;
 
 export const ownerNoteSchema = z.object({
