@@ -1312,6 +1312,21 @@ exit 0`,
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('passes --only-wave N to the checks (make acceptance-watch, PMUX-ACC-GRAPHQL); without it no wave is chosen', () => {
+    const instance = writeInstanceFake();
+    const checksScript = path.join(root, 'checks.cjs');
+    fs.writeFileSync(checksScript, `require('fs').appendFileSync(${JSON.stringify(path.join(root, 'checks-args'))}, process.argv.slice(2).join(' ') + '\\n'); console.log('PASS x — fake');\n`);
+    const tmux = fake('tmux', "printf '%s\\n' 'pt-ws-live-p-tab-1'");
+    const env = asEnv({ PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: root, TMPDIR: root, ACCEPT_INSTANCE: instance, ACCEPT_CHECKS: checksScript, ACCEPT_TMUX: tmux, ACCEPT_NODE: process.execPath });
+    const one = spawnSync('bash', [RUN, '--candidate', root, '--log', path.join(root, 'one.log'), '--only-wave', '3'], { env, encoding: 'utf-8', timeout: 30_000 });
+    const all = spawnSync('bash', [RUN, '--candidate', root, '--log', path.join(root, 'all.log')], { env, encoding: 'utf-8', timeout: 30_000 });
+    expect(one.status, one.stderr).toBe(0);
+    expect(all.status, all.stderr).toBe(0);
+    const [withWave, without] = fs.readFileSync(path.join(root, 'checks-args'), 'utf-8').trim().split('\n');
+    expect(withWave).toMatch(/--only-wave 3$/);
+    expect(without).not.toContain('--only-wave');
+  });
+
   it('passes when every check passes and nothing leaked, and always takes the instance down', () => {
     const r = runGate();
     expect(r.status, r.log).toBe(0);

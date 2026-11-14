@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # run.sh — the wave-1 acceptance gate: isolated instance up, checks, down, leak check.
 #
-#   run.sh --candidate DIR [--log FILE] [--bash-guard PATH] [--require-bash-guard] [--keep]
+#   run.sh --candidate DIR [--log FILE] [--bash-guard PATH] [--require-bash-guard] [--keep] [--only-wave N]
+#
+# `--only-wave N` runs one wave of checks.cjs (wave 3 holds the harness watches): `make acceptance-watch` uses it.
+# The deploy gate never passes it: a deploy runs every wave.
 #
 # Exit 0 only when every check passed and nothing leaked onto the live tmux socket; 1 when a check
 # failed, a leak was found or the live socket could not be read; 2 when the instance could not be
@@ -45,7 +48,7 @@ socket_absent() {
   printf '%s' "$path"
 }
 
-usage() { echo "usage: run.sh --candidate DIR [--log FILE] [--bash-guard PATH] [--require-bash-guard] [--keep]" >&2; exit 2; }
+usage() { echo "usage: run.sh --candidate DIR [--log FILE] [--bash-guard PATH] [--require-bash-guard] [--keep] [--only-wave N]" >&2; exit 2; }
 
 candidate="" log="" keep=() check_args=()
 while (($#)); do
@@ -55,6 +58,7 @@ while (($#)); do
     --bash-guard) check_args+=(--bash-guard "$2"); shift 2 ;;
     --require-bash-guard) check_args+=(--require-bash-guard); shift ;;
     --keep) keep=(--keep); shift ;;
+    --only-wave) check_args+=(--only-wave "$2"); shift 2 ;;
     *) usage ;;
   esac
 done

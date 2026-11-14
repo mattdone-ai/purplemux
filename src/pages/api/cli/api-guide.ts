@@ -997,14 +997,23 @@ the owner ONE inbox line when the condition holds, then deletes it; it dies with
   pr OWNER/REPO#N    --until merged | closed | head-moved | checks-settled
   ref OWNER/REPO@REF --until moved
   lease NAME         --until free   (no unexpired record: an acquire would succeed)
-GitHub reads use the server's own gh, every intervalS (default 120, 60-3600); a lease watch is
-evaluated on each lease release and every pass. A watch expires after ttlSeconds (default 24 h,
-max 7 d) with one notice. Three failed reads in a row send one "failing" notice carrying a
-server token (http-404, http-403, timeout, auth, gh-missing, sso-config, other); watch list shows the error
-text; after that notice the watch reads less often (2x, 4x, up to 8x its interval). A merged
-watch on a PR closed without a merge reports CLOSED. Host caps: 60 GitHub watches and 2,000 GitHub
-requests/h in all (a checks-settled watch reads 3 times per check) — 409 watch-cap, CLI exit 3; a
-tab holds at most 30 watches.
+GitHub reads use the server's own gh, every intervalS (default 120, 60-3600): one GraphQL query
+per check (a PR's state, head and checks together), never the REST budget that every gh api call
+of the account shares; a lease watch is evaluated on each lease release and every pass. A watch
+expires after ttlSeconds (default 24 h, max 7 d) with one notice. Three failed reads in a row send
+one "failing" notice carrying a server token (http-404, http-403, timeout, auth, gh-missing,
+sso-config, other); watch list shows the error text; after that notice the watch reads less often
+(2x, 4x, up to 8x its interval). GitHub's rate limit (a 403 or 429 that says so, or a GraphQL
+RATE_LIMITED) is no failure: every GitHub watch waits until the reset GitHub names
+(Retry-After, else X-RateLimit-Reset moved onto this host's clock by the answer's Date header),
+never past 65 minutes and never a time already past (then 60 s), plus 5 s; the watches then
+resume 2 s apart in the order they were made (up to 60 s). Its lastError reads rate-limited, and
+no failing notice goes out. A GraphQL FORBIDDEN or SAML-enforcement error is http-403. A watch
+made during a rate limit is made with baselinePending: true; the first read after the reset
+takes its baseline (a head-moved or moved watch counts its move from that read). A
+merged watch on a PR closed without a merge reports CLOSED. Host caps: 60 GitHub watches and
+2,000 GitHub requests/h in all (one per check; a checks-settled watch with more than 100 checks
+reads one more page per 100) — 409 watch-cap, CLI exit 3; a tab holds at most 30 watches.
 Lines: "[purplemux watch w-…] OWNER/REPO#N is MERGED (sha) — watch cleared", "… head moved a -> b",
 "… checks settled at sha: G green, R red", "… moved a -> b", "NAME is free", "… is failing:
 <token> …", "… expired without <until>". The label is shown by list, never typed.
