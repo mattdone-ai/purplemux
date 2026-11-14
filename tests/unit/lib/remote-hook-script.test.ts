@@ -174,7 +174,7 @@ describe('remote Claude hook script (ADR-0022)', () => {
     });
 
     it('takes an IPv6 literal and an https URL', () => {
-      for (const url of ['http://[fd00::1]:8022', 'https://control.example.com']) {
+      for (const url of ['http://[2001:db8::10]:8022', 'https://control.example.com']) {
         writeKitUrl(url);
         fs.rmSync(path.join(dir, 'curl-args'), { force: true });
         run('stop', '{}', { out: '204 0.000100', exit: 0 });

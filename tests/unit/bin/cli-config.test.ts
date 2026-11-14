@@ -187,7 +187,8 @@ describe('purplemux config — the installed CLI against the real fleet-config r
     expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://host-a.example.ts.net:8022'], orch)).code).toBe(3);
     expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://host-a.example.ts.net:8022'], admin)).code).toBe(0);
     expect((await cli(['config', 'get', 'remote.callback-url.host-b'], admin)).stdout).toBe('http://host-a.example.ts.net:8022\n');
-    expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://100.64.0.114:8022'], admin)).code).toBe(0);
+    expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'https://192.0.2.10:8022'], admin)).code).toBe(0);
+    expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://192.0.2.10:8022'], admin)).code).toBe(2);
     const plain = await cli(['config', 'set', 'remote.callback-url.host-b', 'http://example.com:8022'], admin);
     expect(plain.code).toBe(2);
     expect(plain.stderr).toContain('remote.callback-url.host-b: ');
