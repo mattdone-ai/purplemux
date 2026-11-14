@@ -7,8 +7,33 @@ import type { TWatchFailure } from '@/types/watch';
 // a rate-limited read names when the budget comes back, so a caller waits instead of failing.
 
 export const GH_TIMEOUT_MS = 20_000;
-/** A rate limit that names no reset (a secondary limit with no Retry-After) is retried after this. */
+/**
+ * A rate limit that names no usable reset is retried after this: a secondary limit with no Retry-After, a reset
+ * already past, or a value that is not a time.
+ */
 export const RATE_LIMIT_FALLBACK_MS = 60_000;
+/** The longest hold any header can ask for: GitHub's budget window is one hour (PMUX-WATCH-403 r2). */
+export const RATE_LIMIT_MAX_HOLD_MS = 65 * 60_000;
+
+/**
+ * A retry time no header can push out of range: a value that is not finite, or not after `now`, is the fallback; a
+ * value past {@link RATE_LIMIT_MAX_HOLD_MS} is clamped. Every Date built from a retry time is built from this.
+ */
+export const boundRetryAt = (candidate: number, now: number): { at: number; clamped: boolean } => {
+  if (!Number.isFinite(candidate) || candidate <= now) return { at: now + RATE_LIMIT_FALLBACK_MS, clamped: false };
+  if (candidate > now + RATE_LIMIT_MAX_HOLD_MS) return { at: now + RATE_LIMIT_MAX_HOLD_MS, clamped: true };
+  return { at: candidate, clamped: false };
+};
+
+/**
+ * GitHub's clock minus this host's, from the answer's `Date` header, in ms; 0 without a usable one. An
+ * `X-RateLimit-Reset` is GitHub's epoch time: a host clock that runs ahead or behind would hold too short or too long.
+ */
+export const clockOffsetMs = (headers: Map<string, string>, now: number): number => {
+  const date = headers.get('date');
+  const server = date === undefined ? NaN : Date.parse(date);
+  return Number.isFinite(server) ? server - now : 0;
+};
 
 /** The budget one answer reported: `resource` is GitHub's own name for it (`core` is REST, `graphql`). */
 export interface IGhRate {
@@ -22,8 +47,11 @@ export interface IGhRate {
 
 export type TGhResult =
   | { ok: true; stdout: string; rate?: IGhRate }
-  /** `retryAt`, epoch ms, only on `rate-limited`: when the read may run again. */
-  | { ok: false; code: TWatchFailure; message: string; rate?: IGhRate; retryAt?: number };
+  /**
+   * `retryAt`, epoch ms on this host's clock, only on `rate-limited`: when the read may run again, bounded by
+   * {@link boundRetryAt}. `retryHeader` is the raw header it came from; `retryClamped` says the header asked for more.
+   */
+  | { ok: false; code: TWatchFailure; message: string; rate?: IGhRate; retryAt?: number; retryHeader?: string; retryClamped?: boolean };
 
 export interface IGhAnswer {
   status: number | null;
@@ -48,14 +76,18 @@ export const parseIncluded = (stdout: string): IGhAnswer => {
 
 const wholeNumber = (value: string | undefined): number | null => (value !== undefined && /^\d{1,15}$/.test(value) ? Number(value) : null);
 
-/** The budget the headers name, or undefined when one of them is missing. */
-export const rateOf = (headers: Map<string, string>): IGhRate | undefined => {
+/**
+ * The budget the headers name, or undefined when one of them is missing. `resetAt` is on this host's clock (corrected
+ * by {@link clockOffsetMs}) and bounded like a retry time, so a log line can always print it.
+ */
+export const rateOf = (headers: Map<string, string>, now: number): IGhRate | undefined => {
   const limit = wholeNumber(headers.get('x-ratelimit-limit'));
   const remaining = wholeNumber(headers.get('x-ratelimit-remaining'));
   const used = wholeNumber(headers.get('x-ratelimit-used'));
   const reset = wholeNumber(headers.get('x-ratelimit-reset'));
   if (limit === null || remaining === null || reset === null) return undefined;
-  return { resource: headers.get('x-ratelimit-resource') ?? 'unknown', limit, remaining, used: used ?? limit - remaining, resetAt: reset * 1000 };
+  const resetAt = boundRetryAt(reset * 1000 - clockOffsetMs(headers, now), now).at;
+  return { resource: headers.get('x-ratelimit-resource') ?? 'unknown', limit, remaining, used: used ?? limit - remaining, resetAt };
 };
 
 /** The `type` of each GraphQL error in a body; none when the body is not GraphQL JSON. */
@@ -68,24 +100,42 @@ const graphqlErrorTypes = (body: string): string[] => {
   }
 };
 
+export interface IRetry {
+  /** Epoch ms on this host's clock, bounded by {@link boundRetryAt}. */
+  at: number;
+  /** The header the time came from, as GitHub sent it, or `none` for the fallback. */
+  header: string;
+  clamped: boolean;
+}
+
 /**
  * Whether an answer is a rate limit, and when to retry: a 429; a 403 that spent the budget, carries `Retry-After`,
  * or says "rate limit" (a secondary limit); or a GraphQL `RATE_LIMITED` error, which GitHub sends with a 200.
- * `Retry-After` wins, then the budget's own reset, then {@link RATE_LIMIT_FALLBACK_MS}.
+ * `Retry-After` (seconds, relative) wins; then `X-RateLimit-Reset` (GitHub's epoch seconds, moved onto this host's
+ * clock by the `Date` header) when the budget is spent; then {@link RATE_LIMIT_FALLBACK_MS}. The result is bounded.
  */
-export const rateLimitRetryAt = (answer: IGhAnswer, stderr: string, now: number): number | null => {
-  const rate = rateOf(answer.headers);
+export const rateLimitRetry = (answer: IGhAnswer, stderr: string, now: number): IRetry | null => {
+  const remaining = wholeNumber(answer.headers.get('x-ratelimit-remaining'));
   const text = `${answer.body}\n${stderr}`;
   const limited = answer.status === 429
-    || (answer.status === 403 && (rate?.remaining === 0 || answer.headers.has('retry-after') || /rate limit/i.test(text)))
+    || (answer.status === 403 && (remaining === 0 || answer.headers.has('retry-after') || /rate limit/i.test(text)))
     || graphqlErrorTypes(answer.body).includes('RATE_LIMITED')
     || (answer.status === null && /rate limit/i.test(stderr));
   if (!limited) return null;
-  const retryAfter = wholeNumber(answer.headers.get('retry-after'));
-  if (retryAfter !== null) return now + retryAfter * 1000;
-  if (rate && rate.remaining === 0 && rate.resetAt > now) return rate.resetAt;
-  return now + RATE_LIMIT_FALLBACK_MS;
+  const retryAfterRaw = answer.headers.get('retry-after');
+  const retryAfter = wholeNumber(retryAfterRaw);
+  if (retryAfter !== null) return { ...boundRetryAt(now + retryAfter * 1000, now), header: `Retry-After: ${retryAfterRaw}` };
+  const resetRaw = answer.headers.get('x-ratelimit-reset');
+  const reset = wholeNumber(resetRaw);
+  if (remaining === 0 && reset !== null) {
+    return { ...boundRetryAt(reset * 1000 - clockOffsetMs(answer.headers, now), now), header: `X-RateLimit-Reset: ${resetRaw}` };
+  }
+  return { at: now + RATE_LIMIT_FALLBACK_MS, header: 'none', clamped: false };
 };
+
+/** {@link rateLimitRetry}'s time alone, or null when the answer is no rate limit. */
+export const rateLimitRetryAt = (answer: IGhAnswer, stderr: string, now: number): number | null =>
+  rateLimitRetry(answer, stderr, now)?.at ?? null;
 
 /** Classify a failed `gh` run into a server token; the raw text is kept for `watch list` only. */
 export const classifyGhError = (
@@ -99,6 +149,8 @@ export const classifyGhError = (
   if (err.killed || err.signal === 'SIGTERM') return 'timeout';
   if (rateLimitRetryAt(answer, stderr, 0) !== null || /rate limit/i.test(stderr)) return 'rate-limited';
   if (answer.status === 404 || /HTTP 404/.test(stderr) || graphqlErrorTypes(answer.body).includes('NOT_FOUND')) return 'http-404';
+  // GraphQL answers a refusal with a 200 and an error: FORBIDDEN, or an organization's SAML enforcement (r2 #3).
+  if (graphqlErrorTypes(answer.body).includes('FORBIDDEN') || /SAML enforcement/i.test(`${answer.body}\n${stderr}`)) return 'http-403';
   if (answer.status === 401 || /HTTP 401|gh auth login|authentication/i.test(stderr)) return 'auth';
   if (answer.status === 403 || /HTTP 403/.test(stderr)) return 'http-403';
   return 'other';
@@ -109,13 +161,19 @@ export const runGhApi = (args: string[], now: () => number = Date.now): Promise<
   new Promise((resolve) => {
     const withHeaders = args[0] === 'api' ? ['api', '-i', ...args.slice(1)] : args;
     execFile('gh', withHeaders, { timeout: GH_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }, (err, stdout, stderr) => {
+      const at = now();
       const answer = parseIncluded(String(stdout ?? ''));
-      const rate = rateOf(answer.headers);
+      const rate = rateOf(answer.headers, at);
       if (!err) return resolve({ ok: true, stdout: answer.body, ...(rate ? { rate } : {}) });
       const text = String(stderr ?? '');
       const message = `${String(text || err.message).trim().split('\n')[0]}`.slice(0, 300);
       const code = classifyGhError(err as never, text, answer);
-      const retryAt = code === 'rate-limited' ? (rateLimitRetryAt(answer, text, now()) ?? now() + RATE_LIMIT_FALLBACK_MS) : undefined;
-      resolve({ ok: false, code, message, ...(rate ? { rate } : {}), ...(retryAt !== undefined ? { retryAt } : {}) });
+      const retry = code === 'rate-limited'
+        ? (rateLimitRetry(answer, text, at) ?? { at: at + RATE_LIMIT_FALLBACK_MS, header: 'none', clamped: false })
+        : null;
+      resolve({
+        ok: false, code, message, ...(rate ? { rate } : {}),
+        ...(retry ? { retryAt: retry.at, retryHeader: retry.header, retryClamped: retry.clamped } : {}),
+      });
     });
   });

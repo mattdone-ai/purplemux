@@ -997,8 +997,10 @@ one "failing" notice carrying a server token (http-404, http-403, timeout, auth,
 sso-config, other); watch list shows the error text; after that notice the watch reads less often
 (2x, 4x, up to 8x its interval). GitHub's rate limit (a 403 or 429 that says so, or a GraphQL
 RATE_LIMITED) is no failure: every GitHub watch waits until the reset GitHub names
-(X-RateLimit-Reset, or Retry-After), its lastError reads rate-limited, and no failing notice goes
-out. A watch made during a rate limit is made with baselinePending: true; the first read after
+(Retry-After, else X-RateLimit-Reset moved onto this host's clock by the answer's Date header),
+never past 65 minutes and never a time already past (then 60 s), plus 5 s; the watches then
+resume 2 s apart in the order they were made (up to 60 s). Its lastError reads rate-limited, and
+no failing notice goes out. A GraphQL FORBIDDEN or SAML-enforcement error is http-403. A watch made during a rate limit is made with baselinePending: true; the first read after
 the reset takes its baseline (a head-moved or moved watch counts its move from that read). A
 merged watch on a PR closed without a merge reports CLOSED. Host caps: 60 GitHub watches and
 2,000 GitHub requests/h in all (one per check; a checks-settled watch with more than 100 checks

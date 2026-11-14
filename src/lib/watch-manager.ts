@@ -1,7 +1,7 @@
 import os from 'os';
 import { SsoConfigError, findSsoProfile, readSsoToken, type TSsoTokenState } from '@/lib/aws-sso-cache';
 import type { ICaller } from '@/lib/caller';
-import { runGhApi, type IGhRate, type TGhResult } from '@/lib/gh-api';
+import { RATE_LIMIT_MAX_HOLD_MS, boundRetryAt, runGhApi, type IGhRate, type TGhResult } from '@/lib/gh-api';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import type { IWatchFields } from '@/lib/inbox-templates';
 import { createLogger } from '@/lib/logger';
@@ -117,6 +117,17 @@ const rollupPage = (rollup: unknown): IRollupPage => {
 const SPEND_WINDOW_MS = 60 * 60 * 1000;
 /** The budget log warns once per reset when this share of a budget is left. */
 const BUDGET_LOW_SHARE = 0.1;
+/** A hold ends this long after GitHub's reset: a reset read to the second is not yet a budget (r2 #2). */
+export const RESUME_MARGIN_MS = 5_000;
+/**
+ * After a hold the GitHub watches resume one slot apart, in the order they were made, up to the last slot: never
+ * every watch in the first pass after the reset (r2 #2).
+ */
+export const RESUME_STAGGER_MS = 2_000;
+export const RESUME_STAGGER_MAX_MS = 60_000;
+
+/** A time as ISO text, or `an unknown time` for a value no Date can hold: a log or a message never throws. */
+const isoTime = (ms: number): string => (Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : 'an unknown time');
 
 /** The server's `gh api` reads, with their status and rate-limit headers (`gh-api.ts`). */
 export const runGhDefault = (args: string[]): Promise<TGhResult> => runGhApi(args);
@@ -166,9 +177,18 @@ export class WatchManager {
   /** One entry per watch read an hour back: which owner spent it. */
   private spend: Array<{ at: number; owner: string }> = [];
 
-  /** Hold every GitHub read until `retryAt`; a later reset only lengthens the hold. */
-  private pauseGithub(retryAt: number): void {
-    this.githubPausedUntil = Math.max(this.githubPausedUntil, retryAt);
+  /**
+   * Hold every GitHub read until `retryAt` plus {@link RESUME_MARGIN_MS}; a later reset only lengthens the hold. The
+   * time is bounded again here: never past {@link RATE_LIMIT_MAX_HOLD_MS} (one line logs a clamp, with the header
+   * GitHub sent), and a value that is not a time after now holds for the fallback.
+   */
+  private pauseGithub(retryAt: number | undefined, now: number, header?: string, clampedAtSource = false): void {
+    const bounded = boundRetryAt(retryAt ?? NaN, now);
+    if (bounded.clamped || clampedAtSource) {
+      log.warn({ header: header ?? 'unknown', maxHoldMs: RATE_LIMIT_MAX_HOLD_MS },
+        `a GitHub rate-limit hold past ${RATE_LIMIT_MAX_HOLD_MS / 60_000} min was clamped to ${isoTime(bounded.at)}`);
+    }
+    this.githubPausedUntil = Math.max(this.githubPausedUntil, bounded.at + RESUME_MARGIN_MS);
   }
 
   /** Whether the GitHub lane holds its reads now. */
@@ -192,7 +212,9 @@ export class WatchManager {
   private async gh(args: string[], owner: string): Promise<TGhResult> {
     const now = this.deps.now();
     const r = await this.deps.runGh(args);
+    // Pruned on every push, not only when read: the log holds one hour of reads, whatever reads it (r2 #4).
     this.spend.push({ at: now, owner });
+    this.spend = this.spend.filter((e) => now - e.at < SPEND_WINDOW_MS);
     if (r.rate) {
       this.budgets.set(r.rate.resource, r.rate);
       log.debug({ resource: r.rate.resource, remaining: r.rate.remaining, limit: r.rate.limit, owner }, 'watch read: GitHub budget');
@@ -200,11 +222,12 @@ export class WatchManager {
     const rate = r.rate;
     const low = rate && rate.remaining <= rate.limit * BUDGET_LOW_SHARE && this.lowLogged.get(rate.resource) !== rate.resetAt;
     if (!r.ok && r.code === 'rate-limited') {
-      this.pauseGithub(r.retryAt ?? now);
-      log.warn({ ...rate, retryAt: r.retryAt, ...this.spendSummary(now) }, `GitHub rate limit met by a watch read; GitHub watches wait until ${new Date(r.retryAt ?? now).toISOString()}`);
+      this.pauseGithub(r.retryAt, now, r.retryHeader, r.retryClamped === true);
+      log.warn({ ...rate, retryHeader: r.retryHeader, pausedUntil: this.githubPausedUntil, ...this.spendSummary(now) },
+        `GitHub rate limit met by a watch read; GitHub watches wait until ${isoTime(this.githubPausedUntil)}`);
     } else if (low) {
       this.lowLogged.set(rate.resource, rate.resetAt);
-      log.warn({ ...rate, ...this.spendSummary(now) }, `GitHub ${rate.resource} budget low: ${rate.remaining} of ${rate.limit} left until ${new Date(rate.resetAt).toISOString()}`);
+      log.warn({ ...rate, ...this.spendSummary(now) }, `GitHub ${rate.resource} budget low: ${rate.remaining} of ${rate.limit} left until ${isoTime(rate.resetAt)}`);
     }
     return r;
   }
@@ -396,6 +419,7 @@ export class WatchManager {
     const now = this.deps.now();
     const { watches } = await this.deps.read();
     const outcomes = new Map<string, TOutcome | 'expired' | 'dropped'>();
+    const githubSlot = new Map(watches.filter(isGithub).map((w, slot) => [w.id, slot]));
     // Evaluated outside the lock: a GitHub read may take its full timeout.
     for (const w of watches) {
       // The local lane holds every watch that reads no GitHub: leases and auth (ADR-0041).
@@ -416,7 +440,8 @@ export class WatchManager {
         continue;
       }
       // A rate limit holds every GitHub read until GitHub's reset: no read, no failure, the watch kept (PMUX-WATCH-403).
-      if (isGithub(w) && this.githubPaused()) continue;
+      // After the hold each watch waits its own slot, so they do not all read in the first pass (r2 #2).
+      if (isGithub(w) && now < this.githubPausedUntil + Math.min((githubSlot.get(w.id) ?? 0) * RESUME_STAGGER_MS, RESUME_STAGGER_MAX_MS)) continue;
       try {
         outcomes.set(w.id, await this.evaluate(w));
       } catch (err) {
@@ -472,7 +497,7 @@ export class WatchManager {
     // GitHub's rate limit is not the watch failing: it counts no failure, sends no failing notice, and the watch reads
     // again after the reset GitHub named (PMUX-WATCH-403).
     if (outcome.code === 'rate-limited') {
-      const until = new Date(outcome.retryAt ?? this.githubPausedUntil).toISOString();
+      const until = isoTime(this.githubPausedUntil);
       return replace({ ...w, lastError: { code: 'rate-limited', message: `${outcome.message} (reads again after ${until})`, at: now } });
     }
     const failures = w.failures + 1;
@@ -531,7 +556,7 @@ export class WatchManager {
     }
     if (this.githubPaused()) return { sha: null, holds: false, pendingUntil: this.githubPausedUntil };
     const r = spec.kind === 'pr' ? await this.pull(spec.target, owner) : await this.refSha(spec.target, owner);
-    if (!r.ok && r.code === 'rate-limited') return { sha: null, holds: false, pendingUntil: r.retryAt ?? this.githubPausedUntil };
+    if (!r.ok && r.code === 'rate-limited') return { sha: null, holds: false, pendingUntil: this.githubPausedUntil };
     if (r.ok) {
       if (!('head' in r)) return { sha: r.sha, holds: false };
       const holds = (spec.until === 'merged' || spec.until === 'closed') && (r.merged || r.state === 'closed');
@@ -564,7 +589,7 @@ export class WatchManager {
     const made = createWatch(spec, owner, baseline.sha, now, this.deps.newId(), baseline.holds, pending);
     const watch: IWatch = pending
       ? { ...made, lastError: { code: 'rate-limited', at: now,
-        message: `GitHub was rate-limited at creation; the first read after ${new Date(baseline.pendingUntil!).toISOString()} takes the baseline` } }
+        message: `GitHub was rate-limited at creation; the first read after ${isoTime(baseline.pendingUntil!)} takes the baseline` } }
       : made;
     await this.deps.mutate(async (state) => {
       checkCaps(state, spec, owner);

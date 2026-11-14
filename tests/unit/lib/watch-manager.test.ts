@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { ICaller } from '@/lib/caller';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import { renderInboxLine } from '@/lib/inbox-templates';
-import { WatchManager, classifyGhError, settleChecks, type IWatchDeps, type TGhResult } from '@/lib/watch-manager';
+import { RESUME_MARGIN_MS, RESUME_STAGGER_MS, WatchManager, classifyGhError, settleChecks, type IWatchDeps, type TGhResult } from '@/lib/watch-manager';
 import { WATCH_DEFAULT_TTL_S, WATCH_GITHUB_CAP, WATCH_TAB_CAP, WatchError, checkSpec, isDue } from '@/lib/watch-store';
 import type { IInboxItem } from '@/types/inbox';
 import type { IWatchesState } from '@/types/watch';
@@ -510,6 +510,8 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
     m = new WatchManager(f.deps());
   });
   const RESET = T0 + 16 * MIN;
+  /** The hold ends a margin after GitHub's reset (r2 #2). */
+  const RESUME = RESET + RESUME_MARGIN_MS;
   const limited = (retryAt = RESET): TGhResult => ({ ok: false, code: 'rate-limited', message: 'API rate limit exceeded for user ID 1', retryAt,
     rate: { resource: 'graphql', limit: 5000, remaining: 0, used: 5000, resetAt: retryAt } });
   const tickTo = async (at: number) => {
@@ -529,15 +531,15 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
     expect(f.ghCalls).toHaveLength(created + 1);
     expect(m.githubPaused()).toBe(true);
     expect(f.state.watches.find((w) => w.id === w7.id)).toMatchObject({ failures: 0, failingNotified: false, lastError: { code: 'rate-limited' } });
-    expect(f.state.watches.find((w) => w.id === w7.id)?.lastError?.message).toContain(new Date(RESET).toISOString());
+    expect(f.state.watches.find((w) => w.id === w7.id)?.lastError?.message).toContain(new Date(RESUME).toISOString());
 
     // Every pass before the reset reads nothing, however long the hold.
-    for (const at of [T0 + 6 * MIN, T0 + 10 * MIN, RESET - 1]) await tickTo(at);
+    for (const at of [T0 + 6 * MIN, T0 + 10 * MIN, RESET, RESUME - 1]) await tickTo(at);
     expect(f.ghCalls).toHaveLength(created + 1);
     expect(f.sent).toEqual([]);
     expect(f.state.watches).toHaveLength(2);
 
-    await tickTo(RESET);
+    await tickTo(RESUME);
     expect(m.githubPaused()).toBe(false);
     expect(f.sent.map((x) => x.fields.notice)).toEqual(['merged']);
     expect(f.state.watches).toHaveLength(1);
@@ -558,7 +560,7 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
     f.answer('number=11', limited());
     const w = await m.create(B, { kind: 'pr', target: 'o/r#11', until: 'head-moved' });
     expect(w).toMatchObject({ baseline: null, baselinePending: true, lastCheckedAt: null, lastError: { code: 'rate-limited' } });
-    expect(w.lastError?.message).toContain(new Date(RESET).toISOString());
+    expect(w.lastError?.message).toContain(new Date(RESUME).toISOString());
 
     // A second create while the lane holds reads nothing at all.
     const calls = f.ghCalls.length;
@@ -569,11 +571,14 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
     // The first read after the reset takes the baseline and fires nothing; a later move fires.
     f.answer('number=11', f.pull(false, 'open', SHA_A), f.pull(false, 'open', SHA_B));
     f.answer('expression=main', f.ref(SHA_A), f.ref(SHA_B));
-    await tickTo(RESET);
+    // Two held watches resume a slot apart: the first at the hold's end, the second one slot later (r2 #2).
+    await tickTo(RESUME);
+    expect(f.state.watches.find((x) => x.id === w2.id)).toMatchObject({ baselinePending: true });
+    await tickTo(RESUME + RESUME_STAGGER_MS);
     expect(f.sent).toEqual([]);
     expect(f.state.watches.find((x) => x.id === w.id)).toMatchObject({ baseline: SHA_A, baselinePending: false, lastError: null });
     expect(f.state.watches.find((x) => x.id === w2.id)).toMatchObject({ baseline: SHA_A, baselinePending: false });
-    await tickTo(RESET + 2 * MIN);
+    await tickTo(RESUME + RESUME_STAGGER_MS + 2 * MIN);
     expect(f.sent.map((x) => x.line)).toEqual([
       expect.stringContaining('o/r#11 head moved aaaaaaaa -> bbbbbbbb'),
       expect.stringContaining('o/r@main moved aaaaaaaa -> bbbbbbbb'),
@@ -584,13 +589,55 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
     f.answer('number=12', limited());
     await m.create(B, { kind: 'pr', target: 'o/r#12', until: 'merged' });
     f.answer('number=12', f.pull(true, 'closed', SHA_B));
-    await tickTo(RESET);
+    await tickTo(RESUME);
     expect(f.sent.map((x) => x.line)).toEqual([expect.stringContaining('o/r#12 is MERGED (bbbbbbbb)')]);
   });
 
   it('a missing PR is still watch-invalid when GitHub answers; only the rate limit makes a pending watch', async () => {
     f.answer('number=404', { ok: false, code: 'http-404', message: 'Could not resolve to a PullRequest' });
     expect(await code(m.create(B, { kind: 'pr', target: 'o/r#404', until: 'merged' }))).toBe('watch-invalid');
+  });
+
+  it('a hold a fake read asks for beyond the hour, or as no time at all, is bounded: nothing throws (r2 #1)', async () => {
+    const absurd: TGhResult = { ok: false, code: 'rate-limited', message: 'API rate limit exceeded', retryAt: 1e300,
+      rate: { resource: 'graphql', limit: 5000, remaining: 0, used: 5000, resetAt: 1e300 } };
+    f.answer('number=31', absurd);
+    const w = await m.create(B, { kind: 'pr', target: 'o/r#31', until: 'merged' });
+    const held = T0 + 65 * MIN + RESUME_MARGIN_MS;
+    expect(m.budget().pausedUntil).toBe(held);
+    expect(w.lastError?.message).toContain(new Date(held).toISOString());
+
+    const m2 = new WatchManager(f.deps());
+    f.answer('number=32', { ok: false, code: 'rate-limited', message: 'limited', retryAt: NaN });
+    await expect(m2.create(B, { kind: 'pr', target: 'o/r#32', until: 'merged' })).resolves.toMatchObject({ baselinePending: true });
+    expect(m2.budget().pausedUntil).toBe(T0 + 60_000 + RESUME_MARGIN_MS);
+    // A tick that meets the same answers logs and records them without a RangeError.
+    f.now = held;
+    f.answer('number=31', absurd);
+    await expect(m.tick()).resolves.toBeUndefined();
+  });
+
+  it('two held watches do not both read in the first pass after the reset (r2 #2)', async () => {
+    f.answer('number=41', f.pull(false, 'open', SHA_A), limited(), f.pull(false, 'open', SHA_A));
+    f.answer('number=42', f.pull(false, 'open', SHA_A));
+    await m.create(B, { kind: 'pr', target: 'o/r#41', until: 'merged' });
+    await m.create(B, { kind: 'pr', target: 'o/r#42', until: 'merged' });
+    await tickTo(T0 + 2 * MIN);
+    const held = f.ghCalls.length;
+    await tickTo(RESUME);
+    expect(f.ghCalls).toHaveLength(held + 1);
+    await tickTo(RESUME + RESUME_STAGGER_MS);
+    expect(f.ghCalls).toHaveLength(held + 2);
+  });
+
+  it('the spend log keeps one hour of reads, pruned as reads land, never only when read (r2 #4)', async () => {
+    f.answer('number=51', f.pull(false, 'open', SHA_A));
+    await m.create(B, { kind: 'pr', target: 'o/r#51', until: 'merged', intervalS: 60 });
+    const spend = () => (m as unknown as { spend: unknown[] }).spend.length;
+    // Three hours of reads, one a minute, with no budget() call to prune them.
+    for (let i = 1; i <= 180; i++) await tickTo(T0 + i * MIN);
+    expect(spend()).toBeLessThanOrEqual(60);
+    expect(spend()).toBeGreaterThan(50);
   });
 
   it('names who spent the budget: the last budget per resource, the watch reads an hour back, the top owners', async () => {
