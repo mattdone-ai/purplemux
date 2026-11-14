@@ -47,12 +47,13 @@ vi.mock('@/lib/session-host', () => ({
   registerSessionHost: (name: string, host: string | null) => { if (host) hostOf.map.set(name, host); },
   forgetSessionHost: (name: string) => { hostOf.map.delete(name); },
 }));
-const fleet = vi.hoisted(() => ({ hosts: null as string | null, callback: 'http://host-a:8022' }));
+const fleet = vi.hoisted(() => ({ hosts: null as string | null, callback: 'http://host-a:8022', hostCallback: null as string | null }));
 vi.mock('@/lib/fleet-config-store', () => ({
   readFleetConfig: async () => ({ values: {}, versions: {}, history: [] }),
   valueOf: (_state: unknown, key: string) => {
     if (key === 'remote.hosts') return fleet.hosts === null ? null : { value: fleet.hosts };
     if (key === 'remote.callback-url') return { value: fleet.callback };
+    if (key === 'remote.callback-url.host-b') return fleet.hostCallback === null ? null : { value: fleet.hostCallback };
     if (key === 'remote.callback-allow-hosts') return { value: 'host-a' };
     return null;
   },
@@ -93,6 +94,7 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     replies.fn = () => ({ stdout: '' });
     audit.mockClear();
     fleet.hosts = 'host-b';
+    fleet.hostCallback = null;
     workspaceDirs.map = new Map();
     scanBackoff()?.clear();
   });
@@ -446,6 +448,59 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
     expect(tabEnv?.content).toBe(`PMUX_TAB_TOKEN='${token}'\n`);
     // The token appears in the stdin script only inside the base64 env file.
     expect(script.includes(token!)).toBe(false);
+  });
+
+  describe('the host\'s callback URL (PMUX-REMOTE-URL)', () => {
+    const putOf = (script: string, file: string) => {
+      const m = script.match(new RegExp(`^put '${file.replace(/[./-]/g, '\\$&')}' '([A-Za-z0-9+/=]*)' (\\d+)$`, 'm'));
+      return m ? { content: Buffer.from(m[1], 'base64').toString('utf-8'), mode: m[2] } : null;
+    };
+
+    it('writes the fleet URL to the kit\'s callback-url and the pane\'s PMUX_URL when the host has no key', async () => {
+      const { createSession } = await import('@/lib/tmux');
+      await createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+      const script = calls.list[0].input ?? '';
+
+      expect(putOf(script, 'callback-url')).toEqual({ content: 'http://host-a:8022\n', mode: '600' });
+      expect(script).toContain("PMUX_URL='\\''http://host-a:8022'\\''");
+    });
+
+    it('the host\'s own key wins for the kit file and for the pane\'s PMUX_URL', async () => {
+      fleet.hostCallback = 'http://control.example.ts.net:8022';
+      const { createSession } = await import('@/lib/tmux');
+      await createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+      const script = calls.list[0].input ?? '';
+
+      expect(putOf(script, 'callback-url')?.content).toBe('http://control.example.ts.net:8022\n');
+      expect(script).toContain('http://control.example.ts.net:8022');
+      expect(script).not.toContain('http://host-a:8022');
+    });
+
+    it('drops a trailing slash from the URL, in the kit file and in PMUX_URL (PMUX-REMOTE-URL r3)', async () => {
+      fleet.hostCallback = 'https://control.example.ts.net:8022/';
+      const { createSession } = await import('@/lib/tmux');
+      await createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+      const script = calls.list[0].input ?? '';
+
+      expect(putOf(script, 'callback-url')?.content).toBe('https://control.example.ts.net:8022\n');
+      expect(script).not.toContain('https://control.example.ts.net:8022/');
+    });
+
+    it('a host key the server refuses fails the create before anything reaches the host, and names the key', async () => {
+      fleet.hostCallback = 'http://example.com:8022';
+      const { createSession } = await import('@/lib/tmux');
+
+      await expect(createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' }))
+        .rejects.toThrow(/fleet config remote\.callback-url\.host-b/);
+      expect(calls.list).toEqual([]);
+    });
+
+    it('a create with no tab identity leaves the host\'s callback-url as it is', async () => {
+      const { createSession } = await import('@/lib/tmux');
+      await createSession(REMOTE, 80, 24);
+
+      expect(putOf(calls.list[0].input ?? '', 'callback-url')).toBeNull();
+    });
   });
 
   it('ships the prompt with the standing orders active at each create: an order added between two creates is in the second only (ADR-0041)', async () => {

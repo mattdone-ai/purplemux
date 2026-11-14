@@ -248,8 +248,9 @@ export const pushRemotePrompt = async (host: string, workspaceId: string, prompt
  * A remote tab's session (ADR-0022 §8; slice b). One `ssh … sh -s` run writes
  * the kit (tmux.conf, the Claude hook and hooks.json, this server's CLI, the
  * workspace prompt) and the tab's one-shot env file, then starts the session.
- * The pane gets the reap marker, `PMUX_URL` and, through the env file only, its
- * own tab token: never the workspace token, never a claude or grok home.
+ * The pane gets the reap marker, `PMUX_URL` (the host's own callback URL) and, through the env file only, its
+ * own tab token: never the workspace token, never a claude or grok home. The kit's `callback-url` gets the same URL,
+ * for the hook of every tab on the host.
  */
 const createRemoteSession = async (
   host: string,
@@ -263,10 +264,12 @@ const createRemoteSession = async (
 ): Promise<void> => {
   const env: Record<string, string> = {};
   let tabEnv: { tabId: string; content: string } | undefined;
+  let callbackUrl: string | undefined;
   if (identity) {
     env.PMUX_TAB_ID = identity.tabId;
     env.PMUX_WORKSPACE_ID = identity.workspaceId;
-    env.PMUX_URL = await resolveCallbackUrl();
+    callbackUrl = await resolveCallbackUrl(host);
+    env.PMUX_URL = callbackUrl;
     tabEnv = { tabId: identity.tabId, content: remoteTabEnvFile({ PMUX_TAB_TOKEN: await ensureTabToken(identity, name) }) };
   }
   const { getClaudePromptPath, writeClaudePromptFile } = await import('@/lib/claude-prompt');
@@ -285,7 +288,7 @@ const createRemoteSession = async (
   const nonce = nanoid(16);
   const script = buildRemoteCreateScript({
     nonce,
-    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv }),
+    files: remoteKitFiles({ tmuxConf, cli, workspaceId: identity?.workspaceId, prompt, tabEnv, callbackUrl }),
     session: name,
     cols,
     rows,

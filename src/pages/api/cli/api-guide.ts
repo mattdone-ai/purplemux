@@ -1103,10 +1103,14 @@ Keys in use:
                not an ssh alias, or "auto", is 400 config-invalid. Unset means no remote host. They
                are also the pool's remote hosts (ADR-0039). Admin token only.
   remote.callback-url
+  remote.callback-url.<host>
                The URL a remote tab's hooks and CLI use to reach this server, http(s)://host[:port].
                Plain http only to loopback, 100.64.0.0/10, a *.ts.net name or a bare name on
-               remote.callback-allow-hosts; else 400 config-invalid. Unset means
-               http://<this hostname>:<port>. Admin token only.
+               remote.callback-allow-hosts; else 400 config-invalid. The per-host key (<host> is
+               an ssh alias) wins for that host. Unset means http://<this hostname>:<port>. Each
+               tab create on a host writes the URL to the pane's PMUX_URL and to the host kit's
+               callback-url file, which the hook of every tab there reads first on each event (an
+               event that cannot be posted still spools). Admin token only.
   remote.callback-allow-hosts
                Bare lower-case host names that remote.callback-url may name over plain http,
                comma-separated. Admin token only.

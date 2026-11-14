@@ -170,11 +170,17 @@ describe('every hook POST is bounded against a server that never answers', () =>
 describe('the bounds', () => {
   // A static check that also covers a curl this suite does not execute (the tab-identity
   // request, the statusline). A curl command may span lines joined by a trailing backslash.
+  // `command -v curl` asks whether curl is installed (PMUX-REMOTE-URL r4); it runs no curl.
   const curlCommands = (content: string): string[] =>
     content
       .replace(/\\\n/g, ' ')
       .split('\n')
-      .filter((line) => /(^|[\s|(]|\$\()curl\s/.test(line));
+      .filter((line) => /(^|[\s|(]|\$\()curl\s/.test(line.replace(/command -v curl\b/g, '')));
+
+  it('the presence check is no curl call, and a curl call beside it still counts', () => {
+    expect(curlCommands('  if ! command -v curl >/dev/null 2>&1; then')).toEqual([]);
+    expect(curlCommands('  command -v curl >/dev/null && curl -s http://x')).toHaveLength(1);
+  });
 
   it.each(HOOK_SCRIPT_FILES.map((file) => [file.name, file.content]))('every curl in %s carries --max-time', (_name, content) => {
     const commands = curlCommands(content as string);
