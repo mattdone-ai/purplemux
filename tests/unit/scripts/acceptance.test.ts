@@ -284,7 +284,7 @@ describe('checks.cjs judgements', () => {
       targetedFixture: false,
       evidenceDir: null,
     });
-    // Debugging one wave against a kept instance (story 39); run.sh never passes it.
+    // Debugging one wave against a kept instance (story 39), and make acceptance-watch through run.sh; the deploy gate never passes it.
     expect(checks.parseArgs(['--state', 's.json', '--only-wave', '4']).onlyWave).toBe(4);
     expect(checks.parseArgs(['--state', 's.json', '--targeted-fixture', '--evidence-dir', '/tmp/evidence'])).toMatchObject({
       targetedFixture: true,
@@ -1325,6 +1325,33 @@ exit 0`,
     const [withWave, without] = fs.readFileSync(path.join(root, 'checks-args'), 'utf-8').trim().split('\n');
     expect(withWave).toMatch(/--only-wave 3$/);
     expect(without).not.toContain('--only-wave');
+  });
+
+  // PMUX-ACC-NITS (#87 review): `--only-wave` is for make acceptance-watch and debugging. The deploy gate must run
+  // every check, so deploy-live.sh never names the wave filter and gives run.sh only the full-run arguments.
+  const RUN_FULL_ARGS = new Set(['--candidate', '--log', '--bash-guard', '--require-bash-guard']);
+  const deployGateNarrowing = (script: string): string[] => {
+    const found: string[] = [];
+    if (script.includes('only-wave')) found.push('names only-wave');
+    const argLines = script.split('\n').filter((l) => /^\s*(\[\[.*&&\s*)?acceptance_args\+?=/.test(l));
+    if (argLines.length === 0) found.push('no acceptance_args');
+    for (const l of argLines) for (const flag of l.match(/--[a-z-]+/g) ?? []) if (!RUN_FULL_ARGS.has(flag)) found.push(`passes ${flag}`);
+    // Every line that runs the gate (the `[[ -x "$ACCEPTANCE" ]]` existence check does not run it).
+    const calls = script.split('\n').filter((l) => l.includes('"$ACCEPTANCE" ') && !l.includes('-x "$ACCEPTANCE"'));
+    if (calls.length !== 1 || !/"\$ACCEPTANCE" "\$\{acceptance_args\[@\]\}" >/.test(calls[0])) found.push(`calls run.sh as ${JSON.stringify(calls)}`);
+    return found;
+  };
+
+  it('deploy-live.sh never passes --only-wave: the deploy gate runs every check (PMUX-ACC-NITS)', () => {
+    const script = fs.readFileSync(path.join(ROOT, 'scripts/deploy-live.sh'), 'utf-8');
+    expect(deployGateNarrowing(script)).toEqual([]);
+    // The guard fires on each way a narrowed gate could be written.
+    const narrowed = (from: string, to: string) => deployGateNarrowing(script.replace(from, to));
+    const argsLine = 'acceptance_args=(--candidate "$RELEASE_DIR" --log "$ACCEPTANCE_LOG")';
+    expect(script).toContain(argsLine);
+    expect(narrowed(argsLine, `${argsLine}\n  acceptance_args+=(--only-wave 3)`)).toContain('names only-wave');
+    expect(narrowed(argsLine, `${argsLine}\n  acceptance_args+=(--keep)`)).toContain('passes --keep');
+    expect(narrowed('"${acceptance_args[@]}" >', '"${acceptance_args[@]}" "$EXTRA" >')).toEqual([expect.stringMatching(/^calls run\.sh as /)]);
   });
 
   it('passes when every check passes and nothing leaked, and always takes the instance down', () => {

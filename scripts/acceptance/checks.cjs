@@ -1636,7 +1636,7 @@ const parseArgs = (argv) => {
   const opts = { state: null, bashGuard: null, requireBashGuard: false, onlyWave: null, targetedFixture: false, evidenceDir: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--state') opts.state = argv[++i];
-    // Debugging one wave against a kept instance; run.sh and the deploy gate never pass it.
+    // Debugging one wave against a kept instance, and make acceptance-watch through run.sh; the deploy gate never passes it.
     else if (argv[i] === '--only-wave') {
       const raw = argv[++i];
       opts.onlyWave = /^\d+$/.test(raw ?? '') ? Number(raw) : NaN;
