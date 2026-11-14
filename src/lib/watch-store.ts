@@ -36,9 +36,9 @@ export const WATCH_MAX_INTERVAL_S = HOUR;
 /** Active pr and ref watches on the host. */
 export const WATCH_GITHUB_CAP = 60;
 /**
- * GitHub requests per hour all watches together may spend: 40 % of the 5,000/h user budget, which
- * every session's `gh` and `pr-poll.sh` share (review round 1: 60 checks-settled watches at 60 s
- * would ask for 10,800/h).
+ * GitHub requests per hour all watches together may spend: 40 % of the 5,000/h user budget. The
+ * watches read GraphQL (PMUX-WATCH-403), whose 5,000 points/h every session's `gh api graphql` and
+ * `gh pr` view share; the REST budget of `gh api` and `pr-poll.sh` they leave alone.
  */
 export const WATCH_GITHUB_REQUESTS_PER_HOUR = 2_000;
 /** A failing watch waits up to this many intervals between reads (doubling per failure). */
@@ -149,8 +149,11 @@ export const checkSpec = (input: Record<string, unknown>): IWatchSpec => {
 
 export const isGithub = (w: Pick<IWatch, 'kind'>): boolean => w.kind === 'pr' || w.kind === 'ref';
 
-/** Reads per check: a PR, plus check runs and commit status for checks-settled; a ref, one. */
-export const readsPerCheck = (w: Pick<IWatch, 'kind' | 'until'>): number => (w.kind === 'pr' && w.until === 'checks-settled' ? 3 : 1);
+/**
+ * Reads per check: one GraphQL query for a PR (its state, head and checks) or a ref (PMUX-WATCH-403). A
+ * checks-settled watch with more than 100 checks reads one more page per 100, and one more at its notice.
+ */
+export const readsPerCheck = (w: Pick<IWatch, 'kind' | 'until'>): number => (isGithub(w) ? 1 : 0);
 
 /** The GitHub requests per hour a watch asks for at its interval. */
 export const requestsPerHour = (w: Pick<IWatch, 'kind' | 'until' | 'intervalS'>): number =>
@@ -180,6 +183,7 @@ export const createWatch = (
   now: number,
   id: string,
   baselineHolds = false,
+  baselinePending = false,
 ): IWatch => ({
   id,
   workspaceId: owner.workspaceId,
@@ -192,8 +196,9 @@ export const createWatch = (
   createdAt: now,
   expiresAt: now + spec.ttlSeconds * 1000,
   // The baseline read at creation is the first check of a GitHub watch, unless it already showed
-  // the condition (a PR merged or closed): then the first pass reports it (review round 2).
-  lastCheckedAt: !isGithub(spec) || baselineHolds ? null : now,
+  // the condition (a PR merged or closed): then the first pass reports it (review round 2). A watch
+  // made during a rate limit had no read: it is due once GitHub's reset lets the lane read.
+  lastCheckedAt: !isGithub(spec) || baselineHolds || baselinePending ? null : now,
   failures: 0,
   failingNotified: false,
   lastError: null,
@@ -201,6 +206,7 @@ export const createWatch = (
   verified: owner.verified,
   identity: owner.identity,
   pendingNotice: null,
+  ...(baselinePending ? { baselinePending: true } : {}),
   ...(spec.ledgerItem ? { ledgerItem: spec.ledgerItem } : {}),
 });
 
@@ -243,6 +249,7 @@ const isWatch = (v: unknown): v is IWatch => {
   return isWatchId(w.id) && typeof w.workspaceId === 'string' && typeof w.tabId === 'string'
     && (w.kind === 'pr' || w.kind === 'ref' || w.kind === 'lease' || w.kind === 'auth') && typeof w.target === 'string'
     && Number.isSafeInteger(w.expiresAt) && Number.isSafeInteger(w.intervalS)
+    && (w.baselinePending === undefined || typeof w.baselinePending === 'boolean')
     && (w.pendingNotice === undefined || w.pendingNotice === null
       || (typeof w.pendingNotice === 'object' && typeof (w.pendingNotice as Record<string, unknown>).notice === 'string'));
 };

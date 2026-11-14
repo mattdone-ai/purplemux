@@ -100,7 +100,7 @@ export interface INoteFields { noteId: string; fromWorkspaceId: string | null; f
 /** What a watch notice reports (ADR-0015). Every value is a server enum or a grammar-checked id. */
 export type TWatchNotice = 'merged' | 'closed' | 'head-moved' | 'checks-settled' | 'moved' | 'free' | 'signed-in' | 'failing' | 'expired';
 const WATCH_NOTICES: readonly TWatchNotice[] = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'signed-in', 'failing', 'expired'];
-const WATCH_FAILURES = ['http-404', 'http-403', 'timeout', 'auth', 'gh-missing', 'sso-config', 'other'] as const;
+const WATCH_FAILURES = ['http-404', 'http-403', 'rate-limited', 'timeout', 'auth', 'gh-missing', 'sso-config', 'other'] as const;
 const WATCH_UNTILS = ['merged', 'closed', 'head-moved', 'checks-settled', 'moved', 'free', 'signed-in'] as const;
 
 /**
