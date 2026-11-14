@@ -2,8 +2,12 @@ import type { TCallerIdentity } from '@/types/identity';
 
 export type TWatchKind = 'pr' | 'ref' | 'lease' | 'auth';
 export type TWatchUntil = 'merged' | 'closed' | 'head-moved' | 'checks-settled' | 'moved' | 'free' | 'signed-in';
-/** A server-classified failure; the raw text is shown by `watch list`, never typed. `sso-config`: an auth watch's AWS config or SSO cache is unreadable. */
-export type TWatchFailure = 'http-404' | 'http-403' | 'timeout' | 'auth' | 'gh-missing' | 'sso-config' | 'other';
+/**
+ * A server-classified failure; the raw text is shown by `watch list`, never typed. `sso-config`: an auth watch's AWS
+ * config or SSO cache is unreadable. `rate-limited`: GitHub's rate limit (PMUX-WATCH-403); it is recorded on the
+ * watch but counts as no failure: the watch waits for GitHub's reset.
+ */
+export type TWatchFailure = 'http-404' | 'http-403' | 'rate-limited' | 'timeout' | 'auth' | 'gh-missing' | 'sso-config' | 'other';
 
 export interface IWatch {
   /** `w-<nanoid>`. */
@@ -16,6 +20,11 @@ export interface IWatch {
   until: TWatchUntil;
   /** The head sha (pr) or ref sha (ref) when the watch was made; null for a lease watch. */
   baseline: string | null;
+  /**
+   * True for a GitHub watch made while GitHub was rate-limited (PMUX-WATCH-403): `baseline` is null, and the first
+   * read after the reset takes it. A head-moved or moved watch counts its move from that read.
+   */
+  baselinePending?: boolean;
   intervalS: number;
   createdAt: number;
   expiresAt: number;

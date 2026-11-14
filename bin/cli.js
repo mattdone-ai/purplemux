@@ -1335,6 +1335,7 @@ const printWatches = (watches) => {
       `expires-in=${age(w.expiresInSeconds)}`,
       `last-check=${w.lastCheckedAt ? new Date(w.lastCheckedAt).toISOString() : 'never'}`,
     ];
+    if (w.baselinePending) parts.push('baseline=pending');
     if (w.failures) parts.push(`failures=${w.failures}`);
     if (w.lastError) parts.push(`error=${w.lastError.code}: ${JSON.stringify(w.lastError.message)}`);
     if (w.label) parts.push(`label=${JSON.stringify(w.label)}`);
@@ -3979,7 +3980,8 @@ Commands:
   watch lease NAME --until free            A one-shot watch owned by this tab: the server checks it (GitHub every
                                            120 s by default, a lease on each release) and sends ONE inbox line when
                                            it holds, then clears it. Expires (default 24h, max 7d) with a notice;
-                                           3 failures in a row send one failing notice. Host cap 60 GitHub watches
+                                           3 failures in a row send one failing notice; a GitHub rate limit is no
+                                           failure: the watch waits for GitHub's reset. Host cap 60 GitHub watches
                                            (exit 3 watch-cap); 2 bad target/until; 7 unknown id on clear
   watch list [-w WS] [--json]              Watches of your workspace: owner tab (live/closed), age, expiry, last check,
                                            the last error text

@@ -1,7 +1,7 @@
-import { execFile } from 'child_process';
 import os from 'os';
 import { SsoConfigError, findSsoProfile, readSsoToken, type TSsoTokenState } from '@/lib/aws-sso-cache';
 import type { ICaller } from '@/lib/caller';
+import { runGhApi, type IGhRate, type TGhResult } from '@/lib/gh-api';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import type { IWatchFields } from '@/lib/inbox-templates';
 import { createLogger } from '@/lib/logger';
@@ -34,9 +34,7 @@ const log = createLogger('watches');
 export const WATCH_TICK_MS = 15_000;
 /** A watch whose notice cannot be queued is dropped this long after its expiry. */
 export const PENDING_GRACE_MS = 24 * 60 * 60 * 1000;
-export const GH_TIMEOUT_MS = 20_000;
-
-export type TGhResult = { ok: true; stdout: string } | { ok: false; code: TWatchFailure; message: string };
+export { GH_TIMEOUT_MS, classifyGhError, type IGhRate, type TGhResult } from '@/lib/gh-api';
 
 export interface IWatchDeps {
   now: () => number;
@@ -70,29 +68,58 @@ type TFired = Omit<IWatchFields, 'watchId' | 'target'>;
 
 type TOutcome =
   | { type: 'fire'; fields: TFired }
-  | { type: 'wait' }
-  | { type: 'fail'; code: TWatchFailure; message: string };
+  /** `baseline`: the first read of a watch made while GitHub was rate-limited (its baseline was pending). */
+  | { type: 'wait'; baseline?: string }
+  /** `retryAt` on `rate-limited` only: GitHub's own reset, when the lane reads again. */
+  | { type: 'fail'; code: TWatchFailure; message: string; retryAt?: number };
 
-/** Classify a failed `gh` run into a server token; the raw text is kept for `watch list` only. */
-export const classifyGhError = (err: NodeJS.ErrnoException & { killed?: boolean; signal?: string | null }, stderr: string): TWatchFailure => {
-  if (err.code === 'ENOENT') return 'gh-missing';
-  // A reply larger than maxBuffer also kills the child; it is not a timeout.
-  if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'other';
-  if (err.killed || err.signal === 'SIGTERM') return 'timeout';
-  if (/HTTP 404/.test(stderr)) return 'http-404';
-  if (/HTTP 401|gh auth login|authentication/i.test(stderr)) return 'auth';
-  if (/HTTP 403/.test(stderr)) return 'http-403';
-  return 'other';
+type TGhFailure = Extract<TGhResult, { ok: false }>;
+
+const failOf = (r: TGhFailure): TOutcome => ({ type: 'fail', code: r.code, message: r.message, ...(r.retryAt !== undefined ? { retryAt: r.retryAt } : {}) });
+
+/**
+ * A pull request in one GraphQL read (PMUX-WATCH-403): its state, its head and the check rollup of that head. A
+ * watch spends one point of the GraphQL budget per check, never the REST budget every `gh` and `gh api` of the
+ * shared account spends (on 2026-11-14 at 03:56Z that REST budget reached 0 and `watch pr` failed http-403).
+ * The variables go as `-f` (a string) except the number: `-F` reads a value that starts with `@` as a file.
+ */
+export const PR_QUERY = 'query($owner: String!, $name: String!, $number: Int!, $cursor: String) { repository(owner: $owner, name: $name) '
+  + '{ pullRequest(number: $number) { merged state headRefOid commits(last: 1) { nodes { commit { oid statusCheckRollup '
+  + '{ contexts(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { __typename '
+  + '... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }';
+
+/** A ref's commit in one GraphQL read; an annotated tag names its target commit, as REST `commits/<ref>` does. */
+export const REF_QUERY = 'query($owner: String!, $name: String!, $expression: String!) { repository(owner: $owner, name: $name) '
+  + '{ object(expression: $expression) { __typename oid ... on Tag { target { __typename oid } } } } }';
+
+interface IRollupPage { runs: string[]; statuses: string[]; hasNextPage: boolean; endCursor: string | null }
+
+/** A rollup page as the lines `settleChecks` reads: a check run `status\tconclusion`, a commit status its state. */
+const rollupPage = (rollup: unknown): IRollupPage => {
+  const contexts = (rollup as { contexts?: { pageInfo?: { hasNextPage?: unknown; endCursor?: unknown }; nodes?: unknown[] } } | null)?.contexts;
+  const runs: string[] = [];
+  const statuses: string[] = [];
+  for (const node of contexts?.nodes ?? []) {
+    const n = node as { __typename?: unknown; status?: unknown; conclusion?: unknown; state?: unknown };
+    if (n.__typename === 'CheckRun') runs.push(`${String(n.status ?? '').toLowerCase()}\t${String(n.conclusion ?? '').toLowerCase()}`);
+    // EXPECTED: a required status that has not reported yet, so it is still pending.
+    else if (n.__typename === 'StatusContext') statuses.push(n.state === 'EXPECTED' ? 'pending' : String(n.state ?? '').toLowerCase());
+  }
+  return {
+    runs,
+    statuses,
+    hasNextPage: contexts?.pageInfo?.hasNextPage === true,
+    endCursor: typeof contexts?.pageInfo?.endCursor === 'string' ? contexts.pageInfo.endCursor : null,
+  };
 };
 
-export const runGhDefault = (args: string[]): Promise<TGhResult> =>
-  new Promise((resolve) => {
-    execFile('gh', args, { timeout: GH_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GH_PROMPT_DISABLED: '1' } }, (err, stdout, stderr) => {
-      if (!err) return resolve({ ok: true, stdout });
-      const message = `${String(stderr || err.message).trim().split('\n')[0]}`.slice(0, 300);
-      resolve({ ok: false, code: classifyGhError(err as never, String(stderr ?? '')), message });
-    });
-  });
+/** One watch read per GitHub watch an hour back, for the budget log line: who spent what. */
+const SPEND_WINDOW_MS = 60 * 60 * 1000;
+/** The budget log warns once per reset when this share of a budget is left. */
+const BUDGET_LOW_SHARE = 0.1;
+
+/** The server's `gh api` reads, with their status and rate-limit headers (`gh-api.ts`). */
+export const runGhDefault = (args: string[]): Promise<TGhResult> => runGhApi(args);
 
 const GREEN = new Set(['success', 'neutral', 'skipped']);
 
@@ -128,30 +155,136 @@ export class WatchManager {
 
   // ─── reads ──────────────────────────────────────────────────────────────
 
-  private async gh(args: string[]): Promise<TGhResult> {
-    return this.deps.runGh(args);
+  // ─── the GitHub budget ──────────────────────────────────────────────────
+
+  /** No GitHub read before this time: GitHub's own reset of a rate limit this server met (PMUX-WATCH-403). */
+  private githubPausedUntil = 0;
+  /** The last budget each resource reported. */
+  private budgets = new Map<string, IGhRate>();
+  /** The resets a low-budget line was already logged for, per resource: one line per reset. */
+  private lowLogged = new Map<string, number>();
+  /** One entry per watch read an hour back: which owner spent it. */
+  private spend: Array<{ at: number; owner: string }> = [];
+
+  /** Hold every GitHub read until `retryAt`; a later reset only lengthens the hold. */
+  private pauseGithub(retryAt: number): void {
+    this.githubPausedUntil = Math.max(this.githubPausedUntil, retryAt);
   }
 
-  private async pull(target: string): Promise<{ ok: true; merged: boolean; state: string; head: string } | Extract<TGhResult, { ok: false }>> {
-    const pr = parsePr(target)!;
-    const r = await this.gh(['api', `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}`]);
-    if (!r.ok) return r;
-    try {
-      const body = JSON.parse(r.stdout) as { merged?: unknown; state?: unknown; head?: { sha?: unknown } };
-      const head = body.head?.sha;
-      if (typeof head !== 'string' || !SHA.test(head)) return { ok: false, code: 'other', message: 'the pull request has no head sha' };
-      return { ok: true, merged: body.merged === true, state: String(body.state), head };
-    } catch {
-      return { ok: false, code: 'other', message: 'gh api returned a body that is not JSON' };
+  /** Whether the GitHub lane holds its reads now. */
+  githubPaused(now = this.deps.now()): boolean {
+    return now < this.githubPausedUntil;
+  }
+
+  /**
+   * What the watches spent, for the log line: the reads an hour back, and the owners that spent the most. A budget
+   * that ran out while the watches spent little of it was spent by another caller of the account.
+   */
+  private spendSummary(now: number): { watchReads: number; topOwners: Array<{ owner: string; reads: number }> } {
+    this.spend = this.spend.filter((e) => now - e.at < SPEND_WINDOW_MS);
+    const byOwner = new Map<string, number>();
+    for (const e of this.spend) byOwner.set(e.owner, (byOwner.get(e.owner) ?? 0) + 1);
+    const topOwners = [...byOwner.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([owner, reads]) => ({ owner, reads }));
+    return { watchReads: this.spend.length, topOwners };
+  }
+
+  /** One read of the GitHub API, counted against its owner, with the budget it reported logged. */
+  private async gh(args: string[], owner: string): Promise<TGhResult> {
+    const now = this.deps.now();
+    const r = await this.deps.runGh(args);
+    this.spend.push({ at: now, owner });
+    if (r.rate) {
+      this.budgets.set(r.rate.resource, r.rate);
+      log.debug({ resource: r.rate.resource, remaining: r.rate.remaining, limit: r.rate.limit, owner }, 'watch read: GitHub budget');
     }
+    const rate = r.rate;
+    const low = rate && rate.remaining <= rate.limit * BUDGET_LOW_SHARE && this.lowLogged.get(rate.resource) !== rate.resetAt;
+    if (!r.ok && r.code === 'rate-limited') {
+      this.pauseGithub(r.retryAt ?? now);
+      log.warn({ ...rate, retryAt: r.retryAt, ...this.spendSummary(now) }, `GitHub rate limit met by a watch read; GitHub watches wait until ${new Date(r.retryAt ?? now).toISOString()}`);
+    } else if (low) {
+      this.lowLogged.set(rate.resource, rate.resetAt);
+      log.warn({ ...rate, ...this.spendSummary(now) }, `GitHub ${rate.resource} budget low: ${rate.remaining} of ${rate.limit} left until ${new Date(rate.resetAt).toISOString()}`);
+    }
+    return r;
   }
 
-  private async refSha(target: string): Promise<{ ok: true; sha: string } | Extract<TGhResult, { ok: false }>> {
-    const ref = parseRef(target)!;
-    const r = await this.gh(['api', `repos/${ref.owner}/${ref.repo}/commits/${encodeURIComponent(ref.ref)}`, '--jq', '.sha']);
+  /** The last budget each resource reported, and the watches' own spend an hour back. */
+  budget(): { budgets: IGhRate[]; pausedUntil: number | null } & ReturnType<WatchManager['spendSummary']> {
+    const now = this.deps.now();
+    return { budgets: [...this.budgets.values()], pausedUntil: this.githubPaused(now) ? this.githubPausedUntil : null, ...this.spendSummary(now) };
+  }
+
+  // ─── reads ──────────────────────────────────────────────────────────────
+
+  private async prPage(target: string, owner: string, cursor: string | null): Promise<
+    { ok: true; merged: boolean; state: string; head: string; checksHead: string | null; page: IRollupPage } | TGhFailure> {
+    const pr = parsePr(target)!;
+    const r = await this.gh(['api', 'graphql', '-f', `query=${PR_QUERY}`, '-f', `owner=${pr.owner}`, '-f', `name=${pr.repo}`,
+      '-F', `number=${pr.number}`, ...(cursor ? ['-f', `cursor=${cursor}`] : [])], owner);
     if (!r.ok) return r;
-    const sha = r.stdout.trim();
-    return SHA.test(sha) ? { ok: true, sha } : { ok: false, code: 'other', message: 'gh api returned no commit sha' };
+    let node: { merged?: unknown; state?: unknown; headRefOid?: unknown; commits?: { nodes?: Array<{ commit?: { oid?: unknown; statusCheckRollup?: unknown } }> } } | null | undefined;
+    try {
+      node = (JSON.parse(r.stdout) as { data?: { repository?: { pullRequest?: typeof node } | null } }).data?.repository?.pullRequest;
+    } catch {
+      return { ok: false, code: 'other', message: 'gh api graphql returned a body that is not JSON' };
+    }
+    if (!node) return { ok: false, code: 'http-404', message: `${target} does not exist or is not visible to the server's gh` };
+    const head = node.headRefOid;
+    if (typeof head !== 'string' || !SHA.test(head)) return { ok: false, code: 'other', message: 'the pull request has no head sha' };
+    const commit = node.commits?.nodes?.[0]?.commit;
+    const state = node.state === 'MERGED' || node.state === 'CLOSED' ? 'closed' : String(node.state ?? '').toLowerCase();
+    return {
+      ok: true,
+      merged: node.merged === true || node.state === 'MERGED',
+      state,
+      head,
+      checksHead: typeof commit?.oid === 'string' ? commit.oid : null,
+      page: rollupPage(commit?.statusCheckRollup ?? null),
+    };
+  }
+
+  private async pull(target: string, owner: string): Promise<{ ok: true; merged: boolean; state: string; head: string } | TGhFailure> {
+    const p = await this.prPage(target, owner, null);
+    return p.ok ? { ok: true, merged: p.merged, state: p.state, head: p.head } : p;
+  }
+
+  /**
+   * The pull request and every check of its head. The rollup belongs to the PR's last commit; a page read while the
+   * head moved is reported as `moved`, and the caller waits for the next check.
+   */
+  private async pullWithChecks(target: string, owner: string): Promise<
+    { ok: true; moved: boolean; head: string; runs: string; statuses: string } | TGhFailure> {
+    let page = await this.prPage(target, owner, null);
+    if (!page.ok) return page;
+    const head = page.head;
+    const runs: string[] = [];
+    const statuses: string[] = [];
+    for (;;) {
+      if (page.head !== head || page.checksHead !== head) return { ok: true, moved: true, head, runs: '', statuses: '' };
+      runs.push(...page.page.runs);
+      statuses.push(...page.page.statuses);
+      if (!page.page.hasNextPage || !page.page.endCursor) break;
+      page = await this.prPage(target, owner, page.page.endCursor);
+      if (!page.ok) return page;
+    }
+    return { ok: true, moved: false, head, runs: runs.map((l) => `${l}\n`).join(''), statuses: statuses.map((l) => `${l}\n`).join('') };
+  }
+
+  private async refSha(target: string, owner: string): Promise<{ ok: true; sha: string } | TGhFailure> {
+    const ref = parseRef(target)!;
+    const r = await this.gh(['api', 'graphql', '-f', `query=${REF_QUERY}`, '-f', `owner=${ref.owner}`, '-f', `name=${ref.repo}`,
+      '-f', `expression=${ref.ref}`], owner);
+    if (!r.ok) return r;
+    let object: { __typename?: unknown; oid?: unknown; target?: { __typename?: unknown; oid?: unknown } } | null | undefined;
+    try {
+      object = (JSON.parse(r.stdout) as { data?: { repository?: { object?: typeof object } | null } }).data?.repository?.object;
+    } catch {
+      return { ok: false, code: 'other', message: 'gh api graphql returned a body that is not JSON' };
+    }
+    if (!object) return { ok: false, code: 'http-404', message: `${target} does not name a commit visible to the server's gh` };
+    const sha = object.__typename === 'Tag' ? object.target?.oid : object.oid;
+    return typeof sha === 'string' && SHA.test(sha) ? { ok: true, sha } : { ok: false, code: 'other', message: 'gh api graphql returned no commit sha' };
   }
 
   private async evaluate(w: IWatch): Promise<TOutcome> {
@@ -168,39 +301,41 @@ export class WatchManager {
         throw err;
       }
     }
+    const owner = `${w.workspaceId}/${w.tabId}`;
     if (w.kind === 'ref') {
-      const r = await this.refSha(w.target);
-      if (!r.ok) return { type: 'fail', code: r.code, message: r.message };
+      const r = await this.refSha(w.target, owner);
+      if (!r.ok) return failOf(r);
+      // A watch made during a rate limit takes its baseline now: the move it waits for starts here.
+      if (w.baselinePending) return { type: 'wait', baseline: r.sha };
       return r.sha !== w.baseline ? { type: 'fire', fields: { notice: 'moved', fromSha: w.baseline!, sha: r.sha } } : { type: 'wait' };
     }
-    const p = await this.pull(w.target);
-    if (!p.ok) return { type: 'fail', code: p.code, message: p.message };
+    if (w.until === 'checks-settled') {
+      const c = await this.pullWithChecks(w.target, owner);
+      if (!c.ok) return failOf(c);
+      const pending = w.baselinePending ? { baseline: c.head } : {};
+      if (c.moved) return { type: 'wait', ...pending };
+      const settled = settleChecks(c.runs, c.statuses);
+      const successful = c.runs.split('\n').filter((line) => line === 'completed\tsuccess').length
+        + c.statuses.split('\n').filter((state) => state === 'success').length;
+      return settled.settled
+        ? { type: 'fire', fields: { notice: 'checks-settled', sha: c.head, green: settled.green, red: settled.red, successful } }
+        : { type: 'wait', ...pending };
+    }
+    const p = await this.pull(w.target, owner);
+    if (!p.ok) return failOf(p);
+    if (w.baselinePending && w.until === 'head-moved') return { type: 'wait', baseline: p.head };
+    const pending = w.baselinePending ? { baseline: p.head } : {};
     // A PR closed without a merge will never satisfy `merged`: say so rather than wait for expiry
     // (review round 1; the abandoned-blocker half of pft-1385).
     if (w.until === 'merged') {
       if (p.merged) return { type: 'fire', fields: { notice: 'merged', sha: p.head } };
-      return p.state === 'closed' ? { type: 'fire', fields: { notice: 'closed', sha: p.head } } : { type: 'wait' };
+      return p.state === 'closed' ? { type: 'fire', fields: { notice: 'closed', sha: p.head } } : { type: 'wait', ...pending };
     }
     if (w.until === 'closed') {
-      if (p.state !== 'closed') return { type: 'wait' };
+      if (p.state !== 'closed') return { type: 'wait', ...pending };
       return { type: 'fire', fields: { notice: p.merged ? 'merged' : 'closed', sha: p.head } };
     }
-    if (w.until === 'head-moved') {
-      return p.head !== w.baseline ? { type: 'fire', fields: { notice: 'head-moved', fromSha: w.baseline!, sha: p.head } } : { type: 'wait' };
-    }
-    const pr = parsePr(w.target)!;
-    const base = `repos/${pr.owner}/${pr.repo}/commits/${p.head}`;
-    const runs = await this.gh(['api', '--paginate', `${base}/check-runs?per_page=100`, '--jq', '.check_runs[] | [.status, (.conclusion // "")] | @tsv']);
-    if (!runs.ok) return { type: 'fail', code: runs.code, message: runs.message };
-    const statuses = await this.gh(['api', `${base}/status`, '--jq', '.statuses[] | .state']);
-    if (!statuses.ok) return { type: 'fail', code: statuses.code, message: statuses.message };
-    const c = settleChecks(runs.stdout, statuses.stdout);
-    const successful = runs.stdout.split('\n').filter((line) => line === 'completed\tsuccess').length
-      + statuses.stdout.split('\n').filter((state) => state === 'success').length;
-    const current = await this.pull(w.target);
-    if (!current.ok) return { type: 'fail', code: current.code, message: current.message };
-    if (current.head !== p.head) return { type: 'wait' };
-    return c.settled ? { type: 'fire', fields: { notice: 'checks-settled', sha: p.head, green: c.green, red: c.red, successful } } : { type: 'wait' };
+    return p.head !== w.baseline ? { type: 'fire', fields: { notice: 'head-moved', fromSha: w.baseline!, sha: p.head } } : { type: 'wait' };
   }
 
   // ─── the tick ───────────────────────────────────────────────────────────
@@ -280,6 +415,8 @@ export class WatchManager {
         outcomes.set(w.id, { type: 'fire', fields: w.pendingNotice as TFired });
         continue;
       }
+      // A rate limit holds every GitHub read until GitHub's reset: no read, no failure, the watch kept (PMUX-WATCH-403).
+      if (isGithub(w) && this.githubPaused()) continue;
       try {
         outcomes.set(w.id, await this.evaluate(w));
       } catch (err) {
@@ -313,7 +450,7 @@ export class WatchManager {
         return replace({ ...w, pendingNotice: undefined, lastCheckedAt: now });
       }
       if (w.kind === 'pr' && fields.notice === 'checks-settled') {
-        const current = await this.pull(w.target);
+        const current = await this.pull(w.target, `${w.workspaceId}/${w.tabId}`);
         if (!current.ok) return replace({ ...w, lastCheckedAt: now, lastError: { code: current.code,
           message: current.message, at: now } });
         if (current.head !== fields.sha) return replace({ ...w, pendingNotice: undefined, lastCheckedAt: now });
@@ -329,7 +466,14 @@ export class WatchManager {
       return without();
     }
     if (outcome.type === 'wait') {
-      return replace({ ...w, lastCheckedAt: now, failures: 0, failingNotified: false, lastError: w.kind === 'lease' ? w.lastError : null });
+      const baseline = w.baselinePending && outcome.baseline ? { baseline: outcome.baseline, baselinePending: false } : {};
+      return replace({ ...w, ...baseline, lastCheckedAt: now, failures: 0, failingNotified: false, lastError: w.kind === 'lease' ? w.lastError : null });
+    }
+    // GitHub's rate limit is not the watch failing: it counts no failure, sends no failing notice, and the watch reads
+    // again after the reset GitHub named (PMUX-WATCH-403).
+    if (outcome.code === 'rate-limited') {
+      const until = new Date(outcome.retryAt ?? this.githubPausedUntil).toISOString();
+      return replace({ ...w, lastError: { code: 'rate-limited', message: `${outcome.message} (reads again after ${until})`, at: now } });
     }
     const failures = w.failures + 1;
     let failingNotified = w.failingNotified;
@@ -369,8 +513,12 @@ export class WatchManager {
 
   // ─── the API ────────────────────────────────────────────────────────────
 
-  /** The baseline sha, and whether the creation read already shows a PR merged or closed. */
-  private async baseline(spec: IWatchSpec): Promise<{ sha: string | null; holds: boolean }> {
+  /**
+   * The baseline sha, and whether the creation read already shows a PR merged or closed. While GitHub is rate-limited
+   * (PMUX-WATCH-403) the watch is made with its baseline pending, never refused: the first read after GitHub's reset
+   * takes it. `pendingUntil` is that reset.
+   */
+  private async baseline(spec: IWatchSpec, owner: string): Promise<{ sha: string | null; holds: boolean; pendingUntil?: number }> {
     if (spec.kind === 'lease') return { sha: null, holds: false };
     if (spec.kind === 'auth') {
       try {
@@ -381,7 +529,9 @@ export class WatchManager {
         throw err;
       }
     }
-    const r = spec.kind === 'pr' ? await this.pull(spec.target) : await this.refSha(spec.target);
+    if (this.githubPaused()) return { sha: null, holds: false, pendingUntil: this.githubPausedUntil };
+    const r = spec.kind === 'pr' ? await this.pull(spec.target, owner) : await this.refSha(spec.target, owner);
+    if (!r.ok && r.code === 'rate-limited') return { sha: null, holds: false, pendingUntil: r.retryAt ?? this.githubPausedUntil };
     if (r.ok) {
       if (!('head' in r)) return { sha: r.sha, holds: false };
       const holds = (spec.until === 'merged' || spec.until === 'closed') && (r.merged || r.state === 'closed');
@@ -408,8 +558,14 @@ export class WatchManager {
     }
     // A cheap cap check before the GitHub read, then the binding one under the lock.
     checkCaps(await this.deps.read(), spec, owner);
-    const baseline = await this.baseline(spec);
-    const watch = createWatch(spec, owner, baseline.sha, this.deps.now(), this.deps.newId(), baseline.holds);
+    const baseline = await this.baseline(spec, `${owner.workspaceId}/${owner.tabId}`);
+    const now = this.deps.now();
+    const pending = baseline.pendingUntil !== undefined;
+    const made = createWatch(spec, owner, baseline.sha, now, this.deps.newId(), baseline.holds, pending);
+    const watch: IWatch = pending
+      ? { ...made, lastError: { code: 'rate-limited', at: now,
+        message: `GitHub was rate-limited at creation; the first read after ${new Date(baseline.pendingUntil!).toISOString()} takes the baseline` } }
+      : made;
     await this.deps.mutate(async (state) => {
       checkCaps(state, spec, owner);
       // The tab may have closed during the baseline read, and its removal already ran: a watch is
