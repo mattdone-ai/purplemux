@@ -5,7 +5,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { REMOTE_HOOK_SCRIPT_CONTENT, REMOTE_HOOK_URL_FILE } from '@/lib/hook-scripts';
 import { parseSpooledHook, spooledHookQuery } from '@/lib/hook-spool';
-import { pathWithoutCommand } from './path-without-command';
+import { commandStubPath } from './command-stub-path';
 
 // ADR-0022 slice (b): the remote tab's Claude hook, run with a fake curl and tmux. It posts the raw
 // hook JSON to PMUX_URL with the tab token, and spools beside itself when no server answers.
@@ -127,12 +127,12 @@ describe('remote Claude hook script (ADR-0022)', () => {
   });
 
   it('a host with no curl: the POST is skipped and the event spools (PMUX-REMOTE-URL r4)', () => {
-    const noCurl = path.join(dir, 'no-curl');
-    fs.mkdirSync(noCurl);
-    fs.copyFileSync(path.join(bin, 'tmux'), path.join(noCurl, 'tmux'));
-    fs.chmodSync(path.join(noCurl, 'tmux'), 0o755);
-    const system = pathWithoutCommand(path.join(dir, 'system'), 'curl');
-    run('stop', '{"session_id":"0f9e"}', { out: '204 0.000100', exit: 0 }, { PATH: `${noCurl}:${system}` });
+    // The stub is the only PATH entry: the commands the hook runs, its fake tmux, and no curl on any host.
+    const stub = commandStubPath(path.join(dir, 'stub'));
+    fs.copyFileSync(path.join(bin, 'tmux'), path.join(stub, 'tmux'));
+    fs.chmodSync(path.join(stub, 'tmux'), 0o755);
+    expect(fs.existsSync(path.join(stub, 'curl'))).toBe(false);
+    run('stop', '{"session_id":"0f9e"}', { out: '204 0.000100', exit: 0 }, { PATH: stub });
 
     expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(false);
     const files = spooled();

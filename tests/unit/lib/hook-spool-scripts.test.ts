@@ -10,7 +10,7 @@ import {
 } from '@/lib/hook-scripts';
 import { installHookScripts } from '@/lib/hook-scripts-install';
 import { parseSpooledHook } from '@/lib/hook-spool';
-import { pathWithoutCommand } from './path-without-command';
+import { commandStubPath } from './command-stub-path';
 
 // ADR-0020: the rendered hook scripts, run with a fake curl on PATH. A POST no
 // server answers leaves one spool file with the payload and the time the hook
@@ -146,13 +146,13 @@ describe('hook scripts spool an event no server answered (ADR-0020)', () => {
   });
 
   it('a host with no curl skips the POST and spools, for the prompt and the stop paths (PMUX-REMOTE-URL r4)', () => {
-    const noCurl = path.join(dir, 'no-curl');
-    fs.mkdirSync(noCurl);
-    fs.copyFileSync(path.join(bin, 'tmux'), path.join(noCurl, 'tmux'));
-    fs.chmodSync(path.join(noCurl, 'tmux'), 0o755);
-    const system = pathWithoutCommand(path.join(dir, 'system'), 'curl');
+    // The stub is the only PATH entry: the commands the hook runs, its fake tmux, and no curl on any host.
+    const stub = commandStubPath(path.join(dir, 'stub'));
+    fs.copyFileSync(path.join(bin, 'tmux'), path.join(stub, 'tmux'));
+    fs.chmodSync(path.join(stub, 'tmux'), 0o755);
+    expect(fs.existsSync(path.join(stub, 'curl'))).toBe(false);
     for (const event of ['prompt-submit', 'stop']) {
-      run(HOOK_SCRIPT_CONTENT, [event], '{}', { out: '204 0.000100', exit: 0 }, { PATH: `${noCurl}:${system}` });
+      run(HOOK_SCRIPT_CONTENT, [event], '{}', { out: '204 0.000100', exit: 0 }, { PATH: stub });
     }
     settle(() => spoolFiles().filter((name) => name.endsWith('.json') && !name.startsWith('.')).length >= 2);
 
