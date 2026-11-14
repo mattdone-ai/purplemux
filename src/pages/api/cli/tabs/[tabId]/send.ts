@@ -9,7 +9,7 @@ import {
 } from '@/lib/tab-send';
 import { capturePaneContent, hasSessionOrUnreachable, isContentPendingInComposer, isPaneShowingPendingLine, pressEnter } from '@/lib/tmux';
 import { readComposerScreen } from '@/lib/composer-readiness';
-import { confirmSubmission, type ISubmitConfirmRequest, type TSubmitResult } from '@/lib/send-confirmation';
+import { confirmSubmission, type ISubmitConfirmRequest, type TScreenRead, type TSubmitResult } from '@/lib/send-confirmation';
 import { deliverPrompt } from '@/lib/agent-prompt-delivery';
 import { remoteTimeoutMs } from '@/lib/remote-timeouts';
 import { withAgentDispatchThen } from '@/lib/agent-dispatch-policy';
@@ -28,6 +28,8 @@ const log = createLogger('tab-send');
 /** `submit` is null for a tab with no turn to prove (a terminal or browser tab). */
 interface IDelivered {
   submit: TSubmitResult | null;
+  /** How many screen reads of the proof wait saw each thing (PMUX-SEND-R3): the log line names why no Enter fired. */
+  screens?: Partial<Record<TScreenRead, number>>;
 }
 
 /** What the locked part hands the proof wait: the text is typed, and the baseline was read before it. */
@@ -216,16 +218,20 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     if (!typed) return null;
     if (!typed.request) return { submit: null };
     const { sessionName } = typed;
+    const screens: Partial<Record<TScreenRead, number>> = {};
     const submit = await confirmSubmission(
       {
         readEvidence: () => getStatusManager().getSubmitEvidence(tabId),
         capture: () => capturePaneContent(sessionName, { escapes: true }),
         isPendingLine: isPaneShowingPendingLine,
         pressEnter: () => pressEnter(sessionName),
+        onScreenRead: (read) => {
+          screens[read] = (screens[read] ?? 0) + 1;
+        },
       },
       typed.request,
     );
-    return { submit };
+    return { submit, screens };
   });
   if (!delivered) return;
   try {
@@ -234,10 +240,10 @@ const send = async (req: NextApiRequest, res: NextApiResponse) => {
     log.warn(`tab send to ${tabId} not recorded: ${err instanceof Error ? err.message : err}`);
   }
 
-  const { submit } = delivered;
+  const { submit, screens } = delivered;
   if (submit) {
     if (!submit.submitted || submit.resubmitted) {
-      log.warn({ tabId, ...submit }, submit.submitted ? 'tab send: submitted after one more Enter' : `tab send: ${submit.notSubmitted}`);
+      log.warn({ tabId, ...submit, screens }, submit.submitted ? 'tab send: submitted after one more Enter' : `tab send: ${submit.notSubmitted}`);
     }
     // HTTP 200 either way: the text was typed (ADR-0004, additive). The CLI exits 1 on `notSubmitted`.
     return res.status(200).json({
