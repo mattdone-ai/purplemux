@@ -16,6 +16,9 @@ import { STATUSLINE_SCRIPT_CONTENT } from '@/lib/statusline-script';
  */
 
 export const HOOK_SPOOL_DIRNAME = 'hook-spool';
+
+/** The kit file beside a remote hook that holds this server's callback URL for the host (PMUX-REMOTE-URL). */
+export const REMOTE_HOOK_URL_FILE = 'callback-url';
 /** A body longer than this (a Write's content, a long Bash output) is spooled as metadata only. */
 export const HOOK_SPOOL_MAX_BODY = 256 * 1024;
 /**
@@ -300,11 +303,13 @@ exit 0
 /**
  * The Claude hook of a REMOTE tab (ADR-0022, slice b), installed on the remote
  * host beside the hooks.json that names it. It posts the raw hook JSON to this
- * server's callback URL (`PMUX_URL`) with the tab's own token
- * (`PMUX_TAB_TOKEN`), both from the pane's environment; the server reads the
- * session id and transcript path from the body. An event no server answers
- * spools beside the script, and the server pulls that spool over ssh. The
- * event name is one fixed word from hooks.json; anything else exits.
+ * server's callback URL with the tab's own token (`PMUX_TAB_TOKEN`, from the
+ * pane's environment); the server reads the session id and transcript path from
+ * the body. The URL is the kit's `callback-url` file, which every create on the
+ * host rewrites (PMUX-REMOTE-URL), else the pane's `PMUX_URL`: an `http(s)://`
+ * line of URL characters only, never anything the event carries. An event no
+ * server answers spools beside the script, and the server pulls that spool over
+ * ssh. The event name is one fixed word from hooks.json; anything else exits.
  */
 export const REMOTE_HOOK_SCRIPT_CONTENT = `#!/bin/sh
 EVENT="\${1:-}"
@@ -313,8 +318,13 @@ case "$AT" in *[!0-9]*) AT="" ;; esac
 if [ \${#AT} -eq 19 ]; then AT="\${AT%??????}"; else AT=$(( $(date +%s) * 1000 )); fi
 PORT=""
 TOKEN="\${PMUX_TAB_TOKEN:-}"
-HOOK_BASE_URL="\${PMUX_URL:-}"
-HOOK_SPOOL_DIR="$(cd "$(dirname "$0")" && pwd)/${HOOK_SPOOL_DIRNAME}"
+HOOK_KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOOK_BASE_URL=""
+[ -f "$HOOK_KIT_DIR/${REMOTE_HOOK_URL_FILE}" ] && IFS= read -r HOOK_BASE_URL < "$HOOK_KIT_DIR/${REMOTE_HOOK_URL_FILE}"
+case "$HOOK_BASE_URL" in http://?*|https://?*) ;; *) HOOK_BASE_URL="" ;; esac
+case "$HOOK_BASE_URL" in *[!]A-Za-z0-9.:/_[-]*) HOOK_BASE_URL="" ;; esac
+[ -n "$HOOK_BASE_URL" ] || HOOK_BASE_URL="\${PMUX_URL:-}"
+HOOK_SPOOL_DIR="$HOOK_KIT_DIR/${HOOK_SPOOL_DIRNAME}"
 SPOOL_SKIP_EVENT=""
 HOOK_TIMEOUT=""
 command -v timeout >/dev/null 2>&1 && HOOK_TIMEOUT="timeout ${HOOK_TMUX_TIMEOUT_SECONDS}"

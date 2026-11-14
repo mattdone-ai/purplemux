@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { REMOTE_HOOK_SCRIPT_CONTENT } from '@/lib/hook-scripts';
+import { REMOTE_HOOK_SCRIPT_CONTENT, REMOTE_HOOK_URL_FILE } from '@/lib/hook-scripts';
 import { parseSpooledHook, spooledHookQuery } from '@/lib/hook-spool';
 
 // ADR-0022 slice (b): the remote tab's Claude hook, run with a fake curl and tmux. It posts the raw
@@ -119,6 +119,101 @@ describe('remote Claude hook script (ADR-0022)', () => {
     run('stop', '{}', { out: '204 0.000100', exit: 0 }, { PMUX_TAB_TOKEN: '' });
     expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(false);
     expect(spooled()).toHaveLength(1);
+  });
+
+  it('spools when no URL is set anywhere (no kit file, no PMUX_URL): today\'s behaviour, and curl never runs', () => {
+    run('stop', '{"session_id":"0f9e"}', { out: '204 0.000100', exit: 0 }, { PMUX_URL: '' });
+    expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(false);
+    expect(spooled()).toHaveLength(1);
+  });
+
+  // PMUX-REMOTE-URL: the kit's callback-url, written by every create on the host, is the hook's base URL.
+  describe('the kit\'s callback-url file (PMUX-REMOTE-URL)', () => {
+    const KIT_URL = 'http://control.example.ts.net:8022';
+    const writeKitUrl = (line: string) => fs.writeFileSync(path.join(kit, REMOTE_HOOK_URL_FILE), line, { mode: 0o600 });
+    const postedTo = () => fs.readFileSync(path.join(dir, 'curl-args'), 'utf-8');
+
+    it('posts live to the kit URL, with no PMUX_URL in the pane, and spools nothing', () => {
+      writeKitUrl(`${KIT_URL}\n`);
+      run('prompt-submit', '{"session_id":"0f9e"}', { out: '204 0.000100', exit: 0 }, { PMUX_URL: '' });
+
+      expect(postedTo()).toMatch(new RegExp(`${KIT_URL}/api/status/hook\\?remote=claude&event=prompt-submit&session=${SESSION}&occurredAt=\\d{13}`));
+      expect(spooled()).toEqual([]);
+    });
+
+    it('wins over the pane\'s PMUX_URL, which a create before the change baked in', () => {
+      writeKitUrl(KIT_URL);
+      run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+      expect(postedTo()).toContain(`${KIT_URL}/api/status/hook?`);
+      expect(postedTo()).not.toContain('host-a');
+    });
+
+    it.each([
+      ['refused', { out: '000 0.000000', exit: 7 }],
+      ['unresolved', { out: '000 0.000000', exit: 6 }],
+      ['timed out before the connect', { out: '000 0.000000', exit: 28 }],
+      ['a 5xx answer', { out: '502 0.000200', exit: 0 }],
+    ])('a failed POST to the kit URL (%s) still spools, as today', (_label, curl) => {
+      writeKitUrl(KIT_URL);
+      run('stop', '{"session_id":"0f9e"}', curl);
+
+      expect(postedTo()).toContain(KIT_URL);
+      const files = spooled();
+      expect(files).toHaveLength(1);
+      const hook = parseSpooledHook(fs.readFileSync(path.join(spoolDir(), files[0]), 'utf-8'));
+      expect(hook?.body).toEqual({ session_id: '0f9e' });
+    });
+
+    it('keeps the token off curl\'s command line', () => {
+      writeKitUrl(KIT_URL);
+      run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+      expect(postedTo()).not.toContain('tab-secret');
+      expect(fs.readFileSync(path.join(dir, 'curl-headers'), 'utf-8')).toBe('x-pmux-token: tab-secret\n');
+    });
+
+    it('takes an IPv6 literal and an https URL', () => {
+      for (const url of ['http://[fd00::1]:8022', 'https://control.example.com']) {
+        writeKitUrl(url);
+        fs.rmSync(path.join(dir, 'curl-args'), { force: true });
+        run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+        expect(postedTo()).toContain(`${url}/api/status/hook?`);
+      }
+    });
+
+    it.each([
+      ['a command substitution', 'http://control.example.ts.net:8022/$(id)'],
+      ['a space', 'http://control.example.ts.net:8022 -o /tmp/x'],
+      ['a query', 'http://control.example.ts.net:8022?x=1'],
+      ['another scheme', 'file:///etc/passwd'],
+      ['a bare scheme', 'http://'],
+      ['an empty file', ''],
+    ])('ignores a kit file with %s and uses PMUX_URL', (_label, line) => {
+      writeKitUrl(`${line}\n`);
+      run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+      expect(postedTo()).toContain('http://host-a:8022/api/status/hook?');
+    });
+
+    it('never takes the URL from the event: a body that names a URL changes nothing', () => {
+      writeKitUrl(KIT_URL);
+      const body = '{"session_id":"0f9e","PMUX_URL":"http://attacker.example:1","cwd":"http://attacker.example:1","url":"http://attacker.example:1"}';
+      run('stop', body, { out: '204 0.000100', exit: 0 }, { PMUX_URL: '' });
+
+      expect(postedTo()).toContain(`${KIT_URL}/api/status/hook?`);
+      expect(postedTo()).not.toContain('attacker');
+      expect(fs.readFileSync(path.join(dir, 'curl-body'), 'utf-8')).toBe(body);
+    });
+
+    it('reads only the first line of the file', () => {
+      writeKitUrl(`${KIT_URL}\nhttp://second.example:1\n`);
+      run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+      expect(postedTo()).toContain(`${KIT_URL}/api/status/hook?`);
+      expect(postedTo()).not.toContain('second.example');
+    });
   });
 
   it.each(['poll', 'rm -rf', '', 'stop;id'])('ignores an event name outside the hooks.json words: %j', (event) => {

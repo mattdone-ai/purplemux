@@ -98,7 +98,7 @@ describe('purplemux config — the installed CLI against the real fleet-config r
         return (await import('@/pages/api/cli/fleet-config/[key]')).default(req, res);
       },
       ...Object.fromEntries(['flow.window-minutes', 'flow.lock-busy-percent', 'flow.queue-length', 'flow.oldest-minutes',
-        'alerts.flags', 'alerts.flag-repeat-minutes'].map((key) => [
+        'alerts.flags', 'alerts.flag-repeat-minutes', 'remote.callback-url.host-b', 'remote.callback-url._x'].map((key) => [
         `/api/cli/fleet-config/${key}`,
         async (req: NextApiRequest, res: NextApiResponse) => {
           req.query.key = key;
@@ -181,6 +181,21 @@ describe('purplemux config — the installed CLI against the real fleet-config r
     expect((await cli(['config', 'set', 'remote.callback-allow-hosts', 'host-a'], admin)).code).toBe(0);
     expect((await cli(['config', 'set', 'remote.callback-url', 'http://host-a:8022'], admin)).code).toBe(0);
     expect((await cli(['config', 'unset', 'remote.callback-url'], orch)).code).toBe(3);
+  });
+
+  it('remote.callback-url.<ssh alias> is the admin token\'s only and checked like the fleet key (PMUX-REMOTE-URL)', async () => {
+    expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://host-a.example.ts.net:8022'], orch)).code).toBe(3);
+    expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://host-a.example.ts.net:8022'], admin)).code).toBe(0);
+    expect((await cli(['config', 'get', 'remote.callback-url.host-b'], admin)).stdout).toBe('http://host-a.example.ts.net:8022\n');
+    expect((await cli(['config', 'set', 'remote.callback-url.host-b', 'http://100.64.0.114:8022'], admin)).code).toBe(0);
+    const plain = await cli(['config', 'set', 'remote.callback-url.host-b', 'http://example.com:8022'], admin);
+    expect(plain.code).toBe(2);
+    expect(plain.stderr).toContain('remote.callback-url.host-b: ');
+    expect(plain.stderr).toContain('use https otherwise');
+    const badHost = await cli(['config', 'set', 'remote.callback-url._x', 'https://pmux.example.com'], admin);
+    expect(badHost.code).toBe(2);
+    expect(badHost.stderr).toContain('is not a callback key');
+    expect((await cli(['config', 'unset', 'remote.callback-url.host-b'], admin)).code).toBe(0);
   });
 
   it('a worker tab, a tab of an orchestrator-less workspace and a workspace token with no tab are refused with exit 3', async () => {

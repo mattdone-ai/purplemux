@@ -179,9 +179,13 @@ const checkPoolValue = (key: string, value: string): void => {
 
 /** Values the remote keys must hold, checked at write time so a bad one never reaches a create. */
 const checkRemoteValue = (key: string, value: string, state: IFleetConfigState): void => {
-  if (key === REMOTE_CALLBACK_URL_KEY) {
+  if (key === REMOTE_CALLBACK_URL_KEY || key.startsWith(`${REMOTE_CALLBACK_URL_KEY}.`)) {
+    const host = key.slice(REMOTE_CALLBACK_URL_KEY.length + 1);
+    if (key !== REMOTE_CALLBACK_URL_KEY && !isValidRemoteHostName(host)) {
+      throw new FleetConfigError('config-invalid', `${key} is not a callback key: ${REMOTE_CALLBACK_URL_KEY} or ${REMOTE_CALLBACK_URL_KEY}.<ssh alias>`);
+    }
     const refusal = callbackUrlRefusal(value, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
-    if (refusal) throw new FleetConfigError('config-invalid', refusal);
+    if (refusal) throw new FleetConfigError('config-invalid', key === REMOTE_CALLBACK_URL_KEY ? refusal : `${key}: ${refusal}`);
   }
   if (key === REMOTE_CALLBACK_ALLOW_HOSTS_KEY) {
     const bad = value.split(',').map((h) => h.trim()).filter((h) => h && !isValidBareHostName(h));

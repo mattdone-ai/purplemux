@@ -29,6 +29,13 @@ export const readRemoteHosts = async (): Promise<string[]> =>
 
 export const REMOTE_CALLBACK_URL_KEY = 'remote.callback-url';
 
+/**
+ * One remote host's own callback URL (PMUX-REMOTE-URL): `remote.callback-url.<ssh alias>` wins over the fleet key, as
+ * `remote.timeout-ms.<ssh alias>` does. A host whose resolver cannot read this server's name (curl exit 6, measured
+ * 2026-11-09) is given an address it can reach, and only that host changes.
+ */
+export const remoteCallbackUrlKeyFor = (host: string): string => `${REMOTE_CALLBACK_URL_KEY}.${host}`;
+
 export const REMOTE_CALLBACK_ALLOW_HOSTS_KEY = 'remote.callback-allow-hosts';
 
 const URL_SHAPE = /^(https?):\/\/([^/?#@\s]+)\/?$/;
@@ -78,16 +85,19 @@ export const callbackUrlRefusal = (value: unknown, allowHosts: readonly string[]
 
 
 /**
- * Where a remote tab's hooks and CLI reach this server: fleet config
- * `remote.callback-url`, else `http://<this hostname>:<port>` (a Tailscale
- * name answers on the tailnet). Throws when the fleet config is unreadable.
+ * Where a remote tab's hooks and CLI on `host` reach this server: fleet config
+ * `remote.callback-url.<host>`, else `remote.callback-url`, else `http://<this hostname>:<port>` (a Tailscale
+ * name answers on the tailnet). Throws when the fleet config is unreadable or the URL is refused.
  */
-export const resolveCallbackUrl = async (): Promise<string> => {
+export const resolveCallbackUrl = async (host?: string): Promise<string> => {
   const state = await readFleetConfig();
-  const configured = valueOf(state, REMOTE_CALLBACK_URL_KEY)?.value;
+  const hostKey = host !== undefined ? remoteCallbackUrlKeyFor(host) : null;
+  const hostValue = hostKey !== null ? valueOf(state, hostKey)?.value : undefined;
+  const key = hostValue !== undefined ? hostKey : REMOTE_CALLBACK_URL_KEY;
+  const configured = hostValue ?? valueOf(state, REMOTE_CALLBACK_URL_KEY)?.value;
   const url = configured ?? `http://${os.hostname().toLowerCase()}:${readServerPort()}`;
   const refusal = callbackUrlRefusal(url, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
-  if (refusal) throw new Error(`${refusal} (${configured === undefined ? 'the default from this hostname' : 'fleet config'}: ${JSON.stringify(url)})`);
+  if (refusal) throw new Error(`${refusal} (${configured === undefined ? 'the default from this hostname' : `fleet config ${key}`}: ${JSON.stringify(url)})`);
   return url;
 };
 

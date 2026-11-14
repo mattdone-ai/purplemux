@@ -1,4 +1,4 @@
-import { REMOTE_HOOK_SCRIPT_CONTENT } from '@/lib/hook-scripts';
+import { REMOTE_HOOK_SCRIPT_CONTENT, REMOTE_HOOK_URL_FILE } from '@/lib/hook-scripts';
 import { claudeHookEvents } from '@/lib/hook-settings';
 import { originName, remoteSessionExistsGuard, remoteSocketName, remoteTagArgs, shQuote } from '@/lib/remote-host';
 import { buildRemoteLoginShellCommand } from '@/lib/shell-env';
@@ -20,6 +20,13 @@ export const remoteKitPath = (relative = ''): string =>
 const kitPathUnquoted = (relative: string): string => `$HOME/.purplemux-remote/${originName()}/${relative}`;
 
 export const REMOTE_TRUST_SEED_RELATIVE = 'trust-seed.py';
+
+/**
+ * This server's callback URL for the host (PMUX-REMOTE-URL), one line beside `status-hook.sh`, which reads it on every
+ * event before the pane's `PMUX_URL`. Every create rewrites it, so a changed `remote.callback-url[.<host>]` reaches
+ * every tab on the host, the old ones too, at the next create there.
+ */
+export const REMOTE_CALLBACK_URL_RELATIVE = REMOTE_HOOK_URL_FILE;
 
 export const REMOTE_CLI_WRAPPER = `#!/bin/sh
 exec node "$(dirname "$0")/cli.js" "$@"
@@ -388,6 +395,8 @@ export const remoteKitFiles = (opts: {
   workspaceId?: string;
   prompt: string | null;
   tabEnv?: { tabId: string; content: string };
+  /** The host's resolved callback URL (`resolveCallbackUrl(host)`); absent leaves the host's file as it is. */
+  callbackUrl?: string;
 }): IRemoteKitFile[] => [
   { path: 'tmux.conf', content: opts.tmuxConf, mode: 0o600 },
   { path: 'status-hook.sh', content: REMOTE_HOOK_SCRIPT_CONTENT, mode: 0o700 },
@@ -401,6 +410,7 @@ export const remoteKitFiles = (opts: {
   // Always present for a workspace tab: the launch names it whether or not this host wrote one yet.
   ...(opts.workspaceId ? [{ path: remotePromptRelative(opts.workspaceId), content: opts.prompt ?? '', mode: 0o600 as const }] : []),
   ...(opts.tabEnv ? [{ path: remoteTabEnvRelative(opts.tabEnv.tabId), content: opts.tabEnv.content, mode: 0o600 as const }] : []),
+  ...(opts.callbackUrl !== undefined ? [{ path: REMOTE_CALLBACK_URL_RELATIVE, content: `${opts.callbackUrl}\n`, mode: 0o600 as const }] : []),
   // Every kit: the Claude launch line runs it whether or not the create pre-trusted the cwd.
   { path: REMOTE_TRUST_SEED_RELATIVE, content: REMOTE_TRUST_SEED_SCRIPT, mode: 0o600 },
 ];
