@@ -49,20 +49,22 @@ export const HOOK_TMUX_TIMEOUT_SECONDS = 1;
 
 /**
  * Shared shell functions. `post_hook TARGET BODY [curl options]` POSTs one
- * event; when no server answers — no port file, a 5xx, or a curl failure
+ * event; when no server answers — no port file, a non-2xx answer, or a curl failure
  * before the request left this host — the event goes to `hook-spool/` as one
  * JSON file, written to a dot-named temporary and renamed, which the next
  * server replays in time order.
  *
  * The rule: spool exactly when the server cannot have received the request.
- * The curl exits that prove it are 5 and 6 (the proxy or the host name did not
+ * The curl exits that prove it are 3 (the URL is malformed), 5 and 6 (the proxy or the host name did not
  * resolve), 7 (the connect was refused or failed), 28 with a zero
  * `time_connect` (the timeout fired before the connect), 35 (the TLS handshake
  * failed) and 60 (the TLS peer certificate failed verification). In each of
- * them curl sent no HTTP request. A 5xx also spools: the server could not
- * apply the event. Measured 2026-11-09 on a remote host whose callback name
+ * them curl sent no HTTP request. Every non-2xx answer also spools (PMUX-REMOTE-URL r3): the hook route answers
+ * 3xx, 4xx and 5xx only before it applies anything (a redirect, 405, 400, 403, a missing tmuxSession, a failure),
+ * so a replay cannot repeat an event. A 308 from a callback URL that ended in `/` (`//api/status/hook`) was never
+ * spooled, and every event of the tab was lost. Measured 2026-11-09 on a remote host whose callback name
  * did not resolve: curl exited 6, nothing spooled, and every event of the tab
- * was lost. A server that answered (2xx-4xx), or a timeout after the connect, is
+ * was lost. A 2xx answer, or a timeout after the connect, is
  * never spooled: the server may have applied it. So is a connection the
  * server cut while it exited (curl 52/56): it may have applied the event, and a
  * replay would repeat it on a tab whose floor that server never persisted.
@@ -129,7 +131,7 @@ HOOK_HEADERS
   HOOK_RC=$?
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
-    5:*|6:*|7:*|35:*|60:*|*:5[0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
+    3:*|5:*|6:*|7:*|35:*|60:*|*:[13-9][0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
     28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
   esac
   return 0
@@ -156,7 +158,7 @@ HOOK_HEADERS
   HOOK_RESULT="\${HOOK_OUT##*$HOOK_NL}"
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
-    5:*|6:*|7:*|35:*|60:*|*:5[0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
+    3:*|5:*|6:*|7:*|35:*|60:*|*:[13-9][0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
     28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
   esac
   return 0
@@ -307,7 +309,8 @@ exit 0
  * pane's environment); the server reads the session id and transcript path from
  * the body. The URL is the kit's `callback-url` file, which every create on the
  * host rewrites (PMUX-REMOTE-URL), else the pane's `PMUX_URL`: an `http(s)://`
- * line of URL characters only, never anything the event carries. An event no
+ * line of URL characters only, never anything the event carries, with any
+ * trailing `/` dropped (a `//api/...` target answers 308). An event no
  * server answers spools beside the script, and the server pulls that spool over
  * ssh. The event name is one fixed word from hooks.json; anything else exits.
  */
@@ -321,9 +324,13 @@ TOKEN="\${PMUX_TAB_TOKEN:-}"
 HOOK_KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOK_BASE_URL=""
 [ -f "$HOOK_KIT_DIR/${REMOTE_HOOK_URL_FILE}" ] && IFS= read -r HOOK_BASE_URL < "$HOOK_KIT_DIR/${REMOTE_HOOK_URL_FILE}"
+while [ "\${HOOK_BASE_URL%/}" != "$HOOK_BASE_URL" ]; do HOOK_BASE_URL="\${HOOK_BASE_URL%/}"; done
 case "$HOOK_BASE_URL" in http://?*|https://?*) ;; *) HOOK_BASE_URL="" ;; esac
 case "$HOOK_BASE_URL" in *[!]A-Za-z0-9.:/_[-]*) HOOK_BASE_URL="" ;; esac
-[ -n "$HOOK_BASE_URL" ] || HOOK_BASE_URL="\${PMUX_URL:-}"
+if [ -z "$HOOK_BASE_URL" ]; then
+  HOOK_BASE_URL="\${PMUX_URL:-}"
+  while [ "\${HOOK_BASE_URL%/}" != "$HOOK_BASE_URL" ]; do HOOK_BASE_URL="\${HOOK_BASE_URL%/}"; done
+fi
 HOOK_SPOOL_DIR="$HOOK_KIT_DIR/${HOOK_SPOOL_DIRNAME}"
 SPOOL_SKIP_EVENT=""
 HOOK_TIMEOUT=""

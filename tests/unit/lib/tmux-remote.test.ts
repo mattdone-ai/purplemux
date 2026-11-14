@@ -476,6 +476,16 @@ describe('tmux calls for a remote tab go over ssh (ADR-0022)', () => {
       expect(script).not.toContain('http://host-a:8022');
     });
 
+    it('drops a trailing slash from the URL, in the kit file and in PMUX_URL (PMUX-REMOTE-URL r3)', async () => {
+      fleet.hostCallback = 'https://control.example.ts.net:8022/';
+      const { createSession } = await import('@/lib/tmux');
+      await createSession(REMOTE, 80, 24, undefined, { workspaceId: 'ws-r', tabId: 'tab-remote1' });
+      const script = calls.list[0].input ?? '';
+
+      expect(putOf(script, 'callback-url')?.content).toBe('https://control.example.ts.net:8022\n');
+      expect(script).not.toContain('https://control.example.ts.net:8022/');
+    });
+
     it('a host key the server refuses fails the create before anything reaches the host, and names the key', async () => {
       fleet.hostCallback = 'http://example.com:8022';
       const { createSession } = await import('@/lib/tmux');

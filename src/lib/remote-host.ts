@@ -87,7 +87,7 @@ export const callbackUrlRefusal = (value: unknown, allowHosts: readonly string[]
 /**
  * Where a remote tab's hooks and CLI on `host` reach this server: fleet config
  * `remote.callback-url.<host>`, else `remote.callback-url`, else `http://<this hostname>:<port>` (a Tailscale
- * name answers on the tailnet). Throws when the fleet config is unreadable or the URL is refused.
+ * name answers on the tailnet), with no trailing `/`. Throws when the fleet config is unreadable or the URL is refused.
  */
 export const resolveCallbackUrl = async (host?: string): Promise<string> => {
   const state = await readFleetConfig();
@@ -98,8 +98,14 @@ export const resolveCallbackUrl = async (host?: string): Promise<string> => {
   const url = configured ?? `http://${os.hostname().toLowerCase()}:${readServerPort()}`;
   const refusal = callbackUrlRefusal(url, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
   if (refusal) throw new Error(`${refusal} (${configured === undefined ? 'the default from this hostname' : `fleet config ${key}`}: ${JSON.stringify(url)})`);
-  return url;
+  return normalizeCallbackUrl(url);
 };
+
+/**
+ * A callback URL with no trailing `/` (PMUX-REMOTE-URL r3). The validator takes `http://host:port/`, and the hook and
+ * the CLI append `/api/...`: `//api/status/hook` answers 308, so the base never ends in `/`.
+ */
+export const normalizeCallbackUrl = (url: string): string => url.replace(/\/+$/, '');
 
 /** This server's name on a remote host: it keys the remote socket and config directory. */
 export const originName = (): string => {

@@ -132,14 +132,26 @@ describe('hook scripts spool an event no server answered (ADR-0020)', () => {
     ['a connect timeout (exit 28, never connected)', { out: '000 0.000000', exit: 28 }],
     ['an unresolved host name (exit 6)', { out: '000 0.000000', exit: 6 }],
     ['a failed TLS handshake (exit 35)', { out: '000 0.000140', exit: 35 }],
+    ['a malformed URL (exit 3)', { out: '000 0.000000', exit: 3 }],
+    ['a 308 redirect (PMUX-REMOTE-URL r3)', { out: '308 0.000200', exit: 0 }],
+    ['a 4xx refusal (the route refuses before it applies anything)', { out: '403 0.000200', exit: 0 }],
+    ['a 404', { out: '404 0.000200', exit: 0 }],
   ])('spools on %s', (_label, curl: ICurlBehaviour) => {
     run(HOOK_SCRIPT_CONTENT, ['prompt-submit'], '{}', curl);
     expect(readOnly().body).toEqual({ event: 'prompt-submit', session: SESSION });
   });
 
   it.each([
+    ['a 308 redirect', { out: '308 0.000200', exit: 0 }],
+    ['a 403 refusal', { out: '403 0.000200', exit: 0 }],
+  ])('the stop path spools on %s too', (_label, curl: ICurlBehaviour) => {
+    run(HOOK_SCRIPT_CONTENT, ['stop'], '{}', curl);
+    expect(spoolFiles()).toHaveLength(1);
+  });
+
+  it.each([
     ['a timeout after the connect (the server may have applied it)', { out: '000 0.000180', exit: 28 }],
-    ['a 4xx refusal', { out: '403 0.000200', exit: 0 }],
+    ['a 2xx answer', { out: '200 0.000200', exit: 0 }],
   ])('does not spool on %s', (_label, curl: ICurlBehaviour) => {
     run(HOOK_SCRIPT_CONTENT, ['stop'], '{}', curl);
     expect(spoolFiles()).toEqual([]);

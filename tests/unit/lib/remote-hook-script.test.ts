@@ -92,6 +92,13 @@ describe('remote Claude hook script (ADR-0022)', () => {
     ['35 (the TLS handshake failed)', { out: '000 0.000140', exit: 35 }],
     ['60 (the TLS peer certificate failed verification)', { out: '000 0.000140', exit: 60 }],
     ['a 5xx answer', { out: '503 0.000200', exit: 0 }],
+    ['3 (the URL is malformed: no request left this host)', { out: '000 0.000000', exit: 3 }],
+    ['a 308 redirect (a // target, PMUX-REMOTE-URL r3)', { out: '308 0.000200', exit: 0 }],
+    ['a 301 redirect', { out: '301 0.000200', exit: 0 }],
+    ['a 4xx refusal (the route refuses before it applies anything)', { out: '403 0.000200', exit: 0 }],
+    ['a 401', { out: '401 0.000200', exit: 0 }],
+    ['a 400', { out: '400 0.000200', exit: 0 }],
+    ['a 404 answer', { out: '404 0.000200', exit: 0 }],
   ])('spools when curl exits %s', (_label, curl) => {
     run('stop', '{"session_id":"0f9e"}', curl);
     const files = spooled();
@@ -104,8 +111,7 @@ describe('remote Claude hook script (ADR-0022)', () => {
   // The server received these requests and may have applied them: a replay would repeat them.
   it.each([
     ['a 2xx answer', { out: '204 0.000100', exit: 0 }],
-    ['a 4xx refusal', { out: '403 0.000200', exit: 0 }],
-    ['a 404 answer', { out: '404 0.000200', exit: 0 }],
+    ['a 200 answer', { out: '200 0.000100', exit: 0 }],
     ['28 after the connect', { out: '000 0.000180', exit: 28 }],
     ['52 (empty reply: the server cut the connection)', { out: '000 0.000150', exit: 52 }],
     ['56 (receive failure)', { out: '000 0.000150', exit: 56 }],
@@ -205,6 +211,31 @@ describe('remote Claude hook script (ADR-0022)', () => {
       expect(postedTo()).toContain(`${KIT_URL}/api/status/hook?`);
       expect(postedTo()).not.toContain('attacker');
       expect(fs.readFileSync(path.join(dir, 'curl-body'), 'utf-8')).toBe(body);
+    });
+
+    it.each([
+      ['one trailing slash', `${KIT_URL}/`],
+      ['several trailing slashes', `${KIT_URL}///`],
+    ])('drops %s from the kit URL, so the target is never //api (PMUX-REMOTE-URL r3)', (_label, line) => {
+      writeKitUrl(`${line}\n`);
+      run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+      expect(postedTo()).toContain(`${KIT_URL}/api/status/hook?`);
+      expect(postedTo()).not.toContain('//api/');
+    });
+
+    it('drops a trailing slash from the pane\'s PMUX_URL too, when there is no kit file', () => {
+      run('stop', '{}', { out: '204 0.000100', exit: 0 }, { PMUX_URL: 'http://host-a:8022/' });
+
+      expect(postedTo()).toContain('http://host-a:8022/api/status/hook?');
+      expect(postedTo()).not.toContain('//api/');
+    });
+
+    it('a kit file of slashes only after the scheme is ignored, and PMUX_URL is used', () => {
+      writeKitUrl('http:///\n');
+      run('stop', '{}', { out: '204 0.000100', exit: 0 });
+
+      expect(postedTo()).toContain('http://host-a:8022/api/status/hook?');
     });
 
     it('reads only the first line of the file', () => {
