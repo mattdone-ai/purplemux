@@ -198,7 +198,10 @@ POST /api/cli/leases/renew     { "name", "ttlSeconds"? }  → { "lease": view }
 POST /api/cli/leases/release   { "name" }                 → { "released": true }
   Errors: lease-not-found 404, lease-held-by-other 409 (+ lease, holder)
 
-POST /api/cli/leases/break     { "name", "reason" }       → { "broken": view }   admin token only
+POST /api/cli/leases/break     { "name", "reason" }       → { "broken": view }
+  The admin token, or the Portfolio Scrum Master's verified tab with a reason of 1..500 characters
+  (ADR-0047, owner order); audited, the Scrum Master with its role and selection. Any other tab:
+  forbidden 403.
 POST /api/cli/leases/release-epic { "epic", "kind"? }     → { "released": [names] }
   The epic:<slug> holder or admin releases every claim; a tab of a claiming workspace releases
   its own workspace's claims; nothing to release answers []. Errors: forbidden 403.
@@ -827,9 +830,12 @@ GET /api/cli/inbox?workspaceId=WS[&all=1]   (CLI: inbox list -w WS [--all] [--co
     "line", "state", "attempts", "lastRefusal", "notBefore", "createdAt", "deliveredAt", "heldReason",
     "droppedReason", "expiresAt", "transitionAt", ... }] }
 
-POST /api/cli/inbox/<id>/retry
+POST /api/cli/inbox/<id>/retry   { "reason"? }
   The target workspace's own token, the workspace that sent the note the item carries, or the
-  admin token. Re-queues a held item once, with a fresh refusal budget. 404 { "code":
+  admin token; or the Portfolio Scrum Master's verified tab for a target workspace in its
+  portfolio selection, with "reason" (1..500 characters, else 400 reason-missing), audited as
+  "inbox-retry" with its role and selection (ADR-0047, owner order). Re-queues a held item once,
+  with a fresh refusal budget. 404 { "code":
   "inbox-not-found" } (CLI exit 7) for an unknown id AND for any other workspace's item;
   409 { "code": "inbox-not-held" } (CLI exit 3) when the item is not held, or when a newer
   notice with its key is already queued for that tab.
@@ -898,7 +904,9 @@ GET /api/cli/notes[?open=1][&toMe=1][&fromMe=1][&epic=SLUG]
     "deliveredAt", "ackedAt", "ackedBy", "ackComment", "bodyBytes", "fromLabel", "receipt", ... }] }
 
 GET /api/cli/notes/<id>
-  The recipient workspace, the sender workspace, or admin. Response: { "note", "body" }.
+  The recipient workspace, the sender workspace, or admin; or the Portfolio Scrum Master's
+  verified tab when either workspace is in its portfolio selection (ADR-0047, a read only).
+  Response: { "note", "body" }.
   404 note-not-found (exit 7); 403 forbidden (exit 3).
 
 POST /api/cli/notes/<id>/ack
@@ -1110,7 +1118,15 @@ Keys in use:
                an ssh alias) wins for that host. Unset means http://<this hostname>:<port>. Each
                tab create on a host writes the URL to the pane's PMUX_URL and to the host kit's
                callback-url file, which the hook of every tab there reads first on each event (an
-               event that cannot be posted still spools). Admin token only.
+               event that cannot be posted still spools). Admin token only, except that the
+               Portfolio Scrum Master's verified tab writes remote.callback-url.<host> for a host on
+               remote.hosts, with a reason and the version it read, and only a tailnet value:
+               http(s)://<name>.<remote.tailnet-suffix>:<port> or http(s)://<100.64.0.0/10
+               address>:<port> (ADR-0047, owner order; else 400 config-invalid naming the reason).
+  remote.tailnet-suffix
+               The tailnet's MagicDNS suffix (e.g. example-net.ts.net): two or more lower-case DNS
+               labels, never ts.net alone. Unset, a Portfolio Scrum Master callback URL names a
+               100.64.0.0/10 address only. Admin token only.
   remote.callback-allow-hosts
                Bare lower-case host names that remote.callback-url may name over plain http,
                comma-separated. Admin token only.

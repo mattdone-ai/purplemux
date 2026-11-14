@@ -38,6 +38,22 @@ export const remoteCallbackUrlKeyFor = (host: string): string => `${REMOTE_CALLB
 
 export const REMOTE_CALLBACK_ALLOW_HOSTS_KEY = 'remote.callback-allow-hosts';
 
+/**
+ * The tailnet's MagicDNS suffix (ADR-0047), admin-only: a Portfolio Scrum Master's `remote.callback-url.<host>` may
+ * name `<name>.<suffix>`. Unset, it may name no host name at all, only a 100.64.0.0/10 address.
+ */
+export const REMOTE_TAILNET_SUFFIX_KEY = 'remote.tailnet-suffix';
+
+const DNS_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+const TAILNET_SUFFIX = new RegExp(`^${DNS_LABEL}(?:\\.${DNS_LABEL})+$`);
+
+/**
+ * Two or more lower-case DNS labels, at most 253 characters, no leading or trailing dot, and never `ts.net` itself:
+ * every tailnet's names end in it, so it would let the Scrum Master name a host of any tailnet.
+ */
+export const isValidTailnetSuffix = (value: unknown): value is string =>
+  typeof value === 'string' && value.length <= 253 && TAILNET_SUFFIX.test(value) && value !== 'ts.net';
+
 const URL_SHAPE = /^(https?):\/\/([^/?#@\s]+)\/?$/;
 const AUTHORITY = /^(\[[0-9A-Fa-f:.]+\]|[^:[\]]+)(?::\d{1,5})?$/;
 const BARE_NAME = /^[a-z][a-z0-9-]{0,62}$/;
@@ -49,7 +65,7 @@ export const parseCallbackAllowHosts = (raw: string | null | undefined): string[
 
 const isLoopback = (host: string): boolean => host === 'localhost' || host === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 
-const isTailnetAddress = (host: string): boolean => {
+export const isTailnetAddress = (host: string): boolean => {
   const ip = host.match(/^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
   return !!ip && Number(ip[1]) >= 64 && Number(ip[1]) <= 127;
 };
@@ -83,6 +99,27 @@ export const callbackUrlRefusal = (value: unknown, allowHosts: readonly string[]
   return `${REMOTE_CALLBACK_URL_KEY} over plain http must name loopback, a 100.64.0.0/10 address, a *.ts.net name or a bare name on ${REMOTE_CALLBACK_ALLOW_HOSTS_KEY}; use https otherwise`;
 };
 
+
+/**
+ * Why the Portfolio Scrum Master may not write this callback URL, or null (ADR-0047). The key decides where a host's
+ * hooks POST, with each tab's token, so the Scrum Master's value names the tailnet only:
+ * `http(s)://<name>.<remote.tailnet-suffix>:<port>`, or `http(s)://<100.64.0.0/10 address>:<port>`. The admin token
+ * writes any value {@link callbackUrlRefusal} takes; that check runs first for every writer.
+ */
+export const scrumMasterCallbackRefusal = (value: string, tailnetSuffix: string | null): string | null => {
+  const m = value.match(/^https?:\/\/([^/:?#@\s]+):(\d{1,5})\/?$/);
+  if (!m) return 'the Portfolio Scrum Master writes http(s)://<host>:<port>, with the port';
+  const port = Number(m[2]);
+  if (port < 1 || port > 65535) return `port ${m[2]} is out of range`;
+  const host = m[1];
+  if (isTailnetAddress(host)) return null;
+  if (/^[0-9.]+$/.test(host) || host.startsWith('[')) return `${host} is not in 100.64.0.0/10`;
+  if (!tailnetSuffix) {
+    return `${host} is a name, and ${REMOTE_TAILNET_SUFFIX_KEY} is unset: the Portfolio Scrum Master names a 100.64.0.0/10 address, or the admin token sets the suffix`;
+  }
+  const escaped = tailnetSuffix.replace(/[.]/g, '\\.');
+  return new RegExp(`^${DNS_LABEL}\\.${escaped}$`).test(host) ? null : `${host} is not <name>.${tailnetSuffix} (${REMOTE_TAILNET_SUFFIX_KEY})`;
+};
 
 /**
  * Where a remote tab's hooks and CLI on `host` reach this server: fleet config

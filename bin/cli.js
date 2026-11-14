@@ -1551,12 +1551,13 @@ const cmdInbox = async (args) => {
     }
     case 'retry': {
       const id = rest[0];
-      if (!id || !/^i-[A-Za-z0-9_-]{1,32}$/.test(id)) die('usage: inbox retry ID (an i-… inbox item id)');
-      const { body } = await api('POST', `/api/cli/inbox/${id}/retry`, {});
+      if (!id || !/^i-[A-Za-z0-9_-]{1,32}$/.test(id)) die('usage: inbox retry ID [--reason TEXT] (an i-… inbox item id)');
+      const reason = flagValue(rest, '--reason');
+      const { body } = await api('POST', `/api/cli/inbox/${id}/retry`, reason !== null ? { reason } : {});
       return out(body);
     }
     default:
-      die('usage: inbox list -w WS [--all] [--counts] | inbox retry ID');
+      die('usage: inbox list -w WS [--all] [--counts] | inbox retry ID [--reason TEXT]');
   }
 };
 
@@ -3838,7 +3839,8 @@ Commands:
   lease check NAME                         Exact name only. Prints {held, mine, lease}; exit 0 you hold it,
                                            3 another holds it, 7 nobody holds it. Exit 3 WITHOUT a body on
                                            stdout is a refusal (bad token), not a holder
-  lease break NAME --reason TEXT           Remove another holder's lease (admin token only; audited)
+  lease break NAME --reason TEXT           Remove another holder's lease (admin token, or the Portfolio Scrum
+                                           Master's verified tab with a 1-500 character reason, ADR-0047; audited)
   lease release-epic SLUG [--kind num]     Release an epic's survives-tab claims (run it while you still hold
                                            epic:SLUG; a tab of a claiming workspace releases its own claims)
   curator status [--json]                  The local curator (ADR-0038): up or down, queue, each task's state
@@ -3904,7 +3906,9 @@ Commands:
                                            for WS's tabs; --all adds delivered and dropped (kept 7 days). The JSON
                                            carries counts (per state, held by reason, per tab) of every retained item;
                                            --counts prints them alone, one line per state, then one per tab
-  inbox retry ID                           Re-queue a held notice once (the target workspace, the note's sender, or admin).
+  inbox retry ID [--reason TEXT]           Re-queue a held notice once (the target workspace, the note's sender, or admin;
+                                           the Portfolio Scrum Master's verified tab for a workspace in its selection,
+                                           with --reason, audited, ADR-0047).
                                            Exit 3 inbox-not-held, 7 inbox-not-found
   note send (--to-epic SLUG | --to-workspace WS) --subject TEXT (-f FILE | -f -) [--from-epic SLUG] [--owner-item]
                                            A local note to the live epic holder, or a cross-workspace note between
@@ -3918,7 +3922,8 @@ Commands:
   note list [--open] [--to-me] [--from-me] [--epic SLUG]
                                            Notes your workspace sent or receives (no bodies; fromLabel names the sender,
                                            e.g. "owner (WS/TAB)"). Run --open --to-me at turn start
-  note show ID                             The note and its body (recipient or sender workspace, or admin; else exit 3; 7 unknown)
+  note show ID                             The note and its body (recipient or sender workspace, admin, or the Portfolio
+                                           Scrum Master for a workspace in its selection, ADR-0047; else exit 3; 7 unknown)
   note ack ID [--comment TEXT]             Acknowledge a local note in your workspace, or a cross-workspace note as
                                            its verified currently routed coordinator (else exit 3)
   note point ID                            The verified current orchestrator types one fixed line for its own routed,
@@ -3957,7 +3962,10 @@ Commands:
                                            A stale --expect-version exits 3 config-version-conflict. The Portfolio
                                            Scrum Master's tab also writes tabs.cap-per-workspace.<ws> and
                                            pool.tab-place.<ws> (a workspace in its selection) and
-                                           pool.slots.<host>.tab, with --reason and --expect-version (ADR-0045)
+                                           pool.slots.<host>.tab, with --reason and --expect-version (ADR-0045),
+                                           and remote.callback-url.<host> for a host on remote.hosts, whose value
+                                           names the tailnet: http(s)://<name>.<remote.tailnet-suffix>:<port> or
+                                           http(s)://<100.64.0.0/10 address>:<port> (ADR-0047)
   config unset KEY [--expect-version N] [--reason TEXT]
                                            Remove a value (same authority); exit 7 when unset
   config history [KEY] [--json]            The last 200 changes: when, key, old -> new, version, who

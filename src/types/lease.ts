@@ -43,6 +43,15 @@ export interface ILeaseHumanBreaker {
   human: string;
 }
 
+/**
+ * The Portfolio Scrum Master's verified tab breaking a lease (ADR-0047, owner order): its holder fields, its role, and
+ * the selection that made it the Scrum Master, as the audit names them.
+ */
+export interface ILeaseScrumMasterBreaker extends ILeaseHolder {
+  role: 'portfolio-scrum-master';
+  selection: { actor: string; updatedAt: number; managerWorkspaceId: string; managerTabId: string };
+}
+
 export type TLeaseReleaseReason =
   | 'released'
   | 'broken'

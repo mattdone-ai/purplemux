@@ -913,9 +913,15 @@ export class NotesService {
     }, { ...input, toWorkspace: workspaceId, toEpic: undefined, fromEpic: undefined });
   }
 
-  async show(caller: ICaller, id: unknown): Promise<{ note: INoteView; body: string }> {
+  /**
+   * The note and its body: the recipient workspace, the sender workspace, admin, or (ADR-0047, owner order) the
+   * Portfolio Scrum Master's verified tab when either workspace is in `scrumMasterWorkspaces`, its selection. The route
+   * proves the Scrum Master; a read only.
+   */
+  async show(caller: ICaller, id: unknown, scrumMasterWorkspaces: readonly string[] = []): Promise<{ note: INoteView; body: string }> {
     const note = await this.find(id);
-    if (!canShow(note, caller)) throw new NoteError('forbidden', `note ${note.id} belongs to other workspaces`);
+    const inSelection = scrumMasterWorkspaces.some((ws) => ws === recipientWorkspace(note) || ws === note.from.workspaceId);
+    if (!canShow(note, caller) && !inSelection) throw new NoteError('forbidden', `note ${note.id} belongs to other workspaces`);
     return { note: (await this.views([note]))[0], body: note.body };
   }
 

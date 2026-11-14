@@ -10,6 +10,7 @@ import type {
   ILease,
   ILeaseHolder,
   ILeaseHumanBreaker,
+  ILeaseScrumMasterBreaker,
   ILeaseState,
   ILeaseView,
   THolderState,
@@ -227,7 +228,7 @@ export const toLeaseView = (lease: ILease, facts: IViewFacts): ILeaseView => ({
 
 type TLeaseEffect =
   | { type: 'acquired'; lease: ILease; outcome: 'acquired' | 'renewed' }
-  | { type: 'released'; lease: ILease; reason: TLeaseReleaseReason; by: ILeaseHolder | ILeaseHumanBreaker | null; extra?: Record<string, unknown> };
+  | { type: 'released'; lease: ILease; reason: TLeaseReleaseReason; by: ILeaseHolder | ILeaseHumanBreaker | ILeaseScrumMasterBreaker | null; extra?: Record<string, unknown> };
 
 const g = globalThis as unknown as {
   __ptLeaseLock?: Promise<void>;
@@ -367,7 +368,10 @@ const notify = <A extends unknown[]>(listeners: Set<(...args: A) => void>, ...ar
 
 const auditHolder = (h: ILeaseHolder) => ({ workspaceId: h.workspaceId, tabId: h.tabId, verified: h.verified, identity: h.identity, admin: h.admin });
 
-const auditBreaker = (by: ILeaseHolder | ILeaseHumanBreaker) => ('human' in by ? { human: by.human } : auditHolder(by));
+const auditBreaker = (by: ILeaseHolder | ILeaseHumanBreaker | ILeaseScrumMasterBreaker) => {
+  if ('human' in by) return { human: by.human };
+  return 'role' in by ? { ...auditHolder(by), role: by.role, selection: by.selection } : auditHolder(by);
+};
 
 /** Runs inside the lock, so audit lines and hooks follow the order of the mutations. */
 const applyEffects = async (effects: TLeaseEffect[]): Promise<void> => {
@@ -575,17 +579,24 @@ export const releaseLeaseWhere = async (
  * Cooperative for the admin: the admin token is readable by every agent (C-312 class).
  * The admin's reason is cut to 500 code points; a human's longer reason is refused.
  */
+/**
+ * Break a lease: the admin token, a named human, or the Portfolio Scrum Master's verified tab (ADR-0047). The route
+ * proves the Scrum Master (`scrumMasterSnapshot`) before it passes that breaker; any other tab is refused here.
+ */
 export const breakLease = async (
   rawName: unknown,
   reason: unknown,
-  breaker: ILeaseHolder | ILeaseHumanBreaker,
+  breaker: ILeaseHolder | ILeaseHumanBreaker | ILeaseScrumMasterBreaker,
   authority: ILeaseAuthority,
 ): Promise<ILease> => {
   const human = 'human' in breaker;
-  if (human ? !breaker.human.trim() : !breaker.admin) throw new LeaseError('forbidden', 'breaking a lease needs the admin token');
+  const scrumMaster = !human && 'role' in breaker && breaker.role === 'portfolio-scrum-master' && breaker.verified;
+  if (human ? !breaker.human.trim() : !(breaker.admin || scrumMaster)) {
+    throw new LeaseError('forbidden', "breaking a lease needs the admin token or the Portfolio Scrum Master's verified tab (ADR-0047)");
+  }
   const text = typeof reason === 'string' ? reason.trim() : '';
   if (!text) throw new LeasePolicyError('break needs a reason');
-  if (human && codePoints(text) > BREAK_REASON_MAX) {
+  if ((human || scrumMaster) && codePoints(text) > BREAK_REASON_MAX) {
     throw new LeasePolicyError(`the reason is ${codePoints(text)} characters; the limit is ${BREAK_REASON_MAX}`);
   }
   const { name } = parseLeaseName(rawName);

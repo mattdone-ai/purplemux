@@ -6,7 +6,7 @@ import { FLAG_ALERT_CONFIG_KEYS } from '@/lib/flag-alerts';
 import { FLOW_CONFIG_KEYS } from '@/lib/flow-flags';
 import { AUTO_ANSWER_KEY } from '@/lib/mission-control-auto-answer';
 import { QUESTION_MIN_VERSION_KEY } from '@/lib/mission-question-config';
-import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY } from '@/lib/remote-host';
+import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, REMOTE_TAILNET_SUFFIX_KEY } from '@/lib/remote-host';
 import { TAB_CAP_KEY } from '@/lib/tab-cap';
 import { IDLE_NUDGE_CONFIG_KEY, WAIT_BACKSTOP_CONFIG_KEY } from '@/lib/turn-end';
 import { ROTATE_AT_CONFIG_KEY } from '@/lib/context-lifecycle';
@@ -25,6 +25,7 @@ const SERVER_KEYS = [
   REMOTE_HOSTS_KEY,
   REMOTE_CALLBACK_URL_KEY,
   `${REMOTE_CALLBACK_URL_KEY}.<host>`,
+  REMOTE_TAILNET_SUFFIX_KEY,
   REMOTE_CALLBACK_ALLOW_HOSTS_KEY,
   TAB_CAP_KEY,
   `${TAB_CAP_KEY}.<workspaceId>`,

@@ -367,6 +367,15 @@ describe('notes (ADR-0013)', () => {
     expect(shown.body).toBe('Adopt REPROVE_DUE_TOLERANCE=2 in story 03.');
   });
 
+  it('the Portfolio Scrum Master reads a note of a workspace in its selection, and no other (ADR-0047)', async () => {
+    // B (ws-2) sends to the ddh holder (ws-1). C (ws-3) stands for the Scrum Master: neither sender nor recipient.
+    const { id } = await svc.send(B, { toEpic: 'ddh', subject: 's', body: 'b' });
+    expect((await svc.show(C, id, ['ws-1'])).body).toBe('b'); // the recipient workspace is selected
+    expect((await svc.show(C, id, ['ws-2'])).body).toBe('b'); // the sender workspace is selected
+    await expectCode(svc.show(C, id, ['ws-7', 'ws-8']), 'forbidden'); // neither is selected
+    await expectCode(svc.show(C, id), 'forbidden'); // no selection: the old rule
+  });
+
   it('refuses note show from a workspace that is neither sender nor recipient; admin and the sender may read it', async () => {
     const { id } = await svc.send(B, { toEpic: 'ddh', subject: 's', body: 'b' });
     await expectCode(svc.show(C, id), 'forbidden');

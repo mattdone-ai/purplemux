@@ -22,7 +22,10 @@ import { createLogger } from '@/lib/logger';
 import { POOL_MODE_KEY, POOL_TAB_PLACE_MODES, TAB_PLACE_KEY, isPoolMode, isPoolNumberKey, isTabPlaceMode, poolNumberRefusal } from '@/lib/pool';
 import { currentScrumMasterSelection, sameSelection, scrumMasterSnapshot, type IScrumMasterSnapshot } from '@/lib/scrum-master-access';
 import type { IFleetConfigChange, IFleetConfigSetter, IFleetConfigState, IFleetConfigValue } from '@/types/fleet-config';
-import { REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, callbackUrlRefusal, isValidBareHostName, isValidRemoteHostName, parseCallbackAllowHosts } from '@/lib/remote-host';
+import {
+  REMOTE_CALLBACK_ALLOW_HOSTS_KEY, REMOTE_CALLBACK_URL_KEY, REMOTE_HOSTS_KEY, REMOTE_TAILNET_SUFFIX_KEY, callbackUrlRefusal,
+  isValidBareHostName, isValidRemoteHostName, isValidTailnetSuffix, parseCallbackAllowHosts, parseRemoteHosts, scrumMasterCallbackRefusal,
+} from '@/lib/remote-host';
 import { REMOTE_TIMEOUT_KEY, remoteTimeoutRefusal } from '@/lib/remote-timeouts';
 
 const log = createLogger('fleet-config');
@@ -73,16 +76,20 @@ const POOL_SLOTS_KEY = /^pool\.slots\.[a-z0-9._-]+\.(gate|build|mutation|browser
 
 /**
  * What the Portfolio Scrum Master's verified tab may write besides the admin token (ADR-0045): the WIP cap and the
- * plain-create mode of a workspace in its selection, and a host's tab ceiling. Not `pool.mode`, the gate and build
- * slots, the fleet-wide cap, nor any reserve, budget or envelope key: those stay with the admin token.
+ * plain-create mode of a workspace in its selection, a host's tab ceiling, and (ADR-0047, owner order) a known host's
+ * callback URL, whose value names the tailnet only (`checkScrumMasterValue`). Not `pool.mode`, the gate and build
+ * slots, the fleet-wide cap, `remote.tailnet-suffix`, `remote.hosts`, nor any reserve, budget or envelope key: those
+ * stay with the admin token.
  */
 const SCRUM_MASTER_KEYS: readonly { re: RegExp; workspace: boolean }[] = [
   { re: /^tabs\.cap-per-workspace\.([A-Za-z0-9_-]+)$/, workspace: true },
   { re: TAB_PLACE_KEY, workspace: true },
   { re: /^pool\.slots\.[a-z0-9._-]+\.tab$/, workspace: false },
+  { re: /^remote\.callback-url\.[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/, workspace: false },
 ];
 
-export const SCRUM_MASTER_KEY_FORMS = 'tabs.cap-per-workspace.<workspaceId>, pool.tab-place.<workspaceId> (a workspace in the portfolio selection) or pool.slots.<host>.tab';
+export const SCRUM_MASTER_KEY_FORMS = 'tabs.cap-per-workspace.<workspaceId>, pool.tab-place.<workspaceId> (a workspace in the portfolio selection), '
+  + 'pool.slots.<host>.tab or remote.callback-url.<host> (a host on remote.hosts, a tailnet URL)';
 
 /** The key's Scrum Master form, and the workspace it names; null when the Scrum Master may not write it. */
 export const scrumMasterKey = (key: string): { workspaceId: string | null } | null => {
@@ -101,7 +108,8 @@ export const REASON_MAX = 500;
  */
 export type TWriteRefusal =
   | 'admin-only' | 'not-scrum-master' | 'outside-selection' | 'reason-missing' | 'reason-invalid' | 'version-missing'
-  | 'selection-changed' | 'not-writer' | 'version-conflict' | 'invalid' | 'not-found' | 'forbidden';
+  | 'selection-changed' | 'not-writer' | 'version-conflict' | 'invalid' | 'not-found' | 'forbidden'
+  | 'unknown-host' | 'outside-tailnet';
 
 /** A writer-rule refusal: the store's error, with its kind and the selection it was judged on (when one was). */
 class WriteRefusal extends FleetConfigError {
@@ -186,6 +194,9 @@ const checkRemoteValue = (key: string, value: string, state: IFleetConfigState):
     }
     const refusal = callbackUrlRefusal(value, parseCallbackAllowHosts(valueOf(state, REMOTE_CALLBACK_ALLOW_HOSTS_KEY)?.value));
     if (refusal) throw new FleetConfigError('config-invalid', key === REMOTE_CALLBACK_URL_KEY ? refusal : `${key}: ${refusal}`);
+  }
+  if (key === REMOTE_TAILNET_SUFFIX_KEY && !isValidTailnetSuffix(value)) {
+    throw new FleetConfigError('config-invalid', `${REMOTE_TAILNET_SUFFIX_KEY} takes a lower-case DNS suffix of two or more labels, not ts.net alone (e.g. example-net.ts.net), got ${JSON.stringify(value)}`);
   }
   if (key === REMOTE_CALLBACK_ALLOW_HOSTS_KEY) {
     const bad = value.split(',').map((h) => h.trim()).filter((h) => h && !isValidBareHostName(h));
@@ -324,6 +335,23 @@ const requireWriter = async (caller: ICaller, authority: IFleetConfigAuthority, 
 };
 
 /**
+ * A Portfolio Scrum Master's value (ADR-0047), inside the store lock: a callback URL names a host on `remote.hosts` and
+ * the tailnet only (`scrumMasterCallbackRefusal`). The admin token never reaches this check.
+ */
+const checkScrumMasterValue = (writer: IWriter, key: string, value: string, state: IFleetConfigState): void => {
+  if (!writer.scrumMaster || !key.startsWith(`${REMOTE_CALLBACK_URL_KEY}.`)) return;
+  const { snapshot } = writer.scrumMaster;
+  const host = key.slice(REMOTE_CALLBACK_URL_KEY.length + 1);
+  const hosts = parseRemoteHosts(valueOf(state, REMOTE_HOSTS_KEY)?.value);
+  if (!hosts.includes(host)) {
+    throw new WriteRefusal('config-invalid', 'unknown-host', `${key} names ${host}, which is not on ${REMOTE_HOSTS_KEY} (${hosts.join(', ') || 'none'}); the admin token writes it (ADR-0047)`, snapshot);
+  }
+  const suffix = valueOf(state, REMOTE_TAILNET_SUFFIX_KEY)?.value ?? null;
+  const refusal = scrumMasterCallbackRefusal(value, suffix);
+  if (refusal) throw new WriteRefusal('config-invalid', 'outside-tailnet', `${key}: ${refusal} (ADR-0047)`, snapshot);
+};
+
+/**
  * Inside the store lock (ADR-0045, ruling 5): the selection the write was authorized on must still be the current one,
  * and must still name the key's workspace. The coordinator proof itself (a file read and a tmux check) ran before the
  * lock; a respawn of the manager tab between that proof and this compare is the remaining gap the ADR states.
@@ -442,6 +470,7 @@ const setChecked = async (
   const { state, change } = await mutateFleetConfig((s) => {
     recheckScrumMaster(writer, authority, key);
     checkRemoteValue(key, value, s);
+    checkScrumMasterValue(writer, key, value, s);
     checkPoolValue(key, value);
     checkTabCapValue(key, value);
     checkLedgerValue(key, value);

@@ -3,6 +3,8 @@
 ## Status
 Accepted (2026-11-12, ticket PMUX-SM-LIMITS, an owner-direct change). One Opus 5.5 xhigh design consult,
 APPROVE-WITH-CHANGES with 14 changes; this record is the approach with those changes.
+Amended by [ADR-0047](0047-psm-flow-rights.md) (14 Nov 2026, owner order): one more Scrum Master key form,
+`remote.callback-url.<host>`, with a tailnet value guard.
 
 This record amends:
 - ADR-0019, the fleet-config writer rule: a third writer.
