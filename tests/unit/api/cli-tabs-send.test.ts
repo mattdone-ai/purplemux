@@ -41,6 +41,12 @@ const tabEvents = vi.hoisted(() => ({
   route: vi.fn(async (_event: unknown) => ({ class: 'digest', delivered: false, seq: 1, duplicate: false })),
 }));
 const ledger = vi.hoisted(() => ({ store: null as unknown as import('@/lib/ledger-store').LedgerStore }));
+const logs = vi.hoisted(() => ({ warn: vi.fn((_fields: unknown, _message?: string) => {}) }));
+
+vi.mock('@/lib/logger', () => {
+  const logger = { trace: () => {}, debug: () => {}, info: () => {}, warn: logs.warn, error: () => {}, fatal: () => {}, child: () => logger };
+  return { createLogger: () => logger };
+});
 vi.mock('@/lib/ledger-store', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/ledger-store')>();
   return { ...actual, getLedgerStore: () => ledger.store };
@@ -313,6 +319,19 @@ describe('POST /api/cli/tabs/[tabId]/send', () => {
 
       expect(response.body).toMatchObject({ submitted: false, notSubmitted: 'submit-unconfirmed', resubmitted: false });
       expect(tmux.pressEnter).not.toHaveBeenCalled();
+    });
+
+    it('the submit-unconfirmed log line counts what the screen reads saw (PMUX-SEND-R3)', async () => {
+      live.hookOnSubmit = false;
+      tmux.capturePaneContent.mockResolvedValueOnce(panes.empty).mockResolvedValueOnce(null).mockResolvedValue(panes.empty);
+
+      await callToDeadline({ content: 'run the tests' });
+
+      expect(logs.warn).toHaveBeenCalledTimes(1);
+      const [fields, message] = logs.warn.mock.calls[0];
+      expect(message).toBe('tab send: submit-unconfirmed');
+      expect(fields).toMatchObject({ tabId: TAB_ID, resubmitted: false, screens: { failed: 1, empty: expect.any(Number) } });
+      expect(fields).not.toHaveProperty('screens.text');
     });
 
     it('an empty composer is not proof on a tab with a prompt-submit hook: submit-unconfirmed', async () => {

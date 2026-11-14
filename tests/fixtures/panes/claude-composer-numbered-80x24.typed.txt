@@ -1,0 +1,8 @@
+Ticket SEND-LIST: work through these steps in order.
+1. Read the sources and the tests before any change.
+2. Measure the head of each row and whether it moved since the last look.
+3. Record each row with the time, and name every row whose head is behind.
+4. Compare the head with the merged head; the first look found 3 rows.
+5. Keep the gate log beside the record.
+6. Hand back the head and the gate counts.
+End: DONE: send-list <head> | BLOCKED: <why>.

@@ -1,0 +1,24 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.323[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mSonnet 5.5 · Claude API[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m~/project[39m
+
+
+
+
+
+
+
+
+
+                                                         [38;5;246mctrl+g to edit in Vim[39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m❯ Facts: the first look found three rows that did not move, and the second
+  look found that two of them moved and one did not. Read the sources and the
+  tests before any change, then measure the head of each row and whether it
+  moved since the last look, and record it with the time.
+  Rules: own worktree and a new branch off main. Run the full gate at the
+  committed head and keep its log. Do not push.
+  End: DONE: send-wrap <head> | BLOCKED: <why>.
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle)[39m

@@ -585,8 +585,12 @@ POST /api/cli/tabs/<tabId>/send?workspaceId=WS
   confirmation "composer-empty" counts for a tab with no prompt-submit hook, and for a remote tab
   whose composer showed the text after the typing and then read empty. Text still in the composer at
   1.5 s gets ONE more Enter (resubmitted: true); on a remote tab any text on the composer line does.
-  No extra Enter on any selectable list (a dialog, a menu, a picker), on an unreadable screen, or on a
-  Claude screen without its framed input box. An Enter still due at the deadline is pressed there
+  A Claude input box counts as holding the text when its rows, joined without whitespace, are a
+  window of it (a long brief shows its middle) or hold all of it: rows of the send's own text are
+  never read as a list. No extra Enter on any other selectable list (a dialog, a menu, a picker), on
+  an unreadable screen, or on a Claude screen without its framed input box. The server's
+  "tab send: submit-unconfirmed" log line counts what each screen read saw (screens: failed, refused,
+  empty, text, own-text). An Enter still due at the deadline is pressed there
   and the tab is read once more before the answer. Without proof, submitted is false and
   notSubmitted names why: typed-not-submitted (the text is still in the composer) or
   submit-unconfirmed (no turn seen, the screen proves nothing). The CLI then exits 1. The text was

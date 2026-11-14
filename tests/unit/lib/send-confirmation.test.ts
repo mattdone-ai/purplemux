@@ -487,3 +487,89 @@ describe('confirmSubmission never presses Enter into a selectable list (PMUX-REM
     expect(enters).toEqual([]);
   });
 });
+
+// PMUX-SEND-R3: a long brief scrolls the box, so the first line of the text is off screen, and a numbered brief can
+// open the box on `❯ 1. …`, which the r2 guard read as a picker: no Enter, `submit-unconfirmed`, `resubmitted: false`.
+describe('confirmSubmission reads the whole input box for the send\'s own text (PMUX-SEND-R3)', () => {
+  const fixture = (name: string): string => fs.readFileSync(path.resolve('tests/fixtures/panes', name), 'utf-8');
+  const typed = (name: string): string => fixture(name.replace(/\.ansi$/, '.typed.txt'));
+  const REMOTE = { remote: true, screenEmptyAtGate: false } as const;
+  const SUBMITTED = evidence({ cliState: 'busy', eventSeq: 8, lastPromptSubmitSeq: 8 });
+
+  for (const name of ['claude-composer-numbered-80x24.ansi', 'claude-composer-numbered-240x16.ansi']) {
+    it(`${name} on a remote tab: one Enter, confirmed on the hook (no Enter on #82)`, async () => {
+      const { result, enters } = await run({
+        panes: [fixture(name)],
+        request: { ...REMOTE, content: typed(name) },
+        afterEnter: { evidence: [SUBMITTED], panes: [EMPTY] },
+      });
+
+      expect(enters).toEqual([SUBMIT_RETRY_AFTER_MS]);
+      expect(result).toEqual({ submitted: true, confirmation: 'prompt-submit', resubmitted: true });
+    });
+
+    it(`${name} on a local tab: one Enter (no Enter on #82)`, async () => {
+      const { enters } = await run({ panes: [fixture(name)], request: { content: typed(name) } });
+
+      expect(enters).toEqual([SUBMIT_RETRY_AFTER_MS]);
+    });
+  }
+
+  it('a wrapped brief whose first line is off screen: one Enter on a remote tab, and when no hook crosses the clearing is proof', async () => {
+    const name = 'claude-composer-wrapped-80x24.ansi';
+    const { result, enters } = await run({
+      panes: [fixture(name)],
+      request: { ...REMOTE, content: typed(name) },
+      afterEnter: { panes: [FIXTURE_EMPTY] },
+    });
+
+    expect(enters).toEqual([SUBMIT_RETRY_AFTER_MS]);
+    expect(result).toEqual({ submitted: true, confirmation: 'composer-empty', resubmitted: true });
+  });
+
+  it('a wrapped brief on a local tab the gate did not see empty: the box holds the send\'s text, so one Enter', async () => {
+    const name = 'claude-composer-wrapped-80x24.ansi';
+    const { enters } = await run({ panes: [fixture(name)], request: { content: typed(name), screenEmptyAtGate: false } });
+
+    expect(enters).toEqual([SUBMIT_RETRY_AFTER_MS]);
+  });
+
+  it('a numbered box that is not the send\'s text keeps the r2 refusal: no Enter', async () => {
+    const { enters } = await run({ panes: [fixture('claude-composer-numbered-240x16.ansi')], request: REMOTE });
+
+    expect(enters).toEqual([]);
+  });
+
+  it('the text is never typed again: one Enter at most, typed-not-submitted when the box keeps it', async () => {
+    const name = 'claude-composer-numbered-240x16.ansi';
+    const { result, enters } = await run({ panes: [fixture(name)], request: { ...REMOTE, content: typed(name) } });
+
+    expect(enters).toHaveLength(1);
+    expect(result).toEqual({ submitted: false, notSubmitted: 'typed-not-submitted', resubmitted: true });
+  });
+
+  it('tells the caller what each screen read saw', async () => {
+    const name = 'claude-composer-numbered-240x16.ansi';
+    const reads: string[] = [];
+    let captures = 0;
+    const panes = [null, fixture('claude-onboarding-theme.ansi'), FIXTURE_EMPTY, STRANDED, fixture(name)];
+    await confirmSubmission(
+      {
+        readEvidence: () => evidence(),
+        capture: async () => {
+          const pane = panes[Math.min(captures++, panes.length - 1)];
+          if (pane === null) throw new Error('capture failed');
+          return pane;
+        },
+        isPendingLine: isPaneShowingPendingLine,
+        pressEnter: async () => undefined,
+        onScreenRead: (read) => reads.push(read),
+        now: () => captures * SUBMIT_CONFIRM_POLL_MS,
+        sleep: async () => undefined,
+      },
+      { panelType: 'claude-code', remote: true, content: typed(name), baseline: evidence(), screenEmptyAtGate: false },
+    );
+
+    expect(reads.slice(0, 5)).toEqual(['failed', 'refused', 'empty', 'text', 'own-text']);
+  });
+});

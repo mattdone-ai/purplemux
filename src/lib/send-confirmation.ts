@@ -1,4 +1,4 @@
-import { paneAsSeen, readComposer, showsSubmittableComposer } from '@/lib/composer-readiness';
+import { composerHoldsSentText, paneAsSeen, readComposer, showsSubmittableComposer } from '@/lib/composer-readiness';
 import { REMOTE_CALL_DEFAULT_MS } from '@/lib/tab-send';
 import type { ISubmitEvidence } from '@/types/status';
 import type { TPanelType } from '@/types/terminal';
@@ -49,6 +49,8 @@ export interface ISubmitConfirmDeps {
   /** Whether the whole first line of the content sits in the input box (`isPaneShowingPendingLine`). */
   isPendingLine: (plainPane: string, content: string) => boolean;
   pressEnter: () => Promise<void>;
+  /** Told what each screen read saw, for the send's log line. */
+  onScreenRead?: (read: TScreenRead) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -76,21 +78,38 @@ export const submitConfirmDeadlineMs = (remote: boolean, remoteTimeoutMs?: numbe
   return Math.min(SUBMIT_CONFIRM_MAX_MS, Math.ceil(SUBMIT_CONFIRM_REMOTE_MS * (budget / REMOTE_CALL_DEFAULT_MS)));
 };
 
+/**
+ * What one screen read saw (PMUX-SEND-R3): `failed` is no capture; `refused` a selectable list or no composer frame;
+ * `own-text` the send's text in the input box; `empty` and `text` the composer line. The send logs the counts, so a
+ * `submit-unconfirmed` names what its reads saw.
+ */
+export type TScreenRead = 'failed' | 'refused' | 'empty' | 'text' | 'own-text';
+
 interface IScreenReading {
   composer: 'empty' | 'text' | 'unreadable';
   firstLinePending: boolean;
+  /** The input box holds the send's own text ({@link composerHoldsSentText}). */
+  ownText: boolean;
+  read: TScreenRead;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+const UNREAD = { composer: 'unreadable', firstLinePending: false, ownText: false } as const;
+
 const readScreen = async (deps: ISubmitConfirmDeps, request: ISubmitConfirmRequest): Promise<IScreenReading> => {
   const captured = await deps.capture().catch(() => null);
-  if (!captured) return { composer: 'unreadable', firstLinePending: false };
+  if (!captured) return { ...UNREAD, read: 'failed' };
+  // The send's own text in the input box is never a list, whatever its rows look like (a numbered brief).
+  const ownText = composerHoldsSentText(request.panelType, captured, request.content);
   // A selectable list, or a Claude screen without its composer frame, holds no text of the send's: no Enter, no proof.
-  if (!showsSubmittableComposer(request.panelType, captured)) return { composer: 'unreadable', firstLinePending: false };
+  if (!ownText && !showsSubmittableComposer(request.panelType, captured)) return { ...UNREAD, read: 'refused' };
+  const composer = ownText ? 'text' : readComposer(request.panelType, captured);
   return {
-    composer: readComposer(request.panelType, captured),
+    composer,
     firstLinePending: deps.isPendingLine(paneAsSeen(request.panelType, captured), request.content),
+    ownText,
+    read: ownText ? 'own-text' : composer === 'unreadable' ? 'refused' : composer,
   };
 };
 
@@ -103,13 +122,15 @@ const strandedText = (screen: IScreenReading, screenEmptyAtGate: boolean): boole
   screen.firstLinePending || (screen.composer === 'text' && screenEmptyAtGate);
 
 /**
- * Text the one extra Enter may submit. On a remote tab (PMUX-REMOTE-SEND, 2026-11-13) any text on the composer line
- * after the typing is the send's own: 16 remote briefs sat typed for up to 6 h, folded to a placeholder the first
- * line cannot match, behind a gate that did not read the screen. An unreadable screen never qualifies: it may be a
- * selectable list of any kind (a permission dialog, an AskUserQuestion menu, a picker), which an Enter would answer.
+ * Text the one extra Enter may submit. The send's own text in the input box qualifies on any tab (PMUX-SEND-R3): a
+ * long brief scrolls its first line out of the box, so the first-line match fails. On a remote tab (PMUX-REMOTE-SEND,
+ * 2026-11-13) any text on the composer line after the typing is the send's own: 16 remote briefs sat typed for up to
+ * 6 h, folded to a placeholder the first line cannot match, behind a gate that did not read the screen. An unreadable
+ * screen never qualifies: it may be a selectable list of any kind (a permission dialog, an AskUserQuestion menu, a
+ * picker), which an Enter would answer.
  */
 const mayResubmit = (screen: IScreenReading, request: ISubmitConfirmRequest): boolean =>
-  strandedText(screen, request.screenEmptyAtGate) || (request.remote && screen.composer === 'text');
+  screen.ownText || strandedText(screen, request.screenEmptyAtGate) || (request.remote && screen.composer === 'text');
 
 /**
  * Poll after the typing until a proof, or the deadline. A failed capture is never proof, and neither is an empty
@@ -139,6 +160,7 @@ export const confirmSubmission = async (
   for (;;) {
     if (proven()) return { submitted: true, confirmation: 'prompt-submit', resubmitted };
     const screen = await readScreen(deps, request);
+    deps.onScreenRead?.(screen.read);
     if (proven()) return { submitted: true, confirmation: 'prompt-submit', resubmitted };
     const cleared = screen.composer === 'empty' && !screen.firstLinePending;
     if (cleared && (screenProves || (request.remote && textSeen))) {
