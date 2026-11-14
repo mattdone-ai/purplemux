@@ -41,8 +41,13 @@ export interface IGhRate {
   limit: number;
   remaining: number;
   used: number;
-  /** When the budget is full again, epoch ms (`X-RateLimit-Reset` is epoch seconds). */
+  /** When the budget is full again, epoch ms on this host's clock, bounded (`X-RateLimit-Reset` moved by `Date`). */
   resetAt: number;
+  /**
+   * `X-RateLimit-Reset` as GitHub sent it, epoch seconds on GitHub's clock: the same for every answer in one budget
+   * window, so it keys a once-per-window log line; `resetAt` moves with each answer's 1 s `Date` (r3 #1).
+   */
+  resetEpochS: number;
 }
 
 export type TGhResult =
@@ -87,7 +92,7 @@ export const rateOf = (headers: Map<string, string>, now: number): IGhRate | und
   const reset = wholeNumber(headers.get('x-ratelimit-reset'));
   if (limit === null || remaining === null || reset === null) return undefined;
   const resetAt = boundRetryAt(reset * 1000 - clockOffsetMs(headers, now), now).at;
-  return { resource: headers.get('x-ratelimit-resource') ?? 'unknown', limit, remaining, used: used ?? limit - remaining, resetAt };
+  return { resource: headers.get('x-ratelimit-resource') ?? 'unknown', limit, remaining, used: used ?? limit - remaining, resetAt, resetEpochS: reset };
 };
 
 /** The `type` of each GraphQL error in a body; none when the body is not GraphQL JSON. */

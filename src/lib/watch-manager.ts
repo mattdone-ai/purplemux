@@ -172,7 +172,7 @@ export class WatchManager {
   private githubPausedUntil = 0;
   /** The last budget each resource reported. */
   private budgets = new Map<string, IGhRate>();
-  /** The resets a low-budget line was already logged for, per resource: one line per reset. */
+  /** The raw `X-RateLimit-Reset` a low-budget line was already logged for, per resource: one line per window. */
   private lowLogged = new Map<string, number>();
   /** One entry per watch read an hour back: which owner spent it. */
   private spend: Array<{ at: number; owner: string }> = [];
@@ -210,8 +210,9 @@ export class WatchManager {
 
   /** One read of the GitHub API, counted against its owner, with the budget it reported logged. */
   private async gh(args: string[], owner: string): Promise<TGhResult> {
-    const now = this.deps.now();
     const r = await this.deps.runGh(args);
+    // The time after the read, as the read's own bound used (r3 #3): a hold the read bounded is never clamped again.
+    const now = this.deps.now();
     // Pruned on every push, not only when read: the log holds one hour of reads, whatever reads it (r2 #4).
     this.spend.push({ at: now, owner });
     this.spend = this.spend.filter((e) => now - e.at < SPEND_WINDOW_MS);
@@ -220,13 +221,13 @@ export class WatchManager {
       log.debug({ resource: r.rate.resource, remaining: r.rate.remaining, limit: r.rate.limit, owner }, 'watch read: GitHub budget');
     }
     const rate = r.rate;
-    const low = rate && rate.remaining <= rate.limit * BUDGET_LOW_SHARE && this.lowLogged.get(rate.resource) !== rate.resetAt;
+    const low = rate && rate.remaining <= rate.limit * BUDGET_LOW_SHARE && this.lowLogged.get(rate.resource) !== rate.resetEpochS;
     if (!r.ok && r.code === 'rate-limited') {
       this.pauseGithub(r.retryAt, now, r.retryHeader, r.retryClamped === true);
       log.warn({ ...rate, retryHeader: r.retryHeader, pausedUntil: this.githubPausedUntil, ...this.spendSummary(now) },
         `GitHub rate limit met by a watch read; GitHub watches wait until ${isoTime(this.githubPausedUntil)}`);
     } else if (low) {
-      this.lowLogged.set(rate.resource, rate.resetAt);
+      this.lowLogged.set(rate.resource, rate.resetEpochS);
       log.warn({ ...rate, ...this.spendSummary(now) }, `GitHub ${rate.resource} budget low: ${rate.remaining} of ${rate.limit} left until ${isoTime(rate.resetAt)}`);
     }
     return r;
@@ -475,6 +476,9 @@ export class WatchManager {
         return replace({ ...w, pendingNotice: undefined, lastCheckedAt: now });
       }
       if (w.kind === 'pr' && fields.notice === 'checks-settled') {
+        // This re-check is a GitHub read like any other: during a hold it does not run, and the notice waits for the
+        // hold's end (r3 #2). A notice that cannot queue must never read, or extend the hold, on every pass.
+        if (this.githubPaused()) return w.pendingNotice ? list : replace({ ...w, pendingNotice: fields as Record<string, unknown> });
         const current = await this.pull(w.target, `${w.workspaceId}/${w.tabId}`);
         if (!current.ok) return replace({ ...w, lastCheckedAt: now, lastError: { code: current.code,
           message: current.message, at: now } });

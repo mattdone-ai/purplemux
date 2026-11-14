@@ -1000,8 +1000,9 @@ RATE_LIMITED) is no failure: every GitHub watch waits until the reset GitHub nam
 (Retry-After, else X-RateLimit-Reset moved onto this host's clock by the answer's Date header),
 never past 65 minutes and never a time already past (then 60 s), plus 5 s; the watches then
 resume 2 s apart in the order they were made (up to 60 s). Its lastError reads rate-limited, and
-no failing notice goes out. A GraphQL FORBIDDEN or SAML-enforcement error is http-403. A watch made during a rate limit is made with baselinePending: true; the first read after
-the reset takes its baseline (a head-moved or moved watch counts its move from that read). A
+no failing notice goes out. A GraphQL FORBIDDEN or SAML-enforcement error is http-403. A watch
+made during a rate limit is made with baselinePending: true; the first read after the reset
+takes its baseline (a head-moved or moved watch counts its move from that read). A
 merged watch on a PR closed without a merge reports CLOSED. Host caps: 60 GitHub watches and
 2,000 GitHub requests/h in all (one per check; a checks-settled watch with more than 100 checks
 reads one more page per 100) — 409 watch-cap, CLI exit 3; a tab holds at most 30 watches.

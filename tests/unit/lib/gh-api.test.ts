@@ -23,7 +23,7 @@ describe('parseIncluded and rateOf', () => {
     const a = parseIncluded(answer(200, budget(3782), '{"sha":"x"}'));
     expect(a.status).toBe(200);
     expect(a.body).toBe('{"sha":"x"}');
-    expect(rateOf(a.headers, NOW)).toEqual({ resource: 'core', limit: 5000, remaining: 3782, used: 1218, resetAt: RESET_S * 1000 });
+    expect(rateOf(a.headers, NOW)).toEqual({ resource: 'core', limit: 5000, remaining: 3782, used: 1218, resetAt: RESET_S * 1000, resetEpochS: RESET_S });
   });
 
   it('reads CRLF headers, and a body without a status line as the body alone', () => {
@@ -73,6 +73,15 @@ describe('the retry time is bounded and on this host\'s clock', () => {
   it('clamps a Retry-After past an hour to 65 minutes, and names the header it came from', () => {
     expect(rateLimitRetry(spent({ 'Retry-After': 999999999 }), '', NOW)).toEqual({
       at: NOW + RATE_LIMIT_MAX_HOLD_MS, header: 'Retry-After: 999999999', clamped: true });
+  });
+
+  it('the raw reset stays the same for every answer of one window, whatever its Date header (r3 #1)', () => {
+    const at = (date: number) => rateOf(spent({ Date: new Date(date).toUTCString() }).headers, NOW)!;
+    const first = at(NOW - 437);
+    const second = at(NOW + 1_612);
+    expect(first.resetAt).not.toBe(second.resetAt);
+    expect(first.resetEpochS).toBe(RESET_S);
+    expect(second.resetEpochS).toBe(RESET_S);
   });
 
   it('a host clock AHEAD of GitHub waits longer by the gap; one BEHIND waits shorter', () => {
@@ -156,7 +165,7 @@ describe('runGhApi through a fake gh', () => {
     fakeGh(answer(200, budget(4871, 'graphql'), '{"data":{"ok":true}}'), '', 0);
     const r = await runGhApi(['api', 'graphql', '-f', 'query=x'], () => NOW);
     expect(fs.readFileSync(path.join(dir, 'args'), 'utf-8').split('\n').slice(0, 2)).toEqual(['api', '-i']);
-    expect(r).toEqual({ ok: true, stdout: '{"data":{"ok":true}}', rate: { resource: 'graphql', limit: 5000, remaining: 4871, used: 129, resetAt: RESET_S * 1000 } });
+    expect(r).toEqual({ ok: true, stdout: '{"data":{"ok":true}}', rate: { resource: 'graphql', limit: 5000, remaining: 4871, used: 129, resetAt: RESET_S * 1000, resetEpochS: RESET_S } });
   });
 
   it('a rate-limited 403 is rate-limited with GitHub\'s reset, never http-403', async () => {

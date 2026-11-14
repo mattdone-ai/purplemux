@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ICaller } from '@/lib/caller';
 import type { IEnqueueRequest } from '@/lib/inbox-store';
 import { renderInboxLine } from '@/lib/inbox-templates';
@@ -6,6 +6,16 @@ import { RESUME_MARGIN_MS, RESUME_STAGGER_MS, WatchManager, classifyGhError, set
 import { WATCH_DEFAULT_TTL_S, WATCH_GITHUB_CAP, WATCH_TAB_CAP, WatchError, checkSpec, isDue } from '@/lib/watch-store';
 import type { IInboxItem } from '@/types/inbox';
 import type { IWatchesState } from '@/types/watch';
+
+const logs = vi.hoisted(() => ({ warn: [] as string[] }));
+vi.mock('@/lib/logger', () => {
+  const logger = {
+    trace: () => {}, debug: () => {}, info: () => {}, error: () => {}, fatal: () => {},
+    warn: (...args: unknown[]) => { logs.warn.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')); },
+    child: () => logger,
+  };
+  return { createLogger: () => logger };
+});
 
 const T0 = Date.UTC(2026, 8, 26, 12, 0, 0);
 const MIN = 60_000;
@@ -513,7 +523,7 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
   /** The hold ends a margin after GitHub's reset (r2 #2). */
   const RESUME = RESET + RESUME_MARGIN_MS;
   const limited = (retryAt = RESET): TGhResult => ({ ok: false, code: 'rate-limited', message: 'API rate limit exceeded for user ID 1', retryAt,
-    rate: { resource: 'graphql', limit: 5000, remaining: 0, used: 5000, resetAt: retryAt } });
+    rate: { resource: 'graphql', limit: 5000, remaining: 0, used: 5000, resetAt: retryAt, resetEpochS: Math.floor(retryAt / 1000) } });
   const tickTo = async (at: number) => {
     f.now = at;
     await m.tick();
@@ -600,7 +610,7 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
 
   it('a hold a fake read asks for beyond the hour, or as no time at all, is bounded: nothing throws (r2 #1)', async () => {
     const absurd: TGhResult = { ok: false, code: 'rate-limited', message: 'API rate limit exceeded', retryAt: 1e300,
-      rate: { resource: 'graphql', limit: 5000, remaining: 0, used: 5000, resetAt: 1e300 } };
+      rate: { resource: 'graphql', limit: 5000, remaining: 0, used: 5000, resetAt: 1e300, resetEpochS: 999999999999999 } };
     f.answer('number=31', absurd);
     const w = await m.create(B, { kind: 'pr', target: 'o/r#31', until: 'merged' });
     const held = T0 + 65 * MIN + RESUME_MARGIN_MS;
@@ -640,8 +650,76 @@ describe('GitHub rate limits (PMUX-WATCH-403)', () => {
     expect(spend()).toBeGreaterThan(50);
   });
 
+  it('logs the low-budget warning once per budget window, though each answer\'s Date moves resetAt (r3 #1)', async () => {
+    logs.warn = [];
+    const resetEpochS = (T0 + 30 * MIN) / 1000;
+    // Two reads in one window: the same X-RateLimit-Reset, a resetAt that moved by the 1 s Date and the local ms.
+    const low = (resetAt: number): TGhResult => ({ ...f.pull(false, 'open', SHA_A),
+      rate: { resource: 'graphql', limit: 5000, remaining: 300, used: 4700, resetAt, resetEpochS } } as TGhResult);
+    f.answer('number=61', low(T0 + 30 * MIN - 437), low(T0 + 30 * MIN + 612), low(T0 + 30 * MIN - 88));
+    await m.create(B, { kind: 'pr', target: 'o/r#61', until: 'merged' });
+    f.now += 123;
+    await tickTo(T0 + 2 * MIN + 123);
+    await tickTo(T0 + 4 * MIN + 789);
+    expect(logs.warn.filter((l) => l.includes('budget low'))).toHaveLength(1);
+    // A new window warns again.
+    f.answer('number=61', { ...f.pull(false, 'open', SHA_A),
+      rate: { resource: 'graphql', limit: 5000, remaining: 200, used: 4800, resetAt: T0 + 90 * MIN, resetEpochS: resetEpochS + 3600 } } as TGhResult);
+    await tickTo(T0 + 7 * MIN);
+    expect(logs.warn.filter((l) => l.includes('budget low'))).toHaveLength(2);
+  });
+
+  it('a checks-settled notice that cannot queue makes no GitHub read during a hold and never moves it (r3 #2)', async () => {
+    f.answer('number=71', f.pull(false, 'open', SHA_A),
+      f.pull(false, 'open', SHA_A, { runs: [['COMPLETED', 'SUCCESS']] }), f.pull(false, 'open', SHA_A),
+      f.pull(false, 'open', SHA_A), limited());
+    f.answer('number=72', f.pull(false, 'open', SHA_A), limited());
+    let refuse = true;
+    const deps = f.deps();
+    const enqueue = deps.enqueue;
+    m = new WatchManager({ ...deps, enqueue: async (req) => {
+      if (refuse && req.fields.notice === 'checks-settled') throw new Error('inbox refused');
+      return enqueue(req);
+    } });
+    const w = await m.create(B, { kind: 'pr', target: 'o/r#71', until: 'checks-settled' });
+    await m.create(B, { kind: 'pr', target: 'o/r#72', until: 'merged' });
+    await tickTo(T0 + 2 * MIN);
+    // The checks settled, the re-check read passed, the inbox refused: the notice is pending.
+    expect(f.state.watches.find((x) => x.id === w.id)?.pendingNotice).toMatchObject({ notice: 'checks-settled' });
+    // The other watch meets a rate limit: the hold begins.
+    await tickTo(T0 + 4 * MIN);
+    const held = m.budget().pausedUntil;
+    expect(held).toBe(RESUME);
+    const reads = f.ghCalls.length;
+    // Every pass of the hold retries the notice; none reads GitHub, none moves the hold.
+    for (const at of [T0 + 5 * MIN, T0 + 8 * MIN, T0 + 12 * MIN]) await tickTo(at);
+    expect(f.ghCalls).toHaveLength(reads);
+    expect(m.budget().pausedUntil).toBe(held);
+    expect(f.state.watches.find((x) => x.id === w.id)?.pendingNotice).toMatchObject({ notice: 'checks-settled' });
+    // After the hold the re-check reads once more and the notice goes out.
+    refuse = false;
+    await tickTo(RESUME);
+    expect(f.sent.map((x) => x.fields.notice)).toContain('checks-settled');
+  });
+
+  it('a hold the read bounded at the limit is not clamped again: one clamp line, the hold as the read named it (r3 #3)', async () => {
+    logs.warn = [];
+    const deps = f.deps();
+    // The read takes 1 s: its own bound used the time after it, as runGhApi does.
+    m = new WatchManager({ ...deps, runGh: async (args) => {
+      f.ghCalls.push(args);
+      f.now += 1_000;
+      return { ok: false, code: 'rate-limited', message: 'limited', retryAt: f.now + 65 * MIN, retryHeader: 'Retry-After: 999999999', retryClamped: true };
+    } });
+    await m.create(B, { kind: 'pr', target: 'o/r#81', until: 'merged' });
+    expect(m.budget().pausedUntil).toBe(T0 + 1_000 + 65 * MIN + RESUME_MARGIN_MS);
+    const clamps = logs.warn.filter((l) => l.includes('was clamped'));
+    expect(clamps).toHaveLength(1);
+    expect(clamps[0]).toContain('Retry-After: 999999999');
+  });
+
   it('names who spent the budget: the last budget per resource, the watch reads an hour back, the top owners', async () => {
-    const rate = { resource: 'graphql', limit: 5000, remaining: 4321, used: 679, resetAt: T0 + 30 * MIN };
+    const rate = { resource: 'graphql', limit: 5000, remaining: 4321, used: 679, resetAt: T0 + 30 * MIN, resetEpochS: (T0 + 30 * MIN) / 1000 };
     f.answer('number=21', { ...f.pull(false, 'open', SHA_A), rate } as TGhResult);
     f.answer('number=22', { ...f.pull(false, 'open', SHA_A), rate } as TGhResult);
     f.live.add('ws-a/tab-a');
