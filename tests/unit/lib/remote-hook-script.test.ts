@@ -5,6 +5,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { REMOTE_HOOK_SCRIPT_CONTENT, REMOTE_HOOK_URL_FILE } from '@/lib/hook-scripts';
 import { parseSpooledHook, spooledHookQuery } from '@/lib/hook-spool';
+import { pathWithoutCommand } from './path-without-command';
 
 // ADR-0022 slice (b): the remote tab's Claude hook, run with a fake curl and tmux. It posts the raw
 // hook JSON to PMUX_URL with the tab token, and spools beside itself when no server answers.
@@ -99,6 +100,10 @@ describe('remote Claude hook script (ADR-0022)', () => {
     ['a 401', { out: '401 0.000200', exit: 0 }],
     ['a 400', { out: '400 0.000200', exit: 0 }],
     ['a 404 answer', { out: '404 0.000200', exit: 0 }],
+    ['127 (curl cannot run), with no code (PMUX-REMOTE-URL r4)', { out: '', exit: 127 }],
+    ['0 with an empty code', { out: '', exit: 0 }],
+    ['0 with code 000', { out: '000 0.000000', exit: 0 }],
+    ['an exit the rule does not name (2)', { out: '000 0.000000', exit: 2 }],
   ])('spools when curl exits %s', (_label, curl) => {
     run('stop', '{"session_id":"0f9e"}', curl);
     const files = spooled();
@@ -119,6 +124,22 @@ describe('remote Claude hook script (ADR-0022)', () => {
     run('stop', '{"session_id":"0f9e"}', curl);
     expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(true);
     expect(spooled()).toEqual([]);
+  });
+
+  it('a host with no curl: the POST is skipped and the event spools (PMUX-REMOTE-URL r4)', () => {
+    const noCurl = path.join(dir, 'no-curl');
+    fs.mkdirSync(noCurl);
+    fs.copyFileSync(path.join(bin, 'tmux'), path.join(noCurl, 'tmux'));
+    fs.chmodSync(path.join(noCurl, 'tmux'), 0o755);
+    const system = pathWithoutCommand(path.join(dir, 'system'), 'curl');
+    run('stop', '{"session_id":"0f9e"}', { out: '204 0.000100', exit: 0 }, { PATH: `${noCurl}:${system}` });
+
+    expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(false);
+    const files = spooled();
+    expect(files).toHaveLength(1);
+    const hook = parseSpooledHook(fs.readFileSync(path.join(spoolDir(), files[0]), 'utf-8'));
+    expect(hook?.body).toEqual({ session_id: '0f9e' });
+    expect(spooledHookQuery(hook!.query)).toMatchObject({ remote: 'claude', event: 'stop', session: SESSION });
   });
 
   it('spools when no callback URL or token is set, and never posts without a token', () => {

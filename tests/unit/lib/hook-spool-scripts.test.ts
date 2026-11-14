@@ -10,6 +10,7 @@ import {
 } from '@/lib/hook-scripts';
 import { installHookScripts } from '@/lib/hook-scripts-install';
 import { parseSpooledHook } from '@/lib/hook-spool';
+import { pathWithoutCommand } from './path-without-command';
 
 // ADR-0020: the rendered hook scripts, run with a fake curl on PATH. A POST no
 // server answers leaves one spool file with the payload and the time the hook
@@ -136,14 +137,34 @@ describe('hook scripts spool an event no server answered (ADR-0020)', () => {
     ['a 308 redirect (PMUX-REMOTE-URL r3)', { out: '308 0.000200', exit: 0 }],
     ['a 4xx refusal (the route refuses before it applies anything)', { out: '403 0.000200', exit: 0 }],
     ['a 404', { out: '404 0.000200', exit: 0 }],
+    ['curl 127 with no code (PMUX-REMOTE-URL r4)', { out: '', exit: 127 }],
+    ['an empty code with exit 0', { out: '', exit: 0 }],
+    ['an exit the rule does not name (2)', { out: '000 0.000000', exit: 2 }],
   ])('spools on %s', (_label, curl: ICurlBehaviour) => {
     run(HOOK_SCRIPT_CONTENT, ['prompt-submit'], '{}', curl);
     expect(readOnly().body).toEqual({ event: 'prompt-submit', session: SESSION });
   });
 
+  it('a host with no curl skips the POST and spools, for the prompt and the stop paths (PMUX-REMOTE-URL r4)', () => {
+    const noCurl = path.join(dir, 'no-curl');
+    fs.mkdirSync(noCurl);
+    fs.copyFileSync(path.join(bin, 'tmux'), path.join(noCurl, 'tmux'));
+    fs.chmodSync(path.join(noCurl, 'tmux'), 0o755);
+    const system = pathWithoutCommand(path.join(dir, 'system'), 'curl');
+    for (const event of ['prompt-submit', 'stop']) {
+      run(HOOK_SCRIPT_CONTENT, [event], '{}', { out: '204 0.000100', exit: 0 }, { PATH: `${noCurl}:${system}` });
+    }
+    settle(() => spoolFiles().filter((name) => name.endsWith('.json') && !name.startsWith('.')).length >= 2);
+
+    expect(fs.existsSync(path.join(dir, 'curl-args'))).toBe(false);
+    expect(spoolFiles().filter((name) => name.endsWith('.json') && !name.startsWith('.'))).toHaveLength(2);
+  });
+
   it.each([
     ['a 308 redirect', { out: '308 0.000200', exit: 0 }],
     ['a 403 refusal', { out: '403 0.000200', exit: 0 }],
+    ['curl 127 with no code', { out: '', exit: 127 }],
+    ['an empty code with exit 0', { out: '', exit: 0 }],
   ])('the stop path spools on %s too', (_label, curl: ICurlBehaviour) => {
     run(HOOK_SCRIPT_CONTENT, ['stop'], '{}', curl);
     expect(spoolFiles()).toHaveLength(1);

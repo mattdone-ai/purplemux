@@ -49,25 +49,26 @@ export const HOOK_TMUX_TIMEOUT_SECONDS = 1;
 
 /**
  * Shared shell functions. `post_hook TARGET BODY [curl options]` POSTs one
- * event; when no server answers — no port file, a non-2xx answer, or a curl failure
- * before the request left this host — the event goes to `hook-spool/` as one
+ * event; when it is not proven delivered, the event goes to `hook-spool/` as one
  * JSON file, written to a dot-named temporary and renamed, which the next
  * server replays in time order.
  *
- * The rule: spool exactly when the server cannot have received the request.
- * The curl exits that prove it are 3 (the URL is malformed), 5 and 6 (the proxy or the host name did not
- * resolve), 7 (the connect was refused or failed), 28 with a zero
- * `time_connect` (the timeout fired before the connect), 35 (the TLS handshake
- * failed) and 60 (the TLS peer certificate failed verification). In each of
- * them curl sent no HTTP request. Every non-2xx answer also spools (PMUX-REMOTE-URL r3): the hook route answers
- * 3xx, 4xx and 5xx only before it applies anything (a redirect, 405, 400, 403, a missing tmuxSession, a failure),
- * so a replay cannot repeat an event. A 308 from a callback URL that ended in `/` (`//api/status/hook`) was never
- * spooled, and every event of the tab was lost. Measured 2026-11-09 on a remote host whose callback name
- * did not resolve: curl exited 6, nothing spooled, and every event of the tab
- * was lost. A 2xx answer, or a timeout after the connect, is
- * never spooled: the server may have applied it. So is a connection the
- * server cut while it exited (curl 52/56): it may have applied the event, and a
- * replay would repeat it on a tab whose floor that server never persisted.
+ * The rule (PMUX-REMOTE-URL r4): spool every event that is not proven delivered, unless the server may have
+ * applied it. Delivered is curl exit 0 with a 2xx code. Never spooled, because the request reached the server
+ * and a replay could repeat it on a tab whose floor that server never persisted: curl 28 with a non-zero
+ * `time_connect` (the timeout fired after the connect), 52 (empty reply) and 56 (receive failure), as when a
+ * server cut the connection while it exited. Everything else spools:
+ *
+ * - no URL or port, no token, or no curl on the host (the POST is skipped);
+ * - a curl exit before any request left the host (3, 5, 6, 7, 28 with a zero `time_connect`, 35, 60), curl
+ *   127, and any exit this rule does not name;
+ * - an empty code, and every non-2xx answer: the hook route answers 3xx, 4xx and 5xx only before it applies
+ *   anything (a redirect, 405, 400, 403, a missing tmuxSession, a failure), so a replay cannot repeat an event.
+ *
+ * Each rule came from a lost tab: 2026-11-09, a remote callback name did not resolve (curl 6, nothing spooled);
+ * PMUX-REMOTE-URL r3, a callback URL that ended in `/` answered 308 to `//api/status/hook`; r4, a host with no
+ * curl exited 127. None of them matched a spool case, and every event of the tab was lost.
+ *
  * Only purplemux sessions (`pt-*`) spool, because the Codex hook is global and
  * also fires outside purplemux. `SPOOL_SKIP_EVENT` names a hook event never
  * spooled: Codex PreToolUse, one per tool call. It is not stateless (the receiver maps it to
@@ -118,7 +119,7 @@ post_hook() {
   HOOK_BODY="$2"
   shift 2
   case "$HOOK_TARGET" in *\\?*) HOOK_QUERY="\${HOOK_TARGET#*\\?}" ;; *) HOOK_QUERY="" ;; esac
-  if [ -z "\${HOOK_BASE_URL:-$PORT}" ] || [ -z "$TOKEN" ]; then
+  if [ -z "\${HOOK_BASE_URL:-$PORT}" ] || [ -z "$TOKEN" ] || ! command -v curl >/dev/null 2>&1; then
     spool_hook "$HOOK_QUERY" "$HOOK_BODY"
     return 0
   fi
@@ -131,8 +132,9 @@ HOOK_HEADERS
   HOOK_RC=$?
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
-    3:*|5:*|6:*|7:*|35:*|60:*|*:[13-9][0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
+    0:2[0-9][0-9]|52:*|56:*) ;;
     28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
+    *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
   esac
   return 0
 }
@@ -143,7 +145,7 @@ post_stop() {
   case "$1" in *\\?*) HOOK_TARGET="$1&occurredAt=$AT" ;; *) HOOK_TARGET="$1?occurredAt=$AT" ;; esac
   HOOK_BODY="$2"
   case "$HOOK_TARGET" in *\\?*) HOOK_QUERY="\${HOOK_TARGET#*\\?}" ;; *) HOOK_QUERY="" ;; esac
-  if [ -z "\${HOOK_BASE_URL:-$PORT}" ] || [ -z "$TOKEN" ]; then
+  if [ -z "\${HOOK_BASE_URL:-$PORT}" ] || [ -z "$TOKEN" ] || ! command -v curl >/dev/null 2>&1; then
     spool_hook "$HOOK_QUERY" "$HOOK_BODY"
     return 0
   fi
@@ -158,8 +160,9 @@ HOOK_HEADERS
   HOOK_RESULT="\${HOOK_OUT##*$HOOK_NL}"
   HOOK_HTTP="\${HOOK_RESULT%% *}"
   case "$HOOK_RC:$HOOK_HTTP" in
-    3:*|5:*|6:*|7:*|35:*|60:*|*:[13-9][0-9][0-9]) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
+    0:2[0-9][0-9]|52:*|56:*) ;;
     28:*) case "\${HOOK_RESULT#* }" in *[1-9]*) ;; *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;; esac ;;
+    *) spool_hook "$HOOK_QUERY" "$HOOK_BODY" ;;
   esac
   return 0
 }`;
