@@ -7,9 +7,14 @@
 // `wave3(inst, helpers)` returns results in checks.cjs's shape: { status, id, what, measured?, expected? }.
 //
 // GitHub is never called: a fake `gh` in $scratch/bin (first on the candidate server's PATH) answers
-// `gh api <path>` from fixture files of real API bodies, and applies the server's own `--jq` filter to
-// them with the host's `jq`. Answers `<key>.1`, `<key>.2`, … serve the 1st, 2nd, … read of a path;
-// `<key>` serves every later read; a path with no answer is `HTTP 404`.
+// `gh api [-i] <path>` and `gh api [-i] graphql -f owner=… -f name=… -F number=…` from fixture files of
+// real API bodies, and applies the server's own `--jq` filter to a REST body with the host's `jq`. With
+// `-i` it prints what `gh api -i` prints: a status line, the Date and X-RateLimit-* headers, a blank
+// line, the body (src/lib/gh-api.ts parses exactly that, PMUX-WATCH-403). A GraphQL read is keyed by
+// its variables, as the server sends them: owner, name, number (a PR), expression (a ref), cursor (a
+// later page of checks). Answers `<key>.1`, `<key>.2`, … serve the 1st, 2nd, … read of a key; `<key>`
+// serves every later read. A REST path with no answer is `HTTP 404`; a GraphQL read with no answer is
+// GitHub's own NOT_FOUND (HTTP 200, an `errors` entry, gh exit 1), as for a PR that does not exist.
 //
 // GitHub watches are read at most every 60 s, so a watch that needs a second read (head-moved,
 // checks-settled) is proven within one interval (~75 s, waited once for all of them); the failing and
@@ -30,18 +35,51 @@ const installFakeGh = (scratch) => {
   const file = path.join(scratch, 'bin', 'gh');
   fs.writeFileSync(file, [
     '#!/bin/sh',
-    '# acceptance fake gh: answers `gh api <path> ...` from fixture files (checks-wave3.cjs)',
+    '# acceptance fake gh: answers `gh api [-i] <path>|graphql ...` from fixture files (checks-wave3.cjs)',
     `dir='${dir}'`,
-    'p=""; filter=""; prev=""',
+    'p=""; filter=""; prev=""; include=0; owner=""; name=""; number=""; expression=""; cursor=""',
     'for a in "$@"; do',
     '  if [ "$prev" = --jq ]; then filter="$a"; prev=""; continue; fi',
-    '  case "$a" in --jq) prev=--jq ;; api|-*) ;; *) [ -z "$p" ] && p="$a" ;; esac',
+    '  if [ "$prev" = field ]; then',
+    '    case "$a" in owner=*) owner="${a#owner=}" ;; name=*) name="${a#name=}" ;; number=*) number="${a#number=}" ;;',
+    '      expression=*) expression="${a#expression=}" ;; cursor=*) cursor="${a#cursor=}" ;; esac',
+    '    prev=""; continue',
+    '  fi',
+    '  case "$a" in',
+    '    --jq) prev=--jq ;;',
+    '    -f|-F|--field|--raw-field) prev=field ;;',
+    '    -i|--include) include=1 ;;',
+    '    api|-*) ;;',
+    '    *) [ -z "$p" ] && p="$a" ;;',
+    '  esac',
     'done',
-    'key=$(printf "%s" "$p" | tr -c "A-Za-z0-9" "_")',
+    'if [ "$p" = graphql ]; then',
+    '  resource=graphql; raw="graphql_${owner}_${name}_${number}"',
+    '  [ -n "$expression" ] && raw="${raw}_expr_${expression}"',
+    '  [ -n "$cursor" ] && raw="${raw}_cursor_${cursor}"',
+    'else',
+    '  resource=core; raw="$p"',
+    'fi',
+    'headers() {',
+    '  printf "HTTP/2.0 %s\\n" "$1"',
+    '  printf "Date: %s\\n" "$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S GMT")"',
+    '  printf "X-Ratelimit-Limit: 5000\\nX-Ratelimit-Remaining: 4999\\nX-Ratelimit-Reset: %s\\n" "$(( $(date +%s) + 3600 ))"',
+    '  printf "X-Ratelimit-Resource: %s\\nX-Ratelimit-Used: 1\\n\\n" "$resource"',
+    '}',
+    'key=$(printf "%s" "$raw" | tr -c "A-Za-z0-9" "_")',
     'n=$(( $(cat "$dir/$key.count" 2>/dev/null || echo 0) + 1 ))',
     'echo "$n" > "$dir/$key.count"',
     'f="$dir/$key.$n"; [ -f "$f" ] || f="$dir/$key"',
-    '[ -f "$f" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }',
+    'if [ ! -f "$f" ]; then',
+    '  if [ "$resource" = graphql ]; then',
+    '    [ "$include" = 1 ] && headers "200 OK"',
+    '    printf \'{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to a PullRequest with the number of %s."}]}\' "$number"',
+    '    echo "gh: Could not resolve to a PullRequest with the number of $number." >&2; exit 1',
+    '  fi',
+    '  [ "$include" = 1 ] && { headers "404 Not Found"; printf \'{"message":"Not Found","status":"404"}\'; }',
+    '  echo "gh: Not Found (HTTP 404)" >&2; exit 1',
+    'fi',
+    '[ "$include" = 1 ] && headers "200 OK"',
     'if [ -n "$filter" ]; then jq -r "$filter" "$f"; else cat "$f"; fi',
     '',
   ].join('\n'));
@@ -50,9 +88,44 @@ const installFakeGh = (scratch) => {
 };
 
 const ghKey = (apiPath) => apiPath.replace(/[^A-Za-z0-9]/g, '_');
-const answer = (dir, apiPath, body, nth) =>
-  fs.writeFileSync(path.join(dir, nth ? `${ghKey(apiPath)}.${nth}` : ghKey(apiPath)), typeof body === 'string' ? body : JSON.stringify(body));
-const pull = (merged, state, sha) => ({ merged, state, head: { sha } });
+const writeAnswer = (dir, key, body, nth) =>
+  fs.writeFileSync(path.join(dir, nth ? `${key}.${nth}` : key), typeof body === 'string' ? body : JSON.stringify(body));
+/** A REST answer for `gh api <apiPath>`. */
+const answer = (dir, apiPath, body, nth) => writeAnswer(dir, ghKey(apiPath), body, nth);
+/** A GraphQL answer for the server's PR read of `owner/repo#number` (PR_QUERY in watch-manager.ts). */
+const answerPr = (dir, repo, number, body, nth) => {
+  const [owner, name] = repo.split('/');
+  writeAnswer(dir, ghKey(`graphql_${owner}_${name}_${number}`), body, nth);
+};
+/**
+ * A pull request as the GraphQL read answers it: `state` is the REST word (open, closed), a merged PR reads
+ * MERGED; `checks` is the head's rollup nodes (CheckRun { status, conclusion }, StatusContext { state }).
+ */
+const pullNode = (merged, state, sha, checks) => ({
+  data: { repository: { pullRequest: {
+    merged, state: merged ? 'MERGED' : state.toUpperCase(), headRefOid: sha,
+    commits: { nodes: [{ commit: { oid: sha, statusCheckRollup: checks
+      ? { contexts: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: checks } } : null } }] },
+  } } },
+});
+
+/**
+ * The wave-3 watch fixtures (story 14), one place for the gate and the unit suite. The watches read GraphQL
+ * (PMUX-WATCH-403): one query answers a PR's state, head and checks. #1 is merged; #2's head moves after the first
+ * read; #3's checks are settled (2 green check runs, 1 red, 1 green status: "3 green, 1 red"). #404 has no answer:
+ * the fake answers GitHub's NOT_FOUND and the server refuses the watch.
+ */
+const writeWatchFixtures = (gh, repo) => {
+  answerPr(gh, repo, 1, pullNode(true, 'closed', SHA_A));
+  answerPr(gh, repo, 2, pullNode(false, 'open', SHA_A), 1);
+  answerPr(gh, repo, 2, pullNode(false, 'open', SHA_B));
+  answerPr(gh, repo, 3, pullNode(false, 'open', SHA_C, [
+    { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' },
+    { __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SKIPPED' },
+    { __typename: 'StatusContext', state: 'SUCCESS' },
+  ]));
+};
 
 /** The deploy line (story 13): the fixed template, no caller text. Exported for the unit suite. */
 const judgeDeployLine = (line, id, reasonMarker) => {
@@ -145,19 +218,7 @@ const checks = async (inst, { parseJson, within, sleep, brief, shellQuote }, res
   // ─── story 14: harness watches (started first: the GitHub ones need one 60 s interval) ─────────
   const gh = installFakeGh(inst.state.scratch);
   const repo = `acc-org/acc-${nonce}`;
-  answer(gh, `repos/${repo}/pulls/1`, pull(true, 'closed', SHA_A));
-  answer(gh, `repos/${repo}/pulls/2`, pull(false, 'open', SHA_A), 1);
-  answer(gh, `repos/${repo}/pulls/2`, pull(false, 'open', SHA_B));
-  answer(gh, `repos/${repo}/pulls/3`, pull(false, 'open', SHA_C));
-  answer(gh, `repos/${repo}/commits/${SHA_C}/check-runs?per_page=100`, {
-    total_count: 3,
-    check_runs: [
-      { status: 'completed', conclusion: 'success' },
-      { status: 'completed', conclusion: 'failure' },
-      { status: 'completed', conclusion: 'skipped' },
-    ],
-  });
-  answer(gh, `repos/${repo}/commits/${SHA_C}/status`, { state: 'success', statuses: [{ state: 'success' }] });
+  writeWatchFixtures(gh, repo);
 
   const owner = await tab(wsA, `acc-w-owner-${nonce}`);
   const holder = await tab(wsA, `acc-w-holder-${nonce}`);
@@ -384,4 +445,4 @@ const checks = async (inst, { parseJson, within, sleep, brief, shellQuote }, res
 
 };
 
-module.exports = { wave3, judgeDeployLine, judgeDeployWithdrawal, judgeWatchLine, alertsFor, installFakeGh };
+module.exports = { wave3, judgeDeployLine, judgeDeployWithdrawal, judgeWatchLine, alertsFor, installFakeGh, answer, answerPr, pullNode, writeWatchFixtures, SHA_A, SHA_B, SHA_C };
